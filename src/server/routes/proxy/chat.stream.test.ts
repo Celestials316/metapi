@@ -3,6 +3,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { config } from '../../config.js';
 import { resetUpstreamEndpointRuntimeState } from '../../services/upstreamEndpointRuntimeMemory.js';
+import { resetCodexSessionResponseStore } from '../../proxy-core/runtime/codexSessionResponseStore.js';
 
 const fetchMock = vi.fn();
 const selectChannelMock = vi.fn();
@@ -72,6 +73,11 @@ vi.mock('../../services/proxyUsageFallbackService.js', () => ({
   resolveProxyUsageWithSelfLogFallback: (arg: any) => resolveProxyUsageWithSelfLogFallbackMock(arg),
 }));
 
+vi.mock('../../services/oauth/quota.js', () => ({
+  recordOauthQuotaResetHint: async () => undefined,
+  recordOauthQuotaHeadersSnapshot: async () => undefined,
+}));
+
 vi.mock('../../db/index.js', () => ({
   db: {
     insert: (arg: any) => dbInsertMock(arg),
@@ -133,6 +139,7 @@ describe('chat proxy stream behavior', () => {
     resolveProxyUsageWithSelfLogFallbackMock.mockClear();
     dbInsertMock.mockClear();
     resetUpstreamEndpointRuntimeState();
+    resetCodexSessionResponseStore();
 
     selectChannelMock.mockReturnValue({
       channel: { id: 11, routeId: 22 },
@@ -2661,6 +2668,323 @@ describe('chat proxy stream behavior', () => {
     expect(secondUrl).toContain('/v1/chat/completions');
     expect(thirdUrl).toContain('/v1/messages');
     expect(fourthUrl).toContain('/v1/responses');
+  });
+
+  it('infers previous_response_id for generic /v1/responses tool-output follow-up turns after a trusted native responses success', async () => {
+    selectChannelMock.mockReturnValue({
+      channel: { id: 11, routeId: 22 },
+      site: { name: 'generic-site', url: 'https://upstream.example.com', platform: 'new-api' },
+      account: { id: 33, username: 'demo-user' },
+      tokenName: 'default',
+      tokenValue: 'sk-demo',
+      actualModel: 'upstream-gpt',
+    });
+
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        id: 'resp_generic_prev_1',
+        object: 'response',
+        model: 'upstream-gpt',
+        status: 'completed',
+        output_text: 'tool call issued',
+        usage: { input_tokens: 4, output_tokens: 2, total_tokens: 6 },
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        id: 'resp_generic_prev_2',
+        object: 'response',
+        model: 'upstream-gpt',
+        status: 'completed',
+        output_text: 'tool result accepted',
+        usage: { input_tokens: 5, output_tokens: 2, total_tokens: 7 },
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }));
+
+    const headers = {
+      session_id: 'generic-session-prev-1',
+    };
+
+    const firstResponse = await app.inject({
+      method: 'POST',
+      url: '/v1/responses',
+      headers,
+      payload: {
+        model: 'gpt-5.4',
+        input: 'start generic tool flow',
+      },
+    });
+
+    expect(firstResponse.statusCode).toBe(200);
+
+    const secondResponse = await app.inject({
+      method: 'POST',
+      url: '/v1/responses',
+      headers,
+      payload: {
+        model: 'gpt-5.4',
+        input: [{
+          id: 'tool_out_1',
+          type: 'function_call_output',
+          call_id: 'call_1',
+          output: '{"ok":true}',
+        }],
+      },
+    });
+
+    expect(secondResponse.statusCode).toBe(200);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    const [firstUrl] = fetchMock.mock.calls[0] as [string, any];
+    const [secondUrl, secondOptions] = fetchMock.mock.calls[1] as [string, any];
+    expect(firstUrl).toContain('/v1/responses');
+    expect(secondUrl).toContain('/v1/responses');
+
+    const secondBody = JSON.parse(secondOptions.body);
+    expect(secondBody.previous_response_id).toBe('resp_generic_prev_1');
+    expect(secondBody.input).toEqual([
+      {
+        id: 'tool_out_1',
+        type: 'function_call_output',
+        call_id: 'call_1',
+        output: '{"ok":true}',
+      },
+    ]);
+  });
+
+  it('clears trusted generic responses anchors after a fallback success before the next tool-output follow-up', async () => {
+    selectChannelMock.mockReturnValue({
+      channel: { id: 11, routeId: 22 },
+      site: { name: 'generic-site', url: 'https://upstream.example.com', platform: 'new-api' },
+      account: { id: 33, username: 'demo-user' },
+      tokenName: 'default',
+      tokenValue: 'sk-demo',
+      actualModel: 'upstream-gpt',
+    });
+
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        id: 'resp_generic_anchor_1',
+        object: 'response',
+        model: 'upstream-gpt',
+        status: 'completed',
+        output_text: 'native anchor established',
+        usage: { input_tokens: 4, output_tokens: 2, total_tokens: 6 },
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        error: { message: 'Gateway time-out', type: 'upstream_error' },
+      }), {
+        status: 504,
+        headers: { 'content-type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        error: { message: 'Bad gateway', type: 'upstream_error' },
+      }), {
+        status: 502,
+        headers: { 'content-type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        id: 'msg_generic_fallback_1',
+        type: 'message',
+        model: 'upstream-gpt',
+        content: [{ type: 'text', text: 'ok via messages fallback after anchor' }],
+        stop_reason: 'end_turn',
+        usage: { input_tokens: 7, output_tokens: 3, total_tokens: 10 },
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        id: 'chatcmpl_generic_tool_followup',
+        object: 'chat.completion',
+        created: 1_706_000_000,
+        model: 'upstream-gpt',
+        choices: [{
+          index: 0,
+          message: { role: 'assistant', content: 'tool follow-up routed to chat first' },
+          finish_reason: 'stop',
+        }],
+        usage: { prompt_tokens: 6, completion_tokens: 2, total_tokens: 8 },
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }));
+
+    const headers = {
+      session_id: 'generic-session-clear-after-fallback',
+    };
+
+    const firstResponse = await app.inject({
+      method: 'POST',
+      url: '/v1/responses',
+      headers,
+      payload: {
+        model: 'gpt-5.4',
+        input: 'establish a native responses anchor',
+      },
+    });
+    expect(firstResponse.statusCode).toBe(200);
+
+    const secondResponse = await app.inject({
+      method: 'POST',
+      url: '/v1/responses',
+      headers,
+      payload: {
+        model: 'gpt-5.4',
+        input: 'force a fallback success on this turn',
+      },
+    });
+    expect(secondResponse.statusCode).toBe(200);
+    expect(secondResponse.json().output_text).toContain('ok via messages fallback after anchor');
+
+    const thirdResponse = await app.inject({
+      method: 'POST',
+      url: '/v1/responses',
+      headers,
+      payload: {
+        model: 'gpt-5.4',
+        input: [{
+          type: 'function_call_output',
+          call_id: 'call_after_fallback',
+          output: '{"ok":true}',
+        }],
+      },
+    });
+
+    expect(thirdResponse.statusCode).toBe(200);
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+
+    const [firstUrl] = fetchMock.mock.calls[0] as [string, any];
+    const [secondUrl] = fetchMock.mock.calls[1] as [string, any];
+    const [thirdUrl] = fetchMock.mock.calls[2] as [string, any];
+    const [fourthUrl] = fetchMock.mock.calls[3] as [string, any];
+    const [fifthUrl] = fetchMock.mock.calls[4] as [string, any];
+    expect(firstUrl).toContain('/v1/responses');
+    expect(secondUrl).toContain('/v1/responses');
+    expect(thirdUrl).toContain('/v1/chat/completions');
+    expect(fourthUrl).toContain('/v1/messages');
+    expect(fifthUrl).toContain('/v1/chat/completions');
+  });
+
+  it('clears stale trusted generic responses anchors when previous_response_not_found recovery succeeds without a fresh response id', async () => {
+    selectChannelMock.mockReturnValue({
+      channel: { id: 11, routeId: 22 },
+      site: { name: 'generic-site', url: 'https://upstream.example.com', platform: 'new-api' },
+      account: { id: 33, username: 'demo-user' },
+      tokenName: 'default',
+      tokenValue: 'sk-demo',
+      actualModel: 'upstream-gpt',
+    });
+
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        id: 'resp_generic_stale_1',
+        object: 'response',
+        model: 'upstream-gpt',
+        status: 'completed',
+        output_text: 'native anchor established',
+        usage: { input_tokens: 4, output_tokens: 2, total_tokens: 6 },
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        error: {
+          message: 'previous_response_not_found',
+          code: 'previous_response_not_found',
+          type: 'invalid_request_error',
+        },
+      }), {
+        status: 400,
+        headers: { 'content-type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        object: 'response',
+        model: 'upstream-gpt',
+        status: 'completed',
+        output_text: 'recovered without a fresh anchor id',
+        usage: { input_tokens: 5, output_tokens: 2, total_tokens: 7 },
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        id: 'chatcmpl_generic_after_prev_not_found',
+        object: 'chat.completion',
+        created: 1_706_000_001,
+        model: 'upstream-gpt',
+        choices: [{
+          index: 0,
+          message: { role: 'assistant', content: 'tool follow-up no longer trusts stale anchor' },
+          finish_reason: 'stop',
+        }],
+        usage: { prompt_tokens: 6, completion_tokens: 2, total_tokens: 8 },
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }));
+
+    const headers = {
+      session_id: 'generic-session-prev-not-found',
+    };
+
+    const firstResponse = await app.inject({
+      method: 'POST',
+      url: '/v1/responses',
+      headers,
+      payload: {
+        model: 'gpt-5.4',
+        input: 'establish stale anchor',
+      },
+    });
+    expect(firstResponse.statusCode).toBe(200);
+
+    const secondResponse = await app.inject({
+      method: 'POST',
+      url: '/v1/responses',
+      headers,
+      payload: {
+        model: 'gpt-5.4',
+        input: [{
+          type: 'function_call_output',
+          call_id: 'call_prev_not_found',
+          output: '{"retry":true}',
+        }],
+      },
+    });
+    expect(secondResponse.statusCode).toBe(200);
+
+    const thirdResponse = await app.inject({
+      method: 'POST',
+      url: '/v1/responses',
+      headers,
+      payload: {
+        model: 'gpt-5.4',
+        input: [{
+          type: 'function_call_output',
+          call_id: 'call_after_prev_not_found',
+          output: '{"ok":true}',
+        }],
+      },
+    });
+    expect(thirdResponse.statusCode).toBe(200);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+
+    const [, secondAttemptOptions] = fetchMock.mock.calls[1] as [string, any];
+    const [, thirdAttemptOptions] = fetchMock.mock.calls[2] as [string, any];
+    const [fourthUrl] = fetchMock.mock.calls[3] as [string, any];
+    const secondAttemptBody = JSON.parse(secondAttemptOptions.body);
+    const thirdAttemptBody = JSON.parse(thirdAttemptOptions.body);
+
+    expect(secondAttemptBody.previous_response_id).toBe('resp_generic_stale_1');
+    expect(thirdAttemptBody.previous_response_id).toBeUndefined();
+    expect(fourthUrl).toContain('/v1/chat/completions');
   });
 
   it('prefers native /v1/responses for claude-family /v1/responses requests that explicitly ask for encrypted reasoning', async () => {

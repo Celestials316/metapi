@@ -97,6 +97,7 @@ vi.mock('../../services/proxyUsageFallbackService.js', () => ({
 
 vi.mock('../../services/oauth/quota.js', () => ({
   recordOauthQuotaResetHint: async () => undefined,
+  recordOauthQuotaHeadersSnapshot: async () => undefined,
 }));
 
 vi.mock('../../db/index.js', () => ({
@@ -1209,8 +1210,9 @@ describe('responses websocket transport', () => {
     socket.close();
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
-    const [, secondOptions] = fetchMock.mock.calls[1] as [string, RequestInit];
+    const [secondUrl, secondOptions] = fetchMock.mock.calls[1] as [string, RequestInit];
     const secondBody = JSON.parse(String(secondOptions.body));
+    expect(String(secondUrl)).toContain('/v1/responses');
     expect(secondBody.previous_response_id).toBeUndefined();
     expect(secondBody.model).toBe('gpt-4.1');
     expect(secondBody.instructions).toBe('be helpful');
@@ -1229,6 +1231,107 @@ describe('responses websocket transport', () => {
     });
     expect(secondBody.input[2]).toEqual({
       id: 'tool_out_1',
+      type: 'function_call_output',
+      call_id: 'call_1',
+      output: 'tool result',
+    });
+  });
+
+  it('does not re-infer previous_response_id for non-incremental websocket HTTP replay turns even when a native responses anchor exists', async () => {
+    rejectedUpgradeStatus = 426;
+    rejectedUpgradeStatusText = 'Upgrade Required';
+    rejectedUpgradeBody = JSON.stringify({
+      error: {
+        message: 'upgrade required',
+        type: 'invalid_request_error',
+      },
+    });
+
+    const selectedChannel = createSelectedChannel({
+      sitePlatform: 'openai',
+      siteUrl: rejectedUpgradeSiteUrl,
+      actualModel: 'gpt-4.1',
+    });
+    selectChannelMock.mockReturnValue(selectedChannel);
+    previewSelectedChannelMock.mockResolvedValue(selectedChannel);
+    fetchMock
+      .mockResolvedValueOnce(createSseResponse([
+        'event: response.incomplete\n',
+        'data: {"type":"response.incomplete","response":{"id":"resp_http_anchor_1","model":"gpt-4.1","status":"incomplete","output":[{"id":"msg_anchor_1","type":"message","role":"assistant","status":"incomplete","content":[{"type":"output_text","text":"partial tool call"}]}],"output_text":"partial tool call","incomplete_details":{"reason":"max_output_tokens"},"usage":{"input_tokens":3,"output_tokens":1,"total_tokens":4}}}\n\n',
+        'data: [DONE]\n\n',
+      ]))
+      .mockResolvedValueOnce(createSseResponse([
+        'event: response.completed\n',
+        'data: {"type":"response.completed","response":{"id":"resp_http_anchor_2","model":"gpt-4.1","status":"completed","output":[{"id":"msg_anchor_2","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"done"}]}],"usage":{"input_tokens":5,"output_tokens":1,"total_tokens":6}}}\n\n',
+        'data: [DONE]\n\n',
+      ]));
+
+    const socket = createClientSocket(baseUrl, {
+      session_id: 'ws-http-replay-anchor',
+    });
+    await waitForSocketOpen(socket);
+
+    const firstResponsePromise = waitForSocketMessageMatching(
+      socket,
+      (message) => message?.type === 'response.incomplete',
+    );
+    socket.send(JSON.stringify({
+      type: 'response.create',
+      model: 'gpt-4.1',
+      instructions: 'be helpful',
+      input: [
+        {
+          id: 'msg_user_anchor_1',
+          type: 'message',
+          role: 'user',
+          content: [{ type: 'input_text', text: 'call the tool' }],
+        },
+      ],
+    }));
+    await firstResponsePromise;
+
+    const secondResponsePromise = waitForSocketMessageMatching(
+      socket,
+      (message) => message?.type === 'response.completed',
+    );
+    socket.send(JSON.stringify({
+      type: 'response.create',
+      previous_response_id: 'resp_http_anchor_1',
+      input: [
+        {
+          id: 'tool_out_anchor_1',
+          type: 'function_call_output',
+          call_id: 'call_1',
+          output: 'tool result',
+        },
+      ],
+    }));
+    await secondResponsePromise;
+    socket.close();
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const [secondUrl, secondOptions] = fetchMock.mock.calls[1] as [string, RequestInit];
+    const secondBody = JSON.parse(String(secondOptions.body));
+
+    expect(String(secondUrl)).toContain('/v1/responses');
+    expect(secondBody.previous_response_id).toBeUndefined();
+    expect(secondBody.instructions).toBe('be helpful');
+    expect(secondBody.input).toHaveLength(3);
+    expect(secondBody.input[0]).toEqual({
+      id: 'msg_user_anchor_1',
+      type: 'message',
+      role: 'user',
+      content: [{ type: 'input_text', text: 'call the tool' }],
+    });
+    expect(secondBody.input[1]).toMatchObject({
+      id: 'msg_anchor_1',
+      type: 'message',
+      role: 'assistant',
+      status: 'incomplete',
+      content: [{ type: 'output_text', text: 'partial tool call' }],
+    });
+    expect(secondBody.input[2]).toEqual({
+      id: 'tool_out_anchor_1',
       type: 'function_call_output',
       call_id: 'call_1',
       output: 'tool result',

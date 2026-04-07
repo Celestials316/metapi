@@ -11,6 +11,14 @@ const RESPONSES_TOOL_OUTPUT_TYPES = new Set([
   'custom_tool_call_output',
 ]);
 
+const RESPONSES_TOOL_CALL_CONTEXT_TYPES = new Set([
+  'tool_call',
+  'function_call',
+  'custom_tool_call',
+]);
+
+const RESPONSES_ITEM_REFERENCE_TYPE = 'item_reference';
+
 const RESPONSES_TERMINAL_STATUSES = new Set([
   'completed',
   'failed',
@@ -46,14 +54,88 @@ function collectResponsesErrorFragments(value: unknown): string[] {
   return fragments;
 }
 
+export type ResponsesContinuationSignals = {
+  hasToolOutput: boolean;
+  hasToolOutputMissingCallId: boolean;
+  hasToolCallContext: boolean;
+  hasItemReference: boolean;
+  hasItemReferenceForAllToolCallIds: boolean;
+  toolOutputCallIds: string[];
+};
+
+export function analyzeResponsesContinuationSignals(input: unknown): ResponsesContinuationSignals {
+  const signals: ResponsesContinuationSignals = {
+    hasToolOutput: false,
+    hasToolOutputMissingCallId: false,
+    hasToolCallContext: false,
+    hasItemReference: false,
+    hasItemReferenceForAllToolCallIds: false,
+    toolOutputCallIds: [],
+  };
+  if (!Array.isArray(input)) return signals;
+
+  const toolOutputCallIds = new Set<string>();
+  const itemReferenceIds = new Set<string>();
+
+  for (const item of input) {
+    if (!isRecord(item)) continue;
+
+    const type = asTrimmedString(item.type).toLowerCase();
+    if (!type) continue;
+
+    if (RESPONSES_TOOL_CALL_CONTEXT_TYPES.has(type)) {
+      if (asTrimmedString(item.call_id).length > 0) {
+        signals.hasToolCallContext = true;
+      }
+      continue;
+    }
+
+    if (type === RESPONSES_ITEM_REFERENCE_TYPE) {
+      signals.hasItemReference = true;
+      const itemReferenceId = asTrimmedString(item.id);
+      if (itemReferenceId) {
+        itemReferenceIds.add(itemReferenceId);
+      }
+      continue;
+    }
+
+    if (!RESPONSES_TOOL_OUTPUT_TYPES.has(type)) continue;
+
+    signals.hasToolOutput = true;
+    const callId = asTrimmedString(item.call_id ?? item.id);
+    if (!callId) {
+      signals.hasToolOutputMissingCallId = true;
+      continue;
+    }
+    toolOutputCallIds.add(callId);
+  }
+
+  signals.toolOutputCallIds = [...toolOutputCallIds];
+  if (toolOutputCallIds.size === 0 || itemReferenceIds.size === 0) {
+    return signals;
+  }
+
+  signals.hasItemReferenceForAllToolCallIds = [...toolOutputCallIds]
+    .every((callId) => itemReferenceIds.has(callId));
+  return signals;
+}
+
 function hasResponsesToolOutput(input: unknown): boolean {
   if (!Array.isArray(input)) return false;
-  return input.some((item) => {
-    if (!isRecord(item)) return false;
-    const type = asTrimmedString(item.type).toLowerCase();
-    if (!RESPONSES_TOOL_OUTPUT_TYPES.has(type)) return false;
-    return asTrimmedString(item.call_id ?? item.id).length > 0;
-  });
+  return analyzeResponsesContinuationSignals(input).hasToolOutput;
+}
+
+export function hasOrphanToolOutputFollowUp(
+  body: Record<string, unknown> | null | undefined,
+): boolean {
+  if (!body) return false;
+  if (asTrimmedString(body.previous_response_id)) return false;
+
+  const signals = analyzeResponsesContinuationSignals(body.input);
+  if (!signals.hasToolOutput) return false;
+  if (signals.hasToolCallContext) return false;
+  if (signals.hasItemReferenceForAllToolCallIds) return false;
+  return true;
 }
 
 export function shouldInferResponsesPreviousResponseId(

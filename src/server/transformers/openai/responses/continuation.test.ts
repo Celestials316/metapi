@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  analyzeResponsesContinuationSignals,
   extractResponsesTerminalResponseId,
+  hasOrphanToolOutputFollowUp,
   isResponsesPreviousResponseNotFoundError,
   shouldInferResponsesPreviousResponseId,
   stripResponsesPreviousResponseId,
@@ -56,6 +58,60 @@ describe('responses continuation helpers', () => {
     expect(stripped.removed).toBe(true);
     expect(stripped.body.previous_response_id).toBeUndefined();
     expect(stripped.body.input).toEqual(body.input);
+  });
+
+  it('detects orphan tool-output follow-up turns only when no inline continuation context exists', () => {
+    expect(hasOrphanToolOutputFollowUp({
+      input: [{
+        type: 'function_call_output',
+        call_id: 'call_1',
+        output: '{"ok":true}',
+      }],
+    })).toBe(true);
+
+    expect(hasOrphanToolOutputFollowUp({
+      input: [
+        {
+          type: 'function_call',
+          call_id: 'call_1',
+          name: 'search',
+          arguments: '{}',
+        },
+        {
+          type: 'function_call_output',
+          call_id: 'call_1',
+          output: '{"ok":true}',
+        },
+      ],
+    })).toBe(false);
+
+    expect(hasOrphanToolOutputFollowUp({
+      previous_response_id: 'resp_prev_1',
+      input: [{
+        type: 'function_call_output',
+        call_id: 'call_1',
+        output: '{"ok":true}',
+      }],
+    })).toBe(false);
+  });
+
+  it('tracks inline item references for tool-output continuation signals', () => {
+    expect(analyzeResponsesContinuationSignals([
+      {
+        type: 'function_call_output',
+        call_id: 'call_1',
+        output: '{"ok":true}',
+      },
+      {
+        type: 'item_reference',
+        id: 'call_1',
+      },
+    ])).toMatchObject({
+      hasToolOutput: true,
+      hasItemReference: true,
+      hasItemReferenceForAllToolCallIds: true,
+      toolOutputCallIds: ['call_1'],
+    });
   });
 
   it('detects previous_response_not_found from either raw text or structured payloads', () => {
