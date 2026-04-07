@@ -202,7 +202,7 @@ describeIfBetterSqlite('accounts connection probe route', { timeout: 15_000 }, (
     }));
   });
 
-  it('returns a friendly success placeholder when upstream omits reply text', async () => {
+  it('returns a failed probe result when upstream omits reply text entirely', async () => {
     dispatchRuntimeRequestMock.mockResolvedValue(new Response(JSON.stringify({
       id: 'resp_probe_empty',
       model: 'gpt-5.4',
@@ -253,12 +253,11 @@ describeIfBetterSqlite('accounts connection probe route', { timeout: 15_000 }, (
 
     expect(response.statusCode).toBe(200);
     expect(response.json()).toMatchObject({
-      success: true,
-      statusText: '服务正常',
-      replyText: '模型已正常响应，但未返回可展示文本',
+      success: false,
+      statusText: '测活失败',
+      errorMessage: '上游已响应，但未返回任何可展示文本',
       model: 'gpt-5.4',
     });
-    expect(response.body).not.toContain('"choices"');
   });
 
   it('rejects malformed probe payloads at the route boundary', async () => {
