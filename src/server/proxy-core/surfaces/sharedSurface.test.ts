@@ -494,7 +494,7 @@ describe('selectSurfaceChannelForAttempt', () => {
       status: 429,
       errorText: '{"error":"quota exceeded"}',
       modelName: 'upstream-model',
-    });
+    }, 33);
     expect(recordOauthQuotaResetHintMock).toHaveBeenCalledWith({
       accountId: 33,
       statusCode: 429,
@@ -698,7 +698,7 @@ describe('selectSurfaceChannelForAttempt', () => {
       status: 500,
       errorText: 'upstream failure',
       modelName: 'upstream-model',
-    });
+    }, 33);
     expect(reportProxyAllFailedMock).toHaveBeenCalledWith({
       model: 'gpt-5.2',
       reason: 'upstream failure',
@@ -747,7 +747,7 @@ describe('selectSurfaceChannelForAttempt', () => {
     expect(recordFailureMock).toHaveBeenCalledWith(11, {
       errorText: 'socket hang up',
       modelName: 'upstream-model',
-    });
+    }, 33);
     expect(reportProxyAllFailedMock).toHaveBeenCalledWith({
       model: 'gpt-5.2',
       reason: 'socket hang up',
@@ -785,7 +785,7 @@ describe('selectSurfaceChannelForAttempt', () => {
     expect(recordFailureMock).toHaveBeenCalledWith(11, {
       errorText: 'stream exploded',
       modelName: 'upstream-model',
-    });
+    }, 33);
   });
 
   it('refreshes oauth tokens through the shared recover helper and retries the rebuilt request', async () => {
@@ -986,7 +986,7 @@ describe('selectSurfaceChannelForAttempt', () => {
         usageSource: 'self-log',
       },
     });
-    expect(recordSuccessMock).toHaveBeenCalledWith(11, 250, 0.42, 'upstream-model');
+    expect(recordSuccessMock).toHaveBeenCalledWith(11, 250, 0.42, 'upstream-model', 33);
     expect(recordDownstreamCost).toHaveBeenCalledWith(0.42);
     expect(logSuccess).toHaveBeenCalledWith({
       selected: {
@@ -1169,7 +1169,7 @@ describe('selectSurfaceChannelForAttempt', () => {
       '[proxy/chat] failed to record success metrics',
       expect.any(Error),
     );
-    expect(recordSuccessMock).toHaveBeenCalledWith(11, 250, 0, 'upstream-model');
+    expect(recordSuccessMock).toHaveBeenCalledWith(11, 250, 0, 'upstream-model', 33);
     expect(recordDownstreamCost).toHaveBeenCalledWith(0);
     expect(logSuccess).toHaveBeenCalledWith(expect.objectContaining({
       promptTokens: 10,
