@@ -144,6 +144,56 @@ describe('balanceService auto relogin', () => {
     expect(reportTokenExpiredMock).not.toHaveBeenCalled();
   });
 
+  it('persists refreshed sub2api managed auth when auto relogin succeeds', async () => {
+    selectAllMock.mockReturnValue([
+      {
+        accounts: {
+          id: 11,
+          username: 'sub2@example.com',
+          accessToken: 'expired-access-token',
+          status: 'active',
+          extraConfig: JSON.stringify({
+            autoRelogin: { username: 'sub2@example.com', passwordCipher: 'cipher' },
+            sub2apiAuth: { refreshToken: 'old-refresh-token' },
+          }),
+        },
+        sites: {
+          id: 11,
+          name: 'sub2',
+          url: 'https://sub2.example.com',
+          platform: 'sub2api',
+        },
+      },
+    ]);
+
+    adapterMock.getBalance
+      .mockRejectedValueOnce(new Error('HTTP 401: unauthorized'))
+      .mockResolvedValueOnce({ balance: 12, used: 1, quota: 13 });
+    decryptPasswordMock.mockReturnValue('plain-password');
+    adapterMock.login.mockResolvedValue({
+      success: true,
+      accessToken: 'fresh-access-token',
+      refreshToken: 'fresh-refresh-token',
+      tokenExpiresAt: 1760000000000,
+    });
+
+    const { refreshBalance } = await import('./balanceService.js');
+    const result = await refreshBalance(11);
+
+    expect(result).toEqual({ balance: 12, used: 1, quota: 13 });
+    const updateWithManagedAuth = updateSetMock.mock.calls
+      .map((call) => call[0] as Record<string, unknown>)
+      .find((payload) => typeof payload.extraConfig === 'string' && String(payload.extraConfig).includes('fresh-refresh-token'));
+    expect(updateWithManagedAuth).toBeDefined();
+    const parsedExtra = JSON.parse(String(updateWithManagedAuth?.extraConfig)) as {
+      sub2apiAuth?: { refreshToken?: string; tokenExpiresAt?: number };
+    };
+    expect(parsedExtra.sub2apiAuth).toEqual({
+      refreshToken: 'fresh-refresh-token',
+      tokenExpiresAt: 1760000000000,
+    });
+  });
+
   it('reports token expired when relogin is unavailable', async () => {
     selectAllMock.mockReturnValue([
       {
@@ -378,6 +428,64 @@ describe('balanceService auto relogin', () => {
     );
 
     expect(adapterMock.login).not.toHaveBeenCalled();
+  });
+
+  it('falls back to auto relogin when sub2api managed refresh is rejected', async () => {
+    selectAllMock.mockReturnValue([
+      {
+        accounts: {
+          id: 14,
+          username: 'sub2@example.com',
+          accessToken: 'expired-access-token',
+          status: 'active',
+          extraConfig: JSON.stringify({
+            autoRelogin: { username: 'sub2@example.com', passwordCipher: 'cipher' },
+            sub2apiAuth: {
+              refreshToken: 'refresh-token-invalid',
+            },
+          }),
+        },
+        sites: {
+          id: 14,
+          name: 'sub2',
+          url: 'https://sub2.example.com',
+          platform: 'sub2api',
+        },
+      },
+    ]);
+
+    adapterMock.getBalance
+      .mockRejectedValueOnce(new Error('HTTP 401: unauthorized'))
+      .mockResolvedValueOnce({ balance: 18, used: 2, quota: 20 });
+    undiciFetchMock.mockResolvedValueOnce({
+      ok: false,
+      status: 401,
+      text: async () => JSON.stringify({
+        code: 401,
+        message: 'invalid refresh token',
+        reason: 'REFRESH_TOKEN_INVALID',
+      }),
+      json: async () => ({
+        code: 401,
+        message: 'invalid refresh token',
+        reason: 'REFRESH_TOKEN_INVALID',
+      }),
+    });
+    decryptPasswordMock.mockReturnValue('plain-password');
+    adapterMock.login.mockResolvedValue({
+      success: true,
+      accessToken: 'relogin-access-token',
+      refreshToken: 'relogin-refresh-token',
+      tokenExpiresAt: 1761000000000,
+    });
+
+    const { refreshBalance } = await import('./balanceService.js');
+    const result = await refreshBalance(14);
+
+    expect(result).toEqual({ balance: 18, used: 2, quota: 20 });
+    expect(adapterMock.login).toHaveBeenCalledTimes(1);
+    expect(adapterMock.getBalance).toHaveBeenCalledTimes(2);
+    expect(adapterMock.getBalance.mock.calls[1]?.[1]).toBe('relogin-access-token');
   });
 
   it('skips balance refresh for api-key-only accounts without expiring them', async () => {

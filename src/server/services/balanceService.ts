@@ -208,7 +208,7 @@ async function fetchTodayIncomeFromLogs(params: {
   return Math.round(totalIncome * 1_000_000) / 1_000_000;
 }
 
-async function tryAutoRelogin(account: any, site: any): Promise<string | null> {
+async function tryAutoRelogin(account: any, site: any): Promise<{ accessToken: string; extraConfig: string | null } | null> {
   const adapter = getAdapter(site.platform);
   if (!adapter) return null;
 
@@ -224,16 +224,29 @@ async function tryAutoRelogin(account: any, site: any): Promise<string | null> {
   );
   if (!loginResult.success || !loginResult.accessToken) return null;
 
+  let nextExtraConfig = account.extraConfig;
+  if (isSub2ApiPlatform(site.platform) && loginResult.refreshToken) {
+    nextExtraConfig = mergeAccountExtraConfig(account.extraConfig, {
+      sub2apiAuth: loginResult.tokenExpiresAt
+        ? { refreshToken: loginResult.refreshToken, tokenExpiresAt: loginResult.tokenExpiresAt }
+        : { refreshToken: loginResult.refreshToken },
+    });
+  }
+
   await db.update(schema.accounts)
     .set({
       accessToken: loginResult.accessToken,
+      extraConfig: nextExtraConfig,
       status: account.status === 'expired' ? 'active' : account.status,
       updatedAt: new Date().toISOString(),
     })
     .where(eq(schema.accounts.id, account.id))
     .run();
 
-  return loginResult.accessToken;
+  return {
+    accessToken: loginResult.accessToken,
+    extraConfig: nextExtraConfig,
+  };
 }
 
 export async function refreshBalance(accountId: number) {
@@ -340,12 +353,24 @@ export async function refreshBalance(accountId: number) {
         activeExtraConfig = refreshed.extraConfig;
         balanceInfo = await readBalance(activeAccessToken);
       } catch (retryErr: any) {
-        await handleBalanceError(retryErr);
+        const reloginResult = await tryAutoRelogin(account, site);
+        if (reloginResult) {
+          activeAccessToken = reloginResult.accessToken;
+          activeExtraConfig = reloginResult.extraConfig;
+          try {
+            balanceInfo = await readBalance(activeAccessToken);
+          } catch (reloginErr: any) {
+            await handleBalanceError(reloginErr);
+          }
+        } else {
+          await handleBalanceError(retryErr);
+        }
       }
     } else if (shouldAttemptAutoRelogin(message)) {
-      const refreshedAccessToken = await tryAutoRelogin(account, site);
-      if (refreshedAccessToken) {
-        activeAccessToken = refreshedAccessToken;
+      const reloginResult = await tryAutoRelogin(account, site);
+      if (reloginResult) {
+        activeAccessToken = reloginResult.accessToken;
+        activeExtraConfig = reloginResult.extraConfig;
         try {
           balanceInfo = await readBalance(activeAccessToken);
         } catch (retryErr: any) {

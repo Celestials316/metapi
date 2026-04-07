@@ -1,6 +1,11 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { AddressInfo } from 'node:net';
+
+vi.mock('../siteProxy.js', () => ({
+  withSiteProxyRequestInit: async (_url: string, init: unknown) => init,
+}));
+
 import { Sub2ApiAdapter } from './sub2api.js';
 
 describe('Sub2ApiAdapter', () => {
@@ -462,9 +467,63 @@ describe('Sub2ApiAdapter', () => {
     await expect(adapter.getBalance(baseUrl, 'expired-token')).rejects.toThrow();
   });
 
-  it('login returns unsupported', async () => {
-    const result = await adapter.login('http://localhost', 'user', 'pass');
-    expect(result.success).toBe(false);
+  it('logs in through /api/v1/auth/login with email/password and returns managed refresh metadata', async () => {
+    await startServer(async (req, res) => {
+      if (req.url === '/api/v1/auth/login' && req.method === 'POST') {
+        let raw = '';
+        for await (const chunk of req) raw += chunk;
+        expect(req.headers.origin).toBe(baseUrl);
+        expect(req.headers.referer).toBe(`${baseUrl}/login`);
+        expect(JSON.parse(raw)).toEqual({
+          email: 'user@example.com',
+          password: 'pass-123',
+        });
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          code: 0,
+          message: 'success',
+          data: {
+            access_token: 'jwt-access-token',
+            refresh_token: 'rt-refresh-token',
+            expires_in: 86400,
+          },
+        }));
+        return;
+      }
+      res.writeHead(404).end();
+    });
+
+    const now = Date.now();
+    const result = await adapter.login(baseUrl, 'user@example.com', 'pass-123');
+    expect(result).toMatchObject({
+      success: true,
+      accessToken: 'jwt-access-token',
+      refreshToken: 'rt-refresh-token',
+      username: 'user@example.com',
+    });
+    expect(result.tokenExpiresAt).toBeGreaterThanOrEqual(now + 86_300_000);
+    expect(result.tokenExpiresAt).toBeLessThanOrEqual(now + 86_500_000);
+  });
+
+  it('returns a friendly login failure message when sub2api envelope rejects credentials', async () => {
+    await startServer(async (req, res) => {
+      if (req.url === '/api/v1/auth/login' && req.method === 'POST') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          code: 400,
+          message: 'invalid email or password',
+          data: null,
+        }));
+        return;
+      }
+      res.writeHead(404).end();
+    });
+
+    const result = await adapter.login(baseUrl, 'user@example.com', 'bad-pass');
+    expect(result).toEqual({
+      success: false,
+      message: 'invalid email or password',
+    });
   });
 
   it('accepts bearer-prefixed access tokens when verifying session tokens', async () => {

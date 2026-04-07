@@ -6,6 +6,7 @@ import {
   CreateApiTokenOptions,
   SubscriptionPlanSummary,
   SubscriptionSummary,
+  type LoginResult,
   type SiteAnnouncement,
   UserInfo,
 } from './base.js';
@@ -680,13 +681,52 @@ export class Sub2ApiAdapter extends BasePlatformAdapter {
     return Math.round(Math.max(0, balanceUsd) * 500000);
   }
 
-  // --- Login: Not supported (JWT only) ---
+  // --- Login ---
   override async login(
-    _baseUrl: string,
-    _username: string,
-    _password: string,
-  ): Promise<{ success: false; message: string }> {
-    return { success: false, message: 'Sub2API uses JWT authentication; login is not supported' };
+    baseUrl: string,
+    username: string,
+    password: string,
+  ): Promise<LoginResult> {
+    const normalizedBase = normalizeBaseUrl(baseUrl);
+    const endpoint = '/api/v1/auth/login';
+    try {
+      const res = await this.fetchJson<any>(`${normalizedBase}${endpoint}`, {
+        method: 'POST',
+        body: JSON.stringify({ email: username, password }),
+        headers: {
+          Origin: normalizedBase,
+          Referer: `${normalizedBase}/login`,
+        },
+      });
+      const data = this.parseSub2ApiEnvelope<any>(res, endpoint);
+      const accessToken = this.stripBearerPrefix(typeof data?.access_token === 'string' ? data.access_token : '');
+      if (!accessToken) {
+        return { success: false, message: '登录失败：未获取到 access_token' };
+      }
+
+      const refreshToken = typeof data?.refresh_token === 'string'
+        ? data.refresh_token.trim()
+        : '';
+      const expiresInSeconds = typeof data?.expires_in === 'number' && Number.isFinite(data.expires_in)
+        ? data.expires_in
+        : (typeof data?.expires_in === 'string' ? Number.parseInt(data.expires_in.trim(), 10) : Number.NaN);
+      const tokenExpiresAt = Number.isFinite(expiresInSeconds) && expiresInSeconds > 0
+        ? Date.now() + Math.trunc(expiresInSeconds) * 1000
+        : undefined;
+
+      return {
+        success: true,
+        accessToken,
+        username,
+        refreshToken: refreshToken || undefined,
+        tokenExpiresAt,
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        message: err?.message || '登录请求失败',
+      };
+    }
   }
 
   // --- User Info ---

@@ -7,6 +7,8 @@ describe('Accounts model modal extraction', () => {
     const source = readFileSync(resolve(process.cwd(), 'src/web/pages/Accounts.tsx'), 'utf8').replace(/\r\n/g, '\n');
 
     expect(source).toContain("import AccountModelsModal from './accounts/AccountModelsModal.js'");
+    expect(source).toContain("import AccountProbeModal from './accounts/AccountProbeModal.js'");
+    expect(source).toContain('<AccountProbeModal');
     expect(source).not.toContain('open={modelModal.open}');
   });
 });

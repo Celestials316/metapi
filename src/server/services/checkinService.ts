@@ -14,6 +14,7 @@ import {
   resolveProxyUrlFromExtraConfig,
   resolvePlatformUserId,
 } from './accountExtraConfig.js';
+import { isSub2ApiPlatform } from './sub2apiManagedAuth.js';
 import { decryptAccountPassword } from './accountCredentialService.js';
 import { setAccountRuntimeHealth } from './accountHealthService.js';
 import { formatUtcSqlDateTime } from './localTimeService.js';
@@ -108,9 +109,18 @@ async function tryAutoRelogin(account: any, site: any): Promise<string | null> {
   );
   if (!result.success || !result.accessToken) return null;
 
+  const nextExtraConfig = isSub2ApiPlatform(site.platform) && result.refreshToken
+    ? mergeAccountExtraConfig(account.extraConfig, {
+      sub2apiAuth: result.tokenExpiresAt
+        ? { refreshToken: result.refreshToken, tokenExpiresAt: result.tokenExpiresAt }
+        : { refreshToken: result.refreshToken },
+    })
+    : account.extraConfig;
+
   await db.update(schema.accounts)
     .set({
       accessToken: result.accessToken,
+      extraConfig: nextExtraConfig,
       updatedAt: new Date().toISOString(),
       status: account.status === 'expired' ? 'active' : account.status,
     })

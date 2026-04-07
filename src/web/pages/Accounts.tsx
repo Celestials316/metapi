@@ -12,6 +12,7 @@ import { useIsMobile } from '../components/useIsMobile.js';
 import DeleteConfirmModal from '../components/DeleteConfirmModal.js';
 import SiteBadgeLink from '../components/SiteBadgeLink.js';
 import AccountModelsModal from './accounts/AccountModelsModal.js';
+import AccountProbeModal from './accounts/AccountProbeModal.js';
 import {
   buildAddAccountPrereqHint,
   buildVerifyFailureHint,
@@ -123,6 +124,8 @@ export default function Accounts() {
   const [rebindVerifyResult, setRebindVerifyResult] = useState<any>(null);
   const [rebindVerifying, setRebindVerifying] = useState(false);
   const [rebindSaving, setRebindSaving] = useState(false);
+  const [probeModalOpen, setProbeModalOpen] = useState(false);
+  const [probeAccount, setProbeAccount] = useState<any | null>(null);
   const [modelModal, setModelModal] = useState<{
     open: boolean;
     account: any | null;
@@ -523,6 +526,15 @@ export default function Accounts() {
   const closeModelModal = () => {
     modelModalRequestSeqRef.current += 1;
     setModelModal(s => ({ ...s, open: false, account: null, manualModelsInput: '', addingManualModels: false }));
+  };
+
+  const openProbeModal = (account: any) => {
+    setProbeAccount(account);
+    setProbeModalOpen(true);
+  };
+
+  const closeProbeModal = () => {
+    setProbeModalOpen(false);
   };
 
   const toggleModelDisabled = (modelName: string) => {
@@ -1739,6 +1751,13 @@ export default function Accounts() {
                             >
                               模型
                             </button>
+                            <button
+                              onClick={() => openProbeModal(a)}
+                              className="btn btn-link btn-link-primary"
+                              data-testid={`account-probe-${a.id}`}
+                            >
+                              测活
+                            </button>
                           </>
                         )}
                       >
@@ -2042,6 +2061,13 @@ export default function Accounts() {
                             >
                               模型
                             </button>
+                            <button
+                              onClick={() => openProbeModal(a)}
+                              className="btn btn-link btn-link-primary"
+                              data-testid={`account-probe-${a.id}`}
+                            >
+                              测活
+                            </button>
                             {capabilities.canCheckin && (
                               <button onClick={() => withLoading(`checkin-${a.id}`, () => api.triggerCheckin(a.id), '签到完成')} disabled={actionLoading[`checkin-${a.id}`]} className="btn btn-link btn-link-warning">
                                 {actionLoading[`checkin-${a.id}`] ? <span className="spinner spinner-sm" /> : '签到'}
@@ -2101,6 +2127,11 @@ export default function Accounts() {
         onSetPendingDisabled={(pendingDisabled) => setModelModal((state) => ({ ...state, pendingDisabled }))}
         onManualInputChange={(value) => setModelModal((state) => ({ ...state, manualModelsInput: value }))}
         onAddManualModels={handleAddManualModels}
+      />
+      <AccountProbeModal
+        open={probeModalOpen}
+        account={probeAccount}
+        onClose={closeProbeModal}
       />
     </div>
   );

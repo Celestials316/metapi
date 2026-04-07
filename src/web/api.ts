@@ -397,6 +397,15 @@ export type RuntimeSettingsPayload = {
   globalAllowedModels?: string[];
 };
 
+export type AccountProbeChatResponse = {
+  success: boolean;
+  statusText: string;
+  replyText?: string;
+  errorMessage?: string;
+  latencyMs: number | null;
+  model: string;
+};
+
 export type ProxyLogStatusFilter = 'all' | 'success' | 'failed';
 export type ProxyLogClientConfidence = 'exact' | 'heuristic' | 'unknown' | null;
 export type ProxyLogUsageSource = 'upstream' | 'self-log' | 'unknown' | null;
@@ -765,6 +774,7 @@ export const api = {
   batchUpdateAccounts: (data: any) => request('/api/accounts/batch', { method: 'POST', body: JSON.stringify(data) }),
   refreshBalance: (id: number) => request(`/api/accounts/${id}/balance`, { method: 'POST' }),
   getAccountModels: (id: number) => request(`/api/accounts/${id}/models`),
+  probeAccountChat: (accountId: number, data: { model: string }) => request(`/api/accounts/${accountId}/probe-chat`, { method: 'POST', body: JSON.stringify(data) }) as Promise<AccountProbeChatResponse>,
   addAccountAvailableModels: (accountId: number, models: string[]) => request(`/api/accounts/${accountId}/models/manual`, { method: 'POST', body: JSON.stringify({ models }) }),
   refreshAccountHealth: (data?: { accountId?: number; wait?: boolean }) => request('/api/accounts/health/refresh', {
     method: 'POST',

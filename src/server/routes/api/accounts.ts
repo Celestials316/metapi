@@ -39,11 +39,13 @@ import {
   parseAccountHealthRefreshPayload,
   parseAccountLoginPayload,
   parseAccountManualModelsPayload,
+  parseAccountProbeChatPayload,
   parseAccountRebindSessionPayload,
   parseAccountUpdatePayload,
   parseAccountVerifyTokenPayload,
 } from '../../contracts/accountsRoutePayloads.js';
 import { requireSiteApiBaseUrl, runWithSiteApiEndpointPool } from '../../services/siteApiEndpointService.js';
+import { isAccountProbeServiceError, probeAccountChat } from '../../services/accountProbeService.js';
 
 type AccountWithSiteRow = {
   accounts: typeof schema.accounts.$inferSelect;
@@ -608,6 +610,18 @@ export async function accountsRoutes(app: FastifyInstance) {
     };
     if (guessedPlatformUserId) {
       extraConfigPatch.platformUserId = guessedPlatformUserId;
+    }
+    if ((site.platform || '').toLowerCase() === 'sub2api') {
+      const existingManagedAuth = getSub2ApiAuthFromExtraConfig(existing?.extraConfig);
+      const nextRefreshToken = normalizeManagedRefreshToken(loginResult.refreshToken)
+        || existingManagedAuth?.refreshToken;
+      const nextTokenExpiresAt = normalizeManagedTokenExpiresAt(loginResult.tokenExpiresAt)
+        ?? existingManagedAuth?.tokenExpiresAt;
+      if (nextRefreshToken) {
+        extraConfigPatch.sub2apiAuth = nextTokenExpiresAt
+          ? { refreshToken: nextRefreshToken, tokenExpiresAt: nextTokenExpiresAt }
+          : { refreshToken: nextRefreshToken };
+      }
     }
     const extraConfig = mergeAccountExtraConfig(existing?.extraConfig, extraConfigPatch);
 
@@ -1628,6 +1642,30 @@ export async function accountsRoutes(app: FastifyInstance) {
       totalCount: models.length,
       disabledCount: models.filter((m) => m.disabled).length,
     };
+  });
+
+  app.post<{ Params: { id: string }; Body: unknown }>('/api/accounts/:id/probe-chat', async (request, reply) => {
+    const parsedBody = parseAccountProbeChatPayload(request.body);
+    if (!parsedBody.success) {
+      return reply.code(400).send({ message: parsedBody.error });
+    }
+
+    const accountId = parseInt(request.params.id, 10);
+    if (!Number.isFinite(accountId) || accountId <= 0) {
+      return reply.code(400).send({ message: '账号 ID 无效' });
+    }
+
+    try {
+      return await probeAccountChat({
+        accountId,
+        modelName: parsedBody.data.model,
+      });
+    } catch (error) {
+      if (isAccountProbeServiceError(error)) {
+        return reply.code(error.statusCode).send({ message: error.message });
+      }
+      return reply.code(500).send({ message: error instanceof Error ? error.message : '连接测活失败' });
+    }
   });
 
   // Add models manually to an account
