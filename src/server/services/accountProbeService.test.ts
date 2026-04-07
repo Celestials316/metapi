@@ -102,7 +102,7 @@ describe('accountProbeService', () => {
       runtime: {
         executor: 'default',
         modelName: input.modelName || 'unknown-model',
-        stream: false,
+        stream: true,
       },
     }));
     executeEndpointFlowMock.mockImplementation(async (input: {
@@ -196,7 +196,39 @@ describe('accountProbeService', () => {
     }));
   });
 
-  it('treats empty textual payloads as a healthy response with a friendly placeholder', async () => {
+  it('extracts visible reply text from chat completion SSE when the upstream non-stream final body would be empty', async () => {
+    executeEndpointFlowMock.mockResolvedValue({
+      ok: true,
+      upstream: new Response([
+        'data: {"id":"resp_probe_sse","object":"chat.completion.chunk","created":1775527942,"model":"gpt-5.4","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}',
+        '',
+        'data: {"id":"resp_probe_sse","object":"chat.completion.chunk","created":1775527942,"model":"gpt-5.4","choices":[{"index":0,"delta":{"content":"Hi"},"finish_reason":null}]}',
+        '',
+        'data: {"id":"resp_probe_sse","object":"chat.completion.chunk","created":1775527942,"model":"gpt-5.4","choices":[{"index":0,"delta":{"content":"! How can I help?"},"finish_reason":null}]}',
+        '',
+        'data: {"id":"resp_probe_sse","object":"chat.completion.chunk","created":1775527942,"model":"gpt-5.4","choices":[{"index":0,"delta":{"content":""},"finish_reason":"stop"}]}',
+        '',
+        'data: [DONE]',
+        '',
+      ].join('\n'), {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream' },
+      }),
+      upstreamPath: '/v1/chat/completions',
+    });
+
+    const { probeAccountChat } = await import('./accountProbeService.js');
+    const result = await probeAccountChat({ accountId: 1, modelName: 'gpt-5.4' });
+
+    expect(result).toMatchObject({
+      success: true,
+      statusText: '服务正常',
+      replyText: 'Hi! How can I help?',
+      model: 'gpt-5.4',
+    });
+  });
+
+  it('treats truly textless successful probe responses as failures instead of fake healthy placeholders', async () => {
     executeEndpointFlowMock.mockResolvedValue({
       ok: true,
       upstream: new Response(JSON.stringify({
@@ -226,11 +258,10 @@ describe('accountProbeService', () => {
     const result = await probeAccountChat({ accountId: 1, modelName: 'gpt-5.4' });
 
     expect(result).toMatchObject({
-      success: true,
-      statusText: '服务正常',
-      replyText: '模型已正常响应，但未返回可展示文本',
+      success: false,
+      statusText: '测活失败',
+      errorMessage: '上游已响应，但未返回任何可展示文本',
       model: 'gpt-5.4',
     });
-    expect(result.replyText).not.toContain('"choices"');
   });
 });

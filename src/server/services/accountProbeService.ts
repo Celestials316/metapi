@@ -17,10 +17,15 @@ import {
 import { executeEndpointFlow, type BuiltEndpointRequest } from '../proxy-core/orchestration/endpointFlow.js';
 import { summarizeUpstreamError } from '../proxy-core/orchestration/upstreamRequest.js';
 import { readRuntimeResponseText } from '../proxy-core/executors/types.js';
-import { normalizeUpstreamFinalResponse } from '../transformers/shared/chatFormatsCore.js';
+import { collectResponsesFinalPayloadFromSseText, looksLikeResponsesSseText } from '../routes/proxy/responsesSseFinal.js';
+import {
+  createStreamTransformContext,
+  normalizeUpstreamFinalResponse,
+  normalizeUpstreamStreamEvent,
+  pullSseEventsWithDone,
+} from '../transformers/shared/chatFormatsCore.js';
 
 const ACCOUNT_PROBE_TIMEOUT_MS = 15_000;
-const ACCOUNT_PROBE_EMPTY_REPLY_MESSAGE = '模型已正常响应，但未返回可展示文本';
 
 type AccountWithSiteRow = {
   accounts: typeof schema.accounts.$inferSelect;
@@ -60,7 +65,7 @@ function buildProbeBody(modelName: string): Record<string, unknown> {
       },
     ],
     max_tokens: 64,
-    stream: false,
+    stream: true,
   };
 }
 
@@ -121,6 +126,68 @@ async function resolveProbeCredential(account: typeof schema.accounts.$inferSele
   return {
     tokenValue: null,
     errorMessage: '该连接缺少可用凭据，请检查 API Key 或登录状态',
+  };
+}
+
+function collectChatTextFromSse(rawText: string, modelName: string): string {
+  const context = createStreamTransformContext(modelName);
+  let buffer = rawText;
+  let replyText = '';
+
+  while (buffer) {
+    const { events, rest } = pullSseEventsWithDone(buffer);
+    for (const event of events) {
+      if (event.data === '[DONE]') continue;
+      let payload: unknown;
+      try {
+        payload = JSON.parse(event.data);
+      } catch {
+        continue;
+      }
+      const normalized = normalizeUpstreamStreamEvent(payload, context, modelName);
+      if (typeof normalized.contentDelta === 'string' && normalized.contentDelta.length > 0) {
+        replyText += normalized.contentDelta;
+      }
+    }
+    if (!rest || rest === buffer) break;
+    buffer = rest;
+  }
+
+  return replyText.trim();
+}
+
+function extractProbeReply(rawText: string, modelName: string): {
+  replyText: string;
+  resolvedModel: string;
+} {
+  if (looksLikeResponsesSseText(rawText)) {
+    const collected = collectResponsesFinalPayloadFromSseText(rawText, modelName);
+    const normalized = normalizeUpstreamFinalResponse(collected.payload, modelName);
+    return {
+      replyText: asTrimmedString(normalized.content),
+      resolvedModel: normalized.model || modelName,
+    };
+  }
+
+  const trimmed = asTrimmedString(rawText);
+  if (trimmed.startsWith('data:') || trimmed.includes('\ndata:')) {
+    return {
+      replyText: collectChatTextFromSse(rawText, modelName),
+      resolvedModel: modelName,
+    };
+  }
+
+  let payload: unknown = rawText;
+  try {
+    payload = rawText ? JSON.parse(rawText) : {};
+  } catch {
+    payload = rawText;
+  }
+
+  const normalized = normalizeUpstreamFinalResponse(payload, modelName);
+  return {
+    replyText: asTrimmedString(normalized.content),
+    resolvedModel: normalized.model || modelName,
   };
 }
 
@@ -230,7 +297,7 @@ export async function probeAccountChat(input: {
       const request = buildUpstreamEndpointRequest({
         endpoint,
         modelName,
-        stream: false,
+        stream: true,
         tokenValue,
         oauthProvider: oauth?.provider,
         oauthProjectId: oauth?.projectId,
@@ -302,32 +369,24 @@ export async function probeAccountChat(input: {
     }
 
     const rawText = await readRuntimeResponseText(result.upstream);
-    let payload: unknown = rawText;
-    try {
-      payload = rawText ? JSON.parse(rawText) : {};
-    } catch {
-      payload = rawText;
-    }
+    const extracted = extractProbeReply(rawText, modelName);
 
-    const normalized = normalizeUpstreamFinalResponse(payload, modelName);
-    const replyText = asTrimmedString(normalized.content);
-
-    if (!replyText) {
+    if (!extracted.replyText) {
       return {
-        success: true,
-        statusText: '服务正常',
-        replyText: ACCOUNT_PROBE_EMPTY_REPLY_MESSAGE,
+        success: false,
+        statusText: '测活失败',
+        errorMessage: '上游已响应，但未返回任何可展示文本',
         latencyMs,
-        model: normalized.model || modelName,
+        model: extracted.resolvedModel || modelName,
       };
     }
 
     return {
       success: true,
       statusText: '服务正常',
-      replyText,
+      replyText: extracted.replyText,
       latencyMs,
-      model: normalized.model || modelName,
+      model: extracted.resolvedModel || modelName,
     };
   } catch (error) {
     const latencyMs = Date.now() - startedAt;
