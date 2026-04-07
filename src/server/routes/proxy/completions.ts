@@ -189,7 +189,7 @@ export async function completionsProxyRoute(app: FastifyInstance) {
             resolvedUsage,
           });
           await recordTokenRouterEventBestEffort('record channel success', () => (
-            tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost, upstreamModel)
+            tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost, upstreamModel, selected.account.id)
           ));
           recordDownstreamCostUsage(request, estimatedCost);
           logProxy(
@@ -231,7 +231,7 @@ export async function completionsProxyRoute(app: FastifyInstance) {
             status: failure.status,
             errorText: errText,
             modelName: upstreamModel,
-          }));
+          }, selected.account.id));
           logProxy(
             selected,
             requestedModel,
@@ -292,7 +292,7 @@ export async function completionsProxyRoute(app: FastifyInstance) {
         });
 
         await recordTokenRouterEventBestEffort('record channel success', () => (
-          tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost, upstreamModel)
+          tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost, upstreamModel, selected.account.id)
         ));
         recordDownstreamCostUsage(request, estimatedCost);
         logProxy(
@@ -324,7 +324,7 @@ export async function completionsProxyRoute(app: FastifyInstance) {
           status,
           errorText,
           modelName: upstreamModel,
-        }));
+        }, selected.account.id));
         logProxy(
           selected,
           requestedModel,

@@ -115,7 +115,7 @@ export async function imagesProxyRoute(app: FastifyInstance) {
             status: 502,
             errorText: data.message,
             modelName: upstreamModel,
-          }));
+          }, selected.account.id));
           logProxy(
             selected,
             requestedModel,
@@ -157,7 +157,7 @@ export async function imagesProxyRoute(app: FastifyInstance) {
           });
         });
         await recordTokenRouterEventBestEffort('record channel success', () => (
-          tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost, upstreamModel)
+          tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost, upstreamModel, selected.account.id)
         ));
         await recordTokenRouterEventBestEffort('record downstream cost usage', () => (
           recordDownstreamCostUsage(request, estimatedCost)
@@ -186,7 +186,7 @@ export async function imagesProxyRoute(app: FastifyInstance) {
           status,
           errorText,
           modelName: upstreamModel,
-        }));
+        }, selected.account.id));
         logProxy(
           selected,
           requestedModel,
@@ -335,7 +335,7 @@ export async function imagesProxyRoute(app: FastifyInstance) {
             status: 502,
             errorText: data.message,
             modelName: upstreamModel,
-          }));
+          }, selected.account.id));
           logProxy(
             selected,
             requestedModel,
@@ -377,7 +377,7 @@ export async function imagesProxyRoute(app: FastifyInstance) {
           });
         });
         await recordTokenRouterEventBestEffort('record channel success', () => (
-          tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost, upstreamModel)
+          tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost, upstreamModel, selected.account.id)
         ));
         await recordTokenRouterEventBestEffort('record downstream cost usage', () => (
           recordDownstreamCostUsage(request, estimatedCost)
@@ -406,7 +406,7 @@ export async function imagesProxyRoute(app: FastifyInstance) {
           status,
           errorText,
           modelName: upstreamModel,
-        }));
+        }, selected.account.id));
         logProxy(
           selected,
           requestedModel,

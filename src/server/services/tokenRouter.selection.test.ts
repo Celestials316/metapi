@@ -8,6 +8,8 @@ type DbModule = typeof import('../db/index.js');
 type TokenRouterModule = typeof import('./tokenRouter.js');
 type ConfigModule = typeof import('../config.js');
 type ProxyChannelCoordinatorModule = typeof import('./proxyChannelCoordinator.js');
+type PreferenceServiceModule = typeof import('./accountDispatchPreferenceService.js');
+type RuntimeMemoryModule = typeof import('./accountDispatchRuntimeMemory.js');
 
 const mockedCatalogRoutingCost = vi.fn<(
   input: { siteId: number; accountId: number; modelName: string }
@@ -33,6 +35,10 @@ describe('TokenRouter selection scoring', () => {
   let config: ConfigModule['config'];
   let proxyChannelCoordinator: ProxyChannelCoordinatorModule['proxyChannelCoordinator'];
   let resetProxyChannelCoordinatorState: ProxyChannelCoordinatorModule['resetProxyChannelCoordinatorState'];
+  let setAccountDispatchPreferenceMode: PreferenceServiceModule['setAccountDispatchPreferenceMode'];
+  let resetAccountDispatchPreferenceCache: PreferenceServiceModule['resetAccountDispatchPreferenceCache'];
+  let getAccountDispatchRuntimeSnapshot: RuntimeMemoryModule['getAccountDispatchRuntimeSnapshot'];
+  let resetAccountDispatchRuntimeMemory: RuntimeMemoryModule['resetAccountDispatchRuntimeMemory'];
   let dataDir = '';
   let idSeed = 0;
   let originalRoutingWeights: typeof config.routingWeights;
@@ -54,6 +60,8 @@ describe('TokenRouter selection scoring', () => {
     const tokenRouterModule = await import('./tokenRouter.js');
     const configModule = await import('../config.js');
     const coordinatorModule = await import('./proxyChannelCoordinator.js');
+    const preferenceServiceModule = await import('./accountDispatchPreferenceService.js');
+    const runtimeMemoryModule = await import('./accountDispatchRuntimeMemory.js');
     db = dbModule.db;
     schema = dbModule.schema;
     TokenRouter = tokenRouterModule.TokenRouter;
@@ -65,6 +73,10 @@ describe('TokenRouter selection scoring', () => {
     config = configModule.config;
     proxyChannelCoordinator = coordinatorModule.proxyChannelCoordinator;
     resetProxyChannelCoordinatorState = coordinatorModule.resetProxyChannelCoordinatorState;
+    setAccountDispatchPreferenceMode = preferenceServiceModule.setAccountDispatchPreferenceMode;
+    resetAccountDispatchPreferenceCache = preferenceServiceModule.resetAccountDispatchPreferenceCache;
+    getAccountDispatchRuntimeSnapshot = runtimeMemoryModule.getAccountDispatchRuntimeSnapshot;
+    resetAccountDispatchRuntimeMemory = runtimeMemoryModule.resetAccountDispatchRuntimeMemory;
     originalRoutingWeights = { ...config.routingWeights };
     originalRoutingFallbackUnitCost = config.routingFallbackUnitCost;
     originalProxySessionChannelConcurrencyLimit = config.proxySessionChannelConcurrencyLimit;
@@ -77,6 +89,7 @@ describe('TokenRouter selection scoring', () => {
     mockedCatalogRoutingCost.mockReturnValue(null);
     config.proxySessionChannelConcurrencyLimit = originalProxySessionChannelConcurrencyLimit;
     config.proxySessionChannelQueueWaitMs = originalProxySessionChannelQueueWaitMs;
+    await db.delete(schema.accountDispatchPreferences).run();
     await db.delete(schema.routeChannels).run();
     await db.delete(schema.tokenRoutes).run();
     await db.delete(schema.settings).run();
@@ -84,6 +97,8 @@ describe('TokenRouter selection scoring', () => {
     await db.delete(schema.accounts).run();
     await db.delete(schema.sites).run();
     invalidateTokenRouterCache();
+    resetAccountDispatchPreferenceCache();
+    resetAccountDispatchRuntimeMemory();
     resetSiteRuntimeHealthState();
     resetProxyChannelCoordinatorState();
   });
@@ -94,6 +109,8 @@ describe('TokenRouter selection scoring', () => {
     config.proxySessionChannelConcurrencyLimit = originalProxySessionChannelConcurrencyLimit;
     config.proxySessionChannelQueueWaitMs = originalProxySessionChannelQueueWaitMs;
     invalidateTokenRouterCache();
+    resetAccountDispatchPreferenceCache();
+    resetAccountDispatchRuntimeMemory();
     resetSiteRuntimeHealthState();
     resetProxyChannelCoordinatorState();
     delete process.env.DATA_DIR;
@@ -188,6 +205,99 @@ describe('TokenRouter selection scoring', () => {
     invalidateTokenRouterCache();
 
     await expect(router.selectPreferredChannel('gpt-5.2', preferredChannel.id)).resolves.toBeNull();
+  });
+
+  it('honors force preference without falling back to other accounts', async () => {
+    const route = await createRoute('gpt-5.4');
+    const siteA = await createSite('force-site-a');
+    const siteB = await createSite('force-site-b');
+    const accountA = await createAccount(siteA.id, 'force-user-a');
+    const accountB = await createAccount(siteB.id, 'force-user-b');
+
+    const channelA = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: accountA.id,
+      tokenId: null,
+      priority: 0,
+      weight: 1,
+      enabled: true,
+    }).returning().get();
+    await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: accountB.id,
+      tokenId: null,
+      priority: 0,
+      weight: 100,
+      enabled: true,
+    }).run();
+
+    await setAccountDispatchPreferenceMode(accountA.id, 'force');
+
+    const router = new TokenRouter();
+    const preferred = await router.selectChannel('gpt-5.4');
+    expect(preferred?.account.id).toBe(accountA.id);
+    expect(preferred?.channel.id).toBe(channelA.id);
+
+    await db.update(schema.routeChannels).set({
+      cooldownUntil: new Date(Date.now() + 60_000).toISOString(),
+    }).where(eq(schema.routeChannels.id, channelA.id)).run();
+    invalidateTokenRouterCache();
+
+    await expect(router.selectChannel('gpt-5.4')).resolves.toBeNull();
+  });
+
+  it('falls back for prefer preference and fails back after the preferred account recovers', async () => {
+    const route = await createRoute('gpt-5.4');
+    const siteA = await createSite('prefer-site-a');
+    const siteB = await createSite('prefer-site-b');
+    const accountA = await createAccount(siteA.id, 'prefer-user-a');
+    const accountB = await createAccount(siteB.id, 'prefer-user-b');
+
+    const channelA = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: accountA.id,
+      tokenId: null,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+    await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: accountB.id,
+      tokenId: null,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).run();
+
+    await setAccountDispatchPreferenceMode(accountA.id, 'prefer');
+
+    const router = new TokenRouter();
+    const primary = await router.selectChannel('gpt-5.4');
+    expect(primary?.account.id).toBe(accountA.id);
+
+    await router.recordFailure(channelA.id, {
+      status: 503,
+      errorText: 'upstream unavailable',
+      modelName: 'gpt-5.4',
+    }, accountA.id);
+
+    const fallback = await router.selectChannel('gpt-5.4');
+    expect(fallback?.account.id).toBe(accountB.id);
+
+    expect(getAccountDispatchRuntimeSnapshot(route.id, 'gpt-5.4', accountA.id).status).toBe('degraded');
+
+    await router.recordProbeSuccess(channelA.id, 120, 'gpt-5.4', accountA.id);
+    expect(getAccountDispatchRuntimeSnapshot(route.id, 'gpt-5.4', accountA.id).status).toBe('recovering');
+
+    const recovered = await router.selectChannel('gpt-5.4');
+    expect(recovered?.account.id).toBe(accountA.id);
+
+    await router.recordSuccess(channelA.id, 110, 0, 'gpt-5.4', accountA.id);
+    expect(getAccountDispatchRuntimeSnapshot(route.id, 'gpt-5.4', accountA.id).status).toBe('failback_hold');
+
+    const afterFailback = await router.selectChannel('gpt-5.4');
+    expect(afterFailback?.account.id).toBe(accountA.id);
   });
 
   it('round-robins inside an oauth route unit while keeping one outer channel', async () => {

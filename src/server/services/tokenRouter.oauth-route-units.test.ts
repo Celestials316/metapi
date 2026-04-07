@@ -5,6 +5,8 @@ import { join } from 'node:path';
 
 type DbModule = typeof import('../db/index.js');
 type TokenRouterModule = typeof import('./tokenRouter.js');
+type PreferenceServiceModule = typeof import('./accountDispatchPreferenceService.js');
+type RuntimeMemoryModule = typeof import('./accountDispatchRuntimeMemory.js');
 
 describe('TokenRouter oauth route units', () => {
   let db: DbModule['db'];
@@ -12,6 +14,9 @@ describe('TokenRouter oauth route units', () => {
   let TokenRouter: TokenRouterModule['TokenRouter'];
   let invalidateTokenRouterCache: TokenRouterModule['invalidateTokenRouterCache'];
   let tokenRouterTestUtils: TokenRouterModule['__tokenRouterTestUtils'];
+  let setAccountDispatchPreferenceMode: PreferenceServiceModule['setAccountDispatchPreferenceMode'];
+  let resetAccountDispatchPreferenceCache: PreferenceServiceModule['resetAccountDispatchPreferenceCache'];
+  let resetAccountDispatchRuntimeMemory: RuntimeMemoryModule['resetAccountDispatchRuntimeMemory'];
   let dataDir = '';
 
   beforeAll(async () => {
@@ -21,14 +26,20 @@ describe('TokenRouter oauth route units', () => {
     await import('../db/migrate.js');
     const dbModule = await import('../db/index.js');
     const tokenRouterModule = await import('./tokenRouter.js');
+    const preferenceServiceModule = await import('./accountDispatchPreferenceService.js');
+    const runtimeMemoryModule = await import('./accountDispatchRuntimeMemory.js');
     db = dbModule.db;
     schema = dbModule.schema;
     TokenRouter = tokenRouterModule.TokenRouter;
     invalidateTokenRouterCache = tokenRouterModule.invalidateTokenRouterCache;
     tokenRouterTestUtils = tokenRouterModule.__tokenRouterTestUtils;
+    setAccountDispatchPreferenceMode = preferenceServiceModule.setAccountDispatchPreferenceMode;
+    resetAccountDispatchPreferenceCache = preferenceServiceModule.resetAccountDispatchPreferenceCache;
+    resetAccountDispatchRuntimeMemory = runtimeMemoryModule.resetAccountDispatchRuntimeMemory;
   });
 
   beforeEach(async () => {
+    await db.delete(schema.accountDispatchPreferences).run();
     await db.delete(schema.routeChannels).run();
     await db.delete(schema.tokenRoutes).run();
     await db.delete(schema.modelAvailability).run();
@@ -38,10 +49,14 @@ describe('TokenRouter oauth route units', () => {
     await db.delete(schema.accounts).run();
     await db.delete(schema.sites).run();
     invalidateTokenRouterCache();
+    resetAccountDispatchPreferenceCache();
+    resetAccountDispatchRuntimeMemory();
   });
 
   afterAll(() => {
     invalidateTokenRouterCache();
+    resetAccountDispatchPreferenceCache();
+    resetAccountDispatchRuntimeMemory();
     delete process.env.DATA_DIR;
   });
 
@@ -196,6 +211,163 @@ describe('TokenRouter oauth route units', () => {
     const third = await router.selectChannel('gpt-5.4');
     expect(third?.channel.id).toBe(channel.id);
     expect(third?.account.id).toBe(accountB.id);
+  });
+
+  it('respects force preference on oauth route units without falling back to other members', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'ChatGPT Codex OAuth',
+      url: 'https://chatgpt.com/backend-api/codex',
+      platform: 'codex',
+      status: 'active',
+    }).returning().get();
+
+    const accountA = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'force-a@example.com',
+      accessToken: 'oauth-force-access-a',
+      apiToken: null,
+      status: 'active',
+      oauthProvider: 'codex',
+      oauthAccountKey: 'chatgpt-force-a',
+      extraConfig: JSON.stringify({
+        credentialMode: 'session',
+        oauth: { provider: 'codex', accountId: 'chatgpt-force-a', email: 'force-a@example.com' },
+      }),
+    }).returning().get();
+    const accountB = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'force-b@example.com',
+      accessToken: 'oauth-force-access-b',
+      apiToken: null,
+      status: 'active',
+      oauthProvider: 'codex',
+      oauthAccountKey: 'chatgpt-force-b',
+      extraConfig: JSON.stringify({
+        credentialMode: 'session',
+        oauth: { provider: 'codex', accountId: 'chatgpt-force-b', email: 'force-b@example.com' },
+      }),
+    }).returning().get();
+
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gpt-5.4',
+      routingStrategy: 'stable_first',
+      enabled: true,
+    }).returning().get();
+    const routeUnit = await db.insert(schema.oauthRouteUnits).values({
+      siteId: site.id,
+      provider: 'codex',
+      name: 'Codex Force Pool',
+      strategy: 'stick_until_unavailable',
+      enabled: true,
+    }).returning().get();
+    await db.insert(schema.oauthRouteUnitMembers).values([
+      { unitId: routeUnit.id, accountId: accountA.id, sortOrder: 0 },
+      { unitId: routeUnit.id, accountId: accountB.id, sortOrder: 1 },
+    ]).run();
+    await db.insert(schema.modelAvailability).values([
+      { accountId: accountA.id, modelName: 'gpt-5.4', available: true },
+      { accountId: accountB.id, modelName: 'gpt-5.4', available: true },
+    ]).run();
+    const channel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: accountA.id,
+      tokenId: null,
+      oauthRouteUnitId: routeUnit.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+      manualOverride: false,
+    }).returning().get();
+
+    await setAccountDispatchPreferenceMode(accountA.id, 'force');
+
+    const router = new TokenRouter();
+    const preferred = await router.selectChannel('gpt-5.4');
+    expect(preferred?.account.id).toBe(accountA.id);
+
+    await router.recordFailure(channel.id, { status: 503, errorText: 'force unavailable', modelName: 'gpt-5.4' }, accountA.id);
+    await expect(router.selectChannel('gpt-5.4')).resolves.toBeNull();
+  });
+
+  it('falls back and fails back correctly for prefer preference on oauth route units', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'ChatGPT Codex OAuth',
+      url: 'https://chatgpt.com/backend-api/codex',
+      platform: 'codex',
+      status: 'active',
+    }).returning().get();
+
+    const accountA = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'prefer-a@example.com',
+      accessToken: 'oauth-prefer-access-a',
+      apiToken: null,
+      status: 'active',
+      oauthProvider: 'codex',
+      oauthAccountKey: 'chatgpt-prefer-a',
+      extraConfig: JSON.stringify({
+        credentialMode: 'session',
+        oauth: { provider: 'codex', accountId: 'chatgpt-prefer-a', email: 'prefer-a@example.com' },
+      }),
+    }).returning().get();
+    const accountB = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'prefer-b@example.com',
+      accessToken: 'oauth-prefer-access-b',
+      apiToken: null,
+      status: 'active',
+      oauthProvider: 'codex',
+      oauthAccountKey: 'chatgpt-prefer-b',
+      extraConfig: JSON.stringify({
+        credentialMode: 'session',
+        oauth: { provider: 'codex', accountId: 'chatgpt-prefer-b', email: 'prefer-b@example.com' },
+      }),
+    }).returning().get();
+
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gpt-5.4',
+      routingStrategy: 'stable_first',
+      enabled: true,
+    }).returning().get();
+    const routeUnit = await db.insert(schema.oauthRouteUnits).values({
+      siteId: site.id,
+      provider: 'codex',
+      name: 'Codex Prefer Pool',
+      strategy: 'stick_until_unavailable',
+      enabled: true,
+    }).returning().get();
+    await db.insert(schema.oauthRouteUnitMembers).values([
+      { unitId: routeUnit.id, accountId: accountA.id, sortOrder: 0 },
+      { unitId: routeUnit.id, accountId: accountB.id, sortOrder: 1 },
+    ]).run();
+    await db.insert(schema.modelAvailability).values([
+      { accountId: accountA.id, modelName: 'gpt-5.4', available: true },
+      { accountId: accountB.id, modelName: 'gpt-5.4', available: true },
+    ]).run();
+    const channel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: accountA.id,
+      tokenId: null,
+      oauthRouteUnitId: routeUnit.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+      manualOverride: false,
+    }).returning().get();
+
+    await setAccountDispatchPreferenceMode(accountA.id, 'prefer');
+
+    const router = new TokenRouter();
+    const primary = await router.selectChannel('gpt-5.4');
+    expect(primary?.account.id).toBe(accountA.id);
+
+    await router.recordFailure(channel.id, { status: 503, errorText: 'prefer unavailable', modelName: 'gpt-5.4' }, accountA.id);
+    const fallback = await router.selectChannel('gpt-5.4');
+    expect(fallback?.account.id).toBe(accountB.id);
+
+    await router.recordProbeSuccess(channel.id, 120, 'gpt-5.4', accountA.id);
+    const recovered = await router.selectChannel('gpt-5.4');
+    expect(recovered?.account.id).toBe(accountA.id);
   });
 
   it('keeps unrelated stable-first cache entries when pooled member state updates', async () => {

@@ -1355,7 +1355,7 @@ export async function handleClaudeCountTokensSurfaceRequest(
         latency,
       } = countTokensResult;
 
-      tokenRouter.recordSuccess(selected.channel.id, latency, 0, modelName);
+      tokenRouter.recordSuccess(selected.channel.id, latency, 0, modelName, selected.account.id);
       recordDownstreamCostUsage(request, 0);
       await failureToolkit.log({
         selected,

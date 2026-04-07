@@ -420,6 +420,7 @@ export async function recordSurfaceSuccess(input: {
     input.latencyMs,
     estimatedCost,
     input.modelName,
+    input.selected.account.id,
   );
   input.recordDownstreamCost?.(estimatedCost);
   const logTokens = resolvedUsage.usageSource === 'unknown'
@@ -548,7 +549,7 @@ export function createSurfaceFailureToolkit(input: {
         status: args.status,
         errorText: rawErrText,
         modelName: args.modelName,
-      });
+      }, args.selected.account.id);
       await log({
         selected: args.selected,
         modelRequested: args.requestedModel,
@@ -615,7 +616,7 @@ export function createSurfaceFailureToolkit(input: {
         status: args.failure.status,
         errorText: args.failure.reason,
         modelName: args.modelName,
-      });
+      }, args.selected.account.id);
       await log({
         selected: args.selected,
         modelRequested: args.requestedModel,
@@ -667,7 +668,7 @@ export function createSurfaceFailureToolkit(input: {
       await tokenRouter.recordFailure(args.selected.channel.id, {
         errorText: args.errorMessage,
         modelName: args.modelName,
-      });
+      }, args.selected.account.id);
       await log({
         selected: args.selected,
         modelRequested: args.requestedModel,
@@ -722,12 +723,12 @@ export function createSurfaceFailureToolkit(input: {
           status: args.runtimeFailureStatus,
           errorText: errorMessage,
           modelName: args.modelName,
-        });
+        }, args.selected.account.id);
       } else {
         await tokenRouter.recordFailure(args.selected.channel.id, {
           errorText: errorMessage,
           modelName: args.modelName,
-        });
+        }, args.selected.account.id);
       }
       await log({
         selected: args.selected,

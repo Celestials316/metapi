@@ -46,6 +46,11 @@ import {
 } from '../../contracts/accountsRoutePayloads.js';
 import { requireSiteApiBaseUrl, runWithSiteApiEndpointPool } from '../../services/siteApiEndpointService.js';
 import { isAccountProbeServiceError, probeAccountChat } from '../../services/accountProbeService.js';
+import {
+  listAccountDispatchPreferences,
+  normalizeAccountDispatchPreferenceMode,
+  setAccountDispatchPreferenceMode,
+} from '../../services/accountDispatchPreferenceService.js';
 
 type AccountWithSiteRow = {
   accounts: typeof schema.accounts.$inferSelect;
@@ -66,6 +71,8 @@ type AccountCapabilities = {
   canRefreshBalance: boolean;
   proxyOnly: boolean;
 };
+
+type AccountDispatchPreferenceMode = 'default' | 'force' | 'prefer';
 
 type AccountInitializationParams = {
   accountId: number;
@@ -218,6 +225,16 @@ function normalizeSortOrder(input: unknown): number | null {
   const parsed = Number.parseInt(String(input), 10);
   if (!Number.isFinite(parsed)) return null;
   return Math.max(0, parsed);
+}
+
+function attachDispatchPreferenceMode<T extends typeof schema.accounts.$inferSelect>(
+  account: T,
+  dispatchPreferenceMode: AccountDispatchPreferenceMode,
+) {
+  return {
+    ...account,
+    dispatchPreferenceMode,
+  };
 }
 
 function normalizeManagedRefreshToken(input: unknown): string | undefined {
@@ -472,6 +489,9 @@ export async function accountsRoutes(app: FastifyInstance) {
   app.get('/api/accounts', async () => {
     const rows = await db.select().from(schema.accounts)
       .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id)).all();
+    const dispatchPreferenceByAccountId = await listAccountDispatchPreferences(
+      rows.map((row) => row.accounts.id),
+    );
 
     const { localDay, startUtc, endUtc } = getLocalDayRangeUtc();
 
@@ -528,8 +548,9 @@ export async function accountsRoutes(app: FastifyInstance) {
     return rows.map((r) => {
       const credentialMode = resolveStoredCredentialMode(r.accounts);
       const capabilities = buildCapabilitiesForAccount(r.accounts);
+      const dispatchPreferenceMode = dispatchPreferenceByAccountId.get(r.accounts.id)?.mode || 'default';
       return {
-        ...r.accounts,
+        ...attachDispatchPreferenceMode(r.accounts, dispatchPreferenceMode),
         site: r.sites,
         credentialMode,
         capabilities,
@@ -1353,6 +1374,9 @@ export async function accountsRoutes(app: FastifyInstance) {
     for (const key of ['username', 'accessToken', 'apiToken', 'status', 'checkinEnabled', 'unitCost', 'extraConfig']) {
       if (body[key] !== undefined) updates[key] = body[key];
     }
+    const requestedDispatchPreferenceMode = Object.prototype.hasOwnProperty.call(body, 'dispatchPreferenceMode')
+      ? normalizeAccountDispatchPreferenceMode(body.dispatchPreferenceMode)
+      : null;
 
     const wantsManagedSub2ApiAuthPatch =
       Object.prototype.hasOwnProperty.call(body, 'refreshToken')
@@ -1407,6 +1431,11 @@ export async function accountsRoutes(app: FastifyInstance) {
       });
     }
 
+    if (Object.keys(updates).length === 0 && requestedDispatchPreferenceMode !== null) {
+      const dispatchPreferenceMode = (await setAccountDispatchPreferenceMode(id, requestedDispatchPreferenceMode)).mode;
+      return attachDispatchPreferenceMode(account, dispatchPreferenceMode);
+    }
+
     const nextAccessToken = typeof updates.accessToken === 'string' ? updates.accessToken : account.accessToken;
     const nextApiToken = Object.prototype.hasOwnProperty.call(updates, 'apiToken')
       ? updates.apiToken
@@ -1445,7 +1474,11 @@ export async function accountsRoutes(app: FastifyInstance) {
       continueOnError: true,
     });
 
-    return updatedAccount;
+    const dispatchPreferenceMode = requestedDispatchPreferenceMode
+      ? (await setAccountDispatchPreferenceMode(id, requestedDispatchPreferenceMode)).mode
+      : (await listAccountDispatchPreferences([id])).get(id)?.mode || 'default';
+
+    return attachDispatchPreferenceMode(updatedAccount, dispatchPreferenceMode);
   });
 
   // Delete an account

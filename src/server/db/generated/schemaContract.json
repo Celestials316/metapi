@@ -1,5 +1,33 @@
 {
   "tables": {
+    "account_dispatch_preferences": {
+      "columns": {
+        "id": {
+          "logicalType": "integer",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": true
+        },
+        "account_id": {
+          "logicalType": "integer",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "mode": {
+          "logicalType": "text",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "updated_at": {
+          "logicalType": "datetime",
+          "notNull": false,
+          "defaultValue": "datetime('now')",
+          "primaryKey": false
+        }
+      }
+    },
     "account_tokens": {
       "columns": {
         "id": {
@@ -1801,6 +1829,22 @@
   },
   "indexes": [
     {
+      "name": "account_dispatch_preferences_account_id_unique",
+      "table": "account_dispatch_preferences",
+      "columns": [
+        "account_id"
+      ],
+      "unique": true
+    },
+    {
+      "name": "account_dispatch_preferences_mode_idx",
+      "table": "account_dispatch_preferences",
+      "columns": [
+        "mode"
+      ],
+      "unique": false
+    },
+    {
       "name": "account_tokens_account_enabled_idx",
       "table": "account_tokens",
       "columns": [
@@ -2394,6 +2438,13 @@
   ],
   "uniques": [
     {
+      "name": "account_dispatch_preferences_account_id_unique",
+      "table": "account_dispatch_preferences",
+      "columns": [
+        "account_id"
+      ]
+    },
+    {
       "name": "downstream_api_keys_key_unique",
       "table": "downstream_api_keys",
       "columns": [
@@ -2495,6 +2546,17 @@
     }
   ],
   "foreignKeys": [
+    {
+      "table": "account_dispatch_preferences",
+      "columns": [
+        "account_id"
+      ],
+      "referencedTable": "accounts",
+      "referencedColumns": [
+        "id"
+      ],
+      "onDelete": "CASCADE"
+    },
     {
       "table": "account_tokens",
       "columns": [

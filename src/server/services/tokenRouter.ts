@@ -13,6 +13,18 @@ import {
   normalizeRouteRoutingStrategy,
   type RouteRoutingStrategy,
 } from './routeRoutingStrategy.js';
+import {
+  getAccountDispatchPreference,
+  listAccountDispatchPreferences,
+  type AccountDispatchPreferenceRecord,
+} from './accountDispatchPreferenceService.js';
+import {
+  getAccountDispatchRuntimeSnapshot,
+  recordAccountDispatchFailure,
+  recordAccountDispatchProbeSuccess,
+  recordAccountDispatchSelectionBlocked,
+  recordAccountDispatchSuccess,
+} from './accountDispatchRuntimeMemory.js';
 import { type DownstreamRoutingPolicy, EMPTY_DOWNSTREAM_ROUTING_POLICY } from './downstreamPolicyTypes.js';
 import { isUsableAccountToken } from './accountTokenService.js';
 import { getOauthInfoFromAccount } from './oauth/oauthAccount.js';
@@ -124,6 +136,7 @@ const SITE_RUNTIME_HEALTH_PERSIST_DEBOUNCE_MS = 500;
 const SITE_RUNTIME_HEALTH_PERSIST_STALE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const SITE_RUNTIME_HEALTH_PERSIST_IDLE_TTL_MS = 12 * 60 * 60 * 1000;
 const SITE_RUNTIME_HEALTH_PERSIST_MIN_PENALTY = 0.02;
+const MANUAL_DISPATCH_DEGRADED_RETRY_MS = 60_000;
 
 const SITE_PROTOCOL_FAILURE_PATTERNS: RegExp[] = [
   /unsupported\s+legacy\s+protocol/i,
@@ -375,6 +388,36 @@ function isProtocolRuntimeFailure(context: SiteRuntimeFailureContext = {}): bool
 
 function isValidationRuntimeFailure(context: SiteRuntimeFailureContext = {}): boolean {
   return matchesAnyPattern(SITE_VALIDATION_FAILURE_PATTERNS, context.errorText);
+}
+
+function classifyManualDispatchFailureKind(context: SiteRuntimeFailureContext = {}): 'soft' | 'hard' {
+  const status = typeof context.status === 'number' ? context.status : 0;
+  const errorText = (context.errorText || '').trim();
+
+  if (isUsageLimitRateLimitFailure({ status, errorText })) return 'hard';
+  if (isModelScopedRuntimeFailure({ status, errorText })) return 'hard';
+  if (isProtocolRuntimeFailure({ status, errorText })) return 'hard';
+  if (isValidationRuntimeFailure({ status, errorText })) return 'hard';
+  if (status === 401 || status === 403) return 'hard';
+  if (status > 0 && status < 500 && status !== 429) return 'hard';
+  if (status >= 500 || status === 429 || matchesAnyPattern(SITE_TRANSIENT_FAILURE_PATTERNS, errorText)) {
+    return 'soft';
+  }
+  return 'soft';
+}
+
+function shouldAttemptManualDispatchRecovery(
+  snapshot: {
+    status: 'healthy' | 'degraded' | 'recovering' | 'failback_hold';
+    degradedAtMs: number | null;
+    lastFailureAtMs: number | null;
+  },
+  nowMs = Date.now(),
+): boolean {
+  if (snapshot.status !== 'degraded') return false;
+  const anchorMs = snapshot.lastFailureAtMs ?? snapshot.degradedAtMs ?? 0;
+  if (!Number.isFinite(anchorMs) || anchorMs <= 0) return false;
+  return (nowMs - anchorMs) >= MANUAL_DISPATCH_DEGRADED_RETRY_MS;
 }
 
 function clampNumber(value: number, min: number, max: number): number {
@@ -1318,6 +1361,7 @@ type CandidateEligibilityOptions = {
   requestedModel: string;
   bypassSourceModelCheck?: boolean;
   excludeChannelIds?: number[];
+  excludeAccountIds?: number[];
   nowIso?: string;
   downstreamPolicy?: DownstreamRoutingPolicy;
 };
@@ -1325,6 +1369,10 @@ type CandidateEligibilityOptions = {
 type CostSignal = {
   unitCost: number;
   source: 'observed' | 'configured' | 'catalog' | 'fallback';
+};
+
+type MatchManualDispatchPreference = AccountDispatchPreferenceRecord & {
+  mode: 'force' | 'prefer';
 };
 
 export function isRegexModelPattern(pattern: string): boolean {
@@ -2458,15 +2506,19 @@ export class TokenRouter {
     const row = await db.select()
       .from(schema.routeChannels)
       .innerJoin(schema.accounts, eq(schema.routeChannels.accountId, schema.accounts.id))
+      .innerJoin(schema.tokenRoutes, eq(schema.routeChannels.routeId, schema.tokenRoutes.id))
       .where(eq(schema.routeChannels.id, channelId))
       .get();
     if (!row) return;
     const ch = row.route_channels;
     const account = row.accounts;
+    const route = row.token_routes;
     const nowIso = new Date().toISOString();
+    const nowMs = Date.now();
     const nextSuccessCount = (ch.successCount ?? 0) + 1;
     const nextTotalLatencyMs = (ch.totalLatencyMs ?? 0) + latencyMs;
     const nextTotalCost = (ch.totalCost ?? 0) + cost;
+    const runtimeModelName = String(modelName || '').trim();
     if (typeof ch.oauthRouteUnitId === 'number' && ch.oauthRouteUnitId > 0) {
       const targetAccountId = Number.isFinite(actualAccountId) && (actualAccountId ?? 0) > 0
         ? Math.trunc(actualAccountId!)
@@ -2498,12 +2550,23 @@ export class TokenRouter {
           updatedAt: nowIso,
         }).where(eq(schema.oauthRouteUnitMembers.id, memberRow.member.id)).run();
         recordSiteRuntimeSuccess(memberRow.account.siteId, latencyMs, modelName);
+        const preference = await getAccountDispatchPreference(targetAccountId);
+        if (preference.mode === 'prefer' && runtimeModelName) {
+          recordAccountDispatchSuccess(route.id, runtimeModelName, targetAccountId, nowMs);
+        }
       } else {
         recordSiteRuntimeSuccess(account.siteId, latencyMs, modelName);
       }
       invalidateRouteScopedCache(ch.routeId);
     } else {
       recordSiteRuntimeSuccess(account.siteId, latencyMs, modelName);
+      const targetAccountId = Number.isFinite(actualAccountId) && (actualAccountId ?? 0) > 0
+        ? Math.trunc(actualAccountId!)
+        : account.id;
+      const preference = await getAccountDispatchPreference(targetAccountId);
+      if (preference.mode === 'prefer' && runtimeModelName) {
+        recordAccountDispatchSuccess(route.id, runtimeModelName, targetAccountId, nowMs);
+      }
     }
 
     await db.update(schema.routeChannels).set({
@@ -2539,12 +2602,16 @@ export class TokenRouter {
     const row = await db.select()
       .from(schema.routeChannels)
       .innerJoin(schema.accounts, eq(schema.routeChannels.accountId, schema.accounts.id))
+      .innerJoin(schema.tokenRoutes, eq(schema.routeChannels.routeId, schema.tokenRoutes.id))
       .where(eq(schema.routeChannels.id, channelId))
       .get();
     if (!row) return;
 
     const ch = row.route_channels;
     const account = row.accounts;
+    const route = row.token_routes;
+    const nowMs = Date.now();
+    const runtimeModelName = String(modelName || '').trim();
     if (typeof ch.oauthRouteUnitId === 'number' && ch.oauthRouteUnitId > 0) {
       const targetAccountId = Number.isFinite(actualAccountId) && (actualAccountId ?? 0) > 0
         ? Math.trunc(actualAccountId!)
@@ -2570,6 +2637,10 @@ export class TokenRouter {
           updatedAt: nowIso,
         }).where(eq(schema.oauthRouteUnitMembers.id, memberRow.member.id)).run();
         recordSiteRuntimeSuccess(memberRow.account.siteId, latencyMs, modelName);
+        const preference = await getAccountDispatchPreference(targetAccountId);
+        if (preference.mode === 'prefer' && runtimeModelName) {
+          recordAccountDispatchProbeSuccess(route.id, runtimeModelName, targetAccountId, nowMs);
+        }
       } else {
         recordSiteRuntimeSuccess(account.siteId, latencyMs, modelName);
       }
@@ -2652,6 +2723,13 @@ export class TokenRouter {
     }
 
     recordSiteRuntimeSuccess(account.siteId, latencyMs, modelName);
+    const targetAccountId = Number.isFinite(actualAccountId) && (actualAccountId ?? 0) > 0
+      ? Math.trunc(actualAccountId!)
+      : account.id;
+    const preference = await getAccountDispatchPreference(targetAccountId);
+    if (preference.mode === 'prefer' && runtimeModelName) {
+      recordAccountDispatchProbeSuccess(route.id, runtimeModelName, targetAccountId, nowMs);
+    }
   }
 
   /**
@@ -2717,6 +2795,8 @@ export class TokenRouter {
     const normalizedContext: SiteRuntimeFailureContext = typeof context === 'string'
       ? { modelName: context }
       : (context ?? {});
+    const runtimeModelName = String(normalizedContext.modelName || '').trim();
+    const manualFailureKind = classifyManualDispatchFailureKind(normalizedContext);
     if (typeof ch.oauthRouteUnitId === 'number' && ch.oauthRouteUnitId > 0) {
       const targetAccountId = Number.isFinite(actualAccountId) && (actualAccountId ?? 0) > 0
         ? Math.trunc(actualAccountId!)
@@ -2771,6 +2851,16 @@ export class TokenRouter {
           updatedAt: nowIso,
         }).where(eq(schema.oauthRouteUnitMembers.id, memberRow.member.id)).run();
         recordSiteRuntimeFailure(memberRow.account.siteId, normalizedContext, nowMs);
+        const preference = await getAccountDispatchPreference(targetAccountId);
+        if (preference.mode === 'prefer' && runtimeModelName) {
+          recordAccountDispatchFailure({
+            routeId: route.id,
+            modelName: runtimeModelName,
+            accountId: targetAccountId,
+            kind: manualFailureKind,
+            nowMs,
+          });
+        }
         invalidateRouteScopedCache(route.id);
         return;
       }
@@ -2824,6 +2914,19 @@ export class TokenRouter {
     }
 
     recordSiteRuntimeFailure(account.siteId, normalizedContext, nowMs);
+    const targetAccountId = Number.isFinite(actualAccountId) && (actualAccountId ?? 0) > 0
+      ? Math.trunc(actualAccountId!)
+      : account.id;
+    const preference = await getAccountDispatchPreference(targetAccountId);
+    if (preference.mode === 'prefer' && runtimeModelName) {
+      recordAccountDispatchFailure({
+        routeId: route.id,
+        modelName: runtimeModelName,
+        accountId: targetAccountId,
+        kind: manualFailureKind,
+        nowMs,
+      });
+    }
   }
 
   /**
@@ -2839,32 +2942,106 @@ export class TokenRouter {
 
   // --- Private methods ---
 
-  private async selectFromMatch(
+  private getAvailableCandidatesFromMatch(
     match: RouteMatch,
     requestedModel: string,
     downstreamPolicy: DownstreamRoutingPolicy,
-    excludeChannelIds: number[] = [],
-    recordSelection = true,
-  ): Promise<SelectedChannel | null> {
-    const mappedModel = resolveMappedModel(requestedModel, match.route.modelMapping);
-    const requestedByDisplayName = isRouteDisplayNameMatch(requestedModel, match.route.displayName);
-    const bypassSourceModelCheck = requestedByDisplayName;
-    const routeStrategy = resolveRouteStrategy(match.route);
-    const runtimeModelResolver = requestedByDisplayName
-      ? ((candidate: RouteChannelCandidate) => normalizeChannelSourceModel(candidate.channel.sourceModel) || mappedModel)
-      : mappedModel;
-
-    const nowIso = new Date().toISOString();
-    const nowMs = Date.now();
-    const available = match.channels.filter((candidate) => (
+    options: {
+      requestedByDisplayName: boolean;
+      excludeChannelIds?: number[];
+      excludeAccountIds?: number[];
+      nowIso: string;
+    },
+  ): RouteChannelCandidate[] {
+    const bypassSourceModelCheck = options.requestedByDisplayName;
+    return match.channels.filter((candidate) => (
       this.getCandidateEligibilityReasons(candidate, {
         requestedModel,
         bypassSourceModelCheck,
-        excludeChannelIds,
-        nowIso,
+        excludeChannelIds: options.excludeChannelIds,
+        excludeAccountIds: options.excludeAccountIds,
+        nowIso: options.nowIso,
         downstreamPolicy,
       }).length === 0
     ));
+  }
+
+  private async resolveManualDispatchPreferenceForMatch(match: RouteMatch): Promise<MatchManualDispatchPreference | null> {
+    const accountIds = new Set<number>();
+    for (const candidate of match.channels) {
+      accountIds.add(candidate.account.id);
+      for (const member of candidate.routeUnitMembers) {
+        accountIds.add(member.account.id);
+      }
+    }
+    if (accountIds.size <= 0) return null;
+
+    const preferenceMap = await listAccountDispatchPreferences([...accountIds]);
+    const activePreferences = [...preferenceMap.values()]
+      .filter((item): item is MatchManualDispatchPreference => item.mode === 'force' || item.mode === 'prefer')
+      .sort((left, right) => {
+        const modeRankDiff = (right.mode === 'force' ? 2 : 1) - (left.mode === 'force' ? 2 : 1);
+        if (modeRankDiff !== 0) return modeRankDiff;
+        const leftUpdatedAtMs = left.updatedAt ? Date.parse(left.updatedAt) : 0;
+        const rightUpdatedAtMs = right.updatedAt ? Date.parse(right.updatedAt) : 0;
+        if (leftUpdatedAtMs !== rightUpdatedAtMs) return rightUpdatedAtMs - leftUpdatedAtMs;
+        return left.accountId - right.accountId;
+      });
+
+    return activePreferences[0] ?? null;
+  }
+
+  private resolvePreferredAccountModelName(
+    match: RouteMatch,
+    requestedModel: string,
+    mappedModel: string,
+    preferredAccountId: number,
+  ): string {
+    for (const candidate of match.channels) {
+      const matchesCandidate = candidate.account.id === preferredAccountId
+        || candidate.routeUnitMembers.some((memberCandidate) => memberCandidate.account.id === preferredAccountId);
+      if (!matchesCandidate) continue;
+      return resolveActualModelForSelectedChannel(
+        requestedModel,
+        match.route,
+        mappedModel,
+        candidate.channel.sourceModel,
+      );
+    }
+    return mappedModel;
+  }
+
+  private async selectFromAvailableCandidates(input: {
+    match: RouteMatch;
+    requestedModel: string;
+    mappedModel: string;
+    requestedByDisplayName: boolean;
+    downstreamPolicy: DownstreamRoutingPolicy;
+    available: RouteChannelCandidate[];
+    excludeChannelIds: number[];
+    excludeAccountIds?: number[];
+    recordSelection: boolean;
+  }): Promise<SelectedChannel | null> {
+    const routeStrategy = resolveRouteStrategy(input.match.route);
+    const runtimeModelResolver = input.requestedByDisplayName
+      ? ((candidate: RouteChannelCandidate) => normalizeChannelSourceModel(candidate.channel.sourceModel) || input.mappedModel)
+      : input.mappedModel;
+    const nowIso = new Date().toISOString();
+    const nowMs = Date.now();
+    const excludeAccountIds = Array.isArray(input.excludeAccountIds) ? input.excludeAccountIds : [];
+    const available = excludeAccountIds.length > 0
+      ? this.getAvailableCandidatesFromMatch(
+        input.match,
+        input.requestedModel,
+        input.downstreamPolicy,
+        {
+          requestedByDisplayName: input.requestedByDisplayName,
+          excludeChannelIds: input.excludeChannelIds,
+          excludeAccountIds,
+          nowIso,
+        },
+      )
+      : input.available;
 
     if (available.length === 0) return null;
 
@@ -2874,27 +3051,28 @@ export class TokenRouter {
       if (!selected) return null;
       return await this.finalizeSelectedCandidateForDispatch(
         selected,
-        match,
-        requestedModel,
-        mappedModel,
-        downstreamPolicy,
-        recordSelection,
+        input.match,
+        input.requestedModel,
+        input.mappedModel,
+        input.downstreamPolicy,
+        input.recordSelection,
         nowIso,
         nowMs,
         undefined,
         undefined,
         false,
-        excludeChannelIds,
+        input.excludeChannelIds,
+        excludeAccountIds,
       );
     }
 
     if (routeStrategy === 'stable_first') {
       const breakerFiltered = filterSiteRuntimeBrokenCandidatesByModel(available, runtimeModelResolver, nowMs);
       const candidates = filterRecentlyFailedCandidates(breakerFiltered.candidates, nowMs);
-      const rotationKey = this.buildStableFirstRotationKey(match.route.id, requestedModel);
+      const rotationKey = this.buildStableFirstRotationKey(input.match.route.id, input.requestedModel);
       const poolPlan = buildStableFirstPoolPlan(
         candidates,
-        requestedByDisplayName ? runtimeModelResolver : mappedModel,
+        input.requestedByDisplayName ? runtimeModelResolver : input.mappedModel,
         nowMs,
       );
       const shouldUseObservation = (
@@ -2902,7 +3080,7 @@ export class TokenRouter {
         && (
           poolPlan.primaryCandidates.length <= 0
           || (
-            recordSelection
+            input.recordSelection
             && shouldUseStableFirstObservationCandidate(rotationKey, poolPlan.observationCandidates, nowMs)
           )
         )
@@ -2912,29 +3090,30 @@ export class TokenRouter {
         : (poolPlan.primaryCandidates.length > 0 ? poolPlan.primaryCandidates : poolPlan.observationCandidates);
       const selected = this.stableFirstSelect(
         selectionPool,
-        requestedByDisplayName ? runtimeModelResolver : mappedModel,
-        downstreamPolicy,
+        input.requestedByDisplayName ? runtimeModelResolver : input.mappedModel,
+        input.downstreamPolicy,
         nowMs,
         shouldUseObservation ? `${rotationKey}:observe` : rotationKey,
       );
       if (!selected) return null;
       return await this.finalizeSelectedCandidateForDispatch(
         selected,
-        match,
-        requestedModel,
-        mappedModel,
-        downstreamPolicy,
-        recordSelection,
+        input.match,
+        input.requestedModel,
+        input.mappedModel,
+        input.downstreamPolicy,
+        input.recordSelection,
         nowIso,
         nowMs,
         rotationKey,
         `${rotationKey}:observe`,
         shouldUseObservation,
-        excludeChannelIds,
+        input.excludeChannelIds,
+        excludeAccountIds,
       );
     }
 
-    const layers = new Map<number, typeof available>();
+    const layers = new Map<number, RouteChannelCandidate[]>();
     for (const candidate of available) {
       const priority = candidate.channel.priority ?? 0;
       if (!layers.has(priority)) layers.set(priority, []);
@@ -2948,29 +3127,259 @@ export class TokenRouter {
       const candidates = filterRecentlyFailedCandidates(breakerFiltered.candidates, nowMs);
       const selected = this.weightedRandomSelect(
         candidates,
-        requestedByDisplayName ? runtimeModelResolver : mappedModel,
-        downstreamPolicy,
+        input.requestedByDisplayName ? runtimeModelResolver : input.mappedModel,
+        input.downstreamPolicy,
         nowMs,
       );
       if (!selected) continue;
       const resolved = await this.finalizeSelectedCandidateForDispatch(
         selected,
-        match,
-        requestedModel,
-        mappedModel,
-        downstreamPolicy,
-        recordSelection,
+        input.match,
+        input.requestedModel,
+        input.mappedModel,
+        input.downstreamPolicy,
+        input.recordSelection,
         nowIso,
         nowMs,
         undefined,
         undefined,
         false,
-        excludeChannelIds,
+        input.excludeChannelIds,
+        excludeAccountIds,
       );
       if (resolved) return resolved;
     }
 
     return null;
+  }
+
+  private async selectPreferredAccountFromMatch(
+    match: RouteMatch,
+    requestedModel: string,
+    preferredAccountId: number,
+    downstreamPolicy: DownstreamRoutingPolicy,
+    excludeChannelIds: number[] = [],
+    recordSelection = true,
+  ): Promise<SelectedChannel | null> {
+    const mappedModel = resolveMappedModel(requestedModel, match.route.modelMapping);
+    const requestedByDisplayName = isRouteDisplayNameMatch(requestedModel, match.route.displayName);
+    const bypassSourceModelCheck = requestedByDisplayName;
+    const routeStrategy = resolveRouteStrategy(match.route);
+    const runtimeModelResolver = requestedByDisplayName
+      ? ((candidate: RouteChannelCandidate) => normalizeChannelSourceModel(candidate.channel.sourceModel) || mappedModel)
+      : mappedModel;
+    const nowIso = new Date().toISOString();
+    const nowMs = Date.now();
+
+    for (const candidate of match.channels) {
+      if (excludeChannelIds.includes(candidate.channel.id)) continue;
+
+      if (isOauthRouteUnitCandidate(candidate)) {
+        const preferredMember = candidate.routeUnitMembers.find((memberCandidate) => memberCandidate.account.id === preferredAccountId);
+        if (!preferredMember) continue;
+        if (this.getRouteUnitMemberEligibilityReasons(candidate, preferredMember, {
+          requestedModel,
+          bypassSourceModelCheck,
+          excludeChannelIds,
+          nowIso,
+          downstreamPolicy,
+        }).length > 0) {
+          continue;
+        }
+        const dispatchCandidate = this.buildRouteUnitMemberDispatchCandidate(candidate, preferredMember);
+        const breakerFiltered = filterSiteRuntimeBrokenCandidatesByModel([dispatchCandidate], runtimeModelResolver, nowMs);
+        if (breakerFiltered.candidates.length <= 0) continue;
+        if (routeStrategy !== 'round_robin' && isChannelRecentlyFailed(preferredMember.member, nowMs)) {
+          continue;
+        }
+        return await this.finalizeSelectedCandidateForDispatch(
+          candidate,
+          match,
+          requestedModel,
+          mappedModel,
+          downstreamPolicy,
+          recordSelection && (routeStrategy === 'round_robin' || routeStrategy === 'stable_first'),
+          nowIso,
+          nowMs,
+          routeStrategy === 'stable_first' ? this.buildStableFirstRotationKey(match.route.id, requestedModel) : undefined,
+          routeStrategy === 'stable_first' ? `${this.buildStableFirstRotationKey(match.route.id, requestedModel)}:observe` : undefined,
+          false,
+          excludeChannelIds,
+          [],
+          preferredAccountId,
+        );
+      }
+
+      if (candidate.account.id !== preferredAccountId) continue;
+      if (this.getCandidateEligibilityReasons(candidate, {
+        requestedModel,
+        bypassSourceModelCheck,
+        excludeChannelIds,
+        nowIso,
+        downstreamPolicy,
+      }).length > 0) {
+        continue;
+      }
+
+      const breakerFiltered = filterSiteRuntimeBrokenCandidatesByModel([candidate], runtimeModelResolver, nowMs);
+      if (breakerFiltered.candidates.length <= 0) continue;
+      if (routeStrategy !== 'round_robin' && isChannelRecentlyFailed(candidate.channel, nowMs)) {
+        continue;
+      }
+
+      return await this.finalizeSelectedCandidateForDispatch(
+        candidate,
+        match,
+        requestedModel,
+        mappedModel,
+        downstreamPolicy,
+        recordSelection && (routeStrategy === 'round_robin' || routeStrategy === 'stable_first'),
+        nowIso,
+        nowMs,
+        routeStrategy === 'stable_first' ? this.buildStableFirstRotationKey(match.route.id, requestedModel) : undefined,
+        routeStrategy === 'stable_first' ? `${this.buildStableFirstRotationKey(match.route.id, requestedModel)}:observe` : undefined,
+        false,
+        excludeChannelIds,
+        [],
+        preferredAccountId,
+      );
+    }
+
+    return null;
+  }
+
+  private async selectFromMatch(
+    match: RouteMatch,
+    requestedModel: string,
+    downstreamPolicy: DownstreamRoutingPolicy,
+    excludeChannelIds: number[] = [],
+    recordSelection = true,
+  ): Promise<SelectedChannel | null> {
+    const mappedModel = resolveMappedModel(requestedModel, match.route.modelMapping);
+    const requestedByDisplayName = isRouteDisplayNameMatch(requestedModel, match.route.displayName);
+    const nowIso = new Date().toISOString();
+    const nowMs = Date.now();
+    const available = this.getAvailableCandidatesFromMatch(
+      match,
+      requestedModel,
+      downstreamPolicy,
+      {
+        requestedByDisplayName,
+        excludeChannelIds,
+        nowIso,
+      },
+    );
+
+    if (available.length === 0) return null;
+    const manualPreference = await this.resolveManualDispatchPreferenceForMatch(match);
+    if (!manualPreference) {
+      return await this.selectFromAvailableCandidates({
+        match,
+        requestedModel,
+        mappedModel,
+        requestedByDisplayName,
+        downstreamPolicy,
+        available,
+        excludeChannelIds,
+        recordSelection,
+      });
+    }
+
+    const preferredAccountId = manualPreference.accountId;
+    const preferredModelName = this.resolvePreferredAccountModelName(
+      match,
+      requestedModel,
+      mappedModel,
+      preferredAccountId,
+    );
+
+    if (manualPreference.mode === 'force') {
+      return await this.selectPreferredAccountFromMatch(
+        match,
+        requestedModel,
+        preferredAccountId,
+        downstreamPolicy,
+        excludeChannelIds,
+        recordSelection,
+      );
+    }
+
+    const snapshot = getAccountDispatchRuntimeSnapshot(
+      match.route.id,
+      preferredModelName,
+      preferredAccountId,
+      nowMs,
+    );
+
+    const tryPreferredSelection = async (): Promise<SelectedChannel | null> => {
+      const selected = await this.selectPreferredAccountFromMatch(
+        match,
+        requestedModel,
+        preferredAccountId,
+        downstreamPolicy,
+        excludeChannelIds,
+        recordSelection,
+      );
+      if (selected) return selected;
+      if (recordSelection) {
+        recordAccountDispatchSelectionBlocked(
+          match.route.id,
+          preferredModelName,
+          preferredAccountId,
+          nowMs,
+        );
+      }
+      return null;
+    };
+
+    if (snapshot.status !== 'degraded') {
+      const preferred = await tryPreferredSelection();
+      if (preferred) return preferred;
+    } else if (recordSelection && shouldAttemptManualDispatchRecovery(snapshot, nowMs)) {
+      const recoveryCandidate = await this.selectPreferredAccountFromMatch(
+        match,
+        requestedModel,
+        preferredAccountId,
+        downstreamPolicy,
+        excludeChannelIds,
+        false,
+      );
+      if (recoveryCandidate) {
+        recordAccountDispatchProbeSuccess(
+          match.route.id,
+          recoveryCandidate.actualModel || preferredModelName,
+          preferredAccountId,
+          nowMs,
+        );
+        const preferred = await this.selectPreferredAccountFromMatch(
+          match,
+          requestedModel,
+          preferredAccountId,
+          downstreamPolicy,
+          excludeChannelIds,
+          recordSelection,
+        );
+        if (preferred) return preferred;
+        recordAccountDispatchSelectionBlocked(
+          match.route.id,
+          recoveryCandidate.actualModel || preferredModelName,
+          preferredAccountId,
+          nowMs,
+        );
+      }
+    }
+
+    return await this.selectFromAvailableCandidates({
+      match,
+      requestedModel,
+      mappedModel,
+      requestedByDisplayName,
+      downstreamPolicy,
+      available,
+      excludeChannelIds,
+      excludeAccountIds: [preferredAccountId],
+      recordSelection,
+    });
   }
 
   private async selectPreferredFromMatch(
@@ -3122,6 +3531,13 @@ export class TokenRouter {
       reasonParts.push(downstreamExclusionReason);
     }
 
+    const excludeAccountIds = Array.isArray(options.excludeAccountIds)
+      ? options.excludeAccountIds
+      : [];
+    if (excludeAccountIds.includes(memberCandidate.account.id)) {
+      reasonParts.push('当前请求已排除该账号');
+    }
+
     const tokenValue = this.resolveRouteUnitMemberTokenValue(memberCandidate);
     if (!tokenValue) reasonParts.push('令牌不可用');
 
@@ -3186,18 +3602,25 @@ export class TokenRouter {
     nowIso: string,
     nowMs: number,
     excludeChannelIds: number[] = [],
+    excludeAccountIds: number[] = [],
+    preferredAccountId?: number | null,
   ): RouteChannelCandidate['routeUnitMembers'][number] | null {
     if (!isOauthRouteUnitCandidate(candidate)) return null;
     const eligibleMembers = this.getEligibleRouteUnitMembers(candidate, {
       requestedModel,
       bypassSourceModelCheck: true,
       excludeChannelIds: [],
+      excludeAccountIds,
       nowIso,
       downstreamPolicy,
     });
     if (eligibleMembers.length === 0) return null;
 
     const isRouteUnitFailover = excludeChannelIds.includes(candidate.channel.id);
+    if (!isRouteUnitFailover && Number.isFinite(preferredAccountId) && (preferredAccountId ?? 0) > 0) {
+      const preferred = eligibleMembers.find((memberCandidate) => memberCandidate.account.id === preferredAccountId);
+      if (preferred) return preferred;
+    }
     const healthyMembers = isRouteUnitFailover
       ? eligibleMembers.filter((memberCandidate) => !isChannelRecentlyFailed(memberCandidate.member, nowMs))
       : filterRecentlyFailedCandidates(
@@ -3364,6 +3787,13 @@ export class TokenRouter {
       reasonParts.push(downstreamExclusionReason);
     }
 
+    const excludeAccountIds = Array.isArray(options.excludeAccountIds)
+      ? options.excludeAccountIds
+      : [];
+    if (excludeAccountIds.includes(candidate.account.id)) {
+      reasonParts.push('当前请求已排除该账号');
+    }
+
     if (excludeChannelIds.includes(candidate.channel.id)) {
       reasonParts.push('当前请求已尝试');
     }
@@ -3455,6 +3885,8 @@ export class TokenRouter {
     stableFirstObservationKey?: string,
     usedObservation = false,
     excludeChannelIds: number[] = [],
+    excludeAccountIds: number[] = [],
+    preferredAccountId?: number | null,
   ): Promise<SelectedChannel | null> {
     let dispatchCandidate = selected;
     let resolvedRouteUnitMemberTokenValue: string | null = null;
@@ -3466,6 +3898,8 @@ export class TokenRouter {
         nowIso,
         nowMs,
         excludeChannelIds,
+        excludeAccountIds,
+        preferredAccountId,
       );
       if (!member || !selected.routeUnit) return null;
       resolvedRouteUnitMemberTokenValue = this.resolveRouteUnitMemberTokenValue(member);

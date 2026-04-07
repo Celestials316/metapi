@@ -146,7 +146,7 @@ export async function searchProxyRoute(app: FastifyInstance) {
 
         const latency = Date.now() - startTime;
         await recordTokenRouterEventBestEffort('record channel success', () => (
-          tokenRouter.recordSuccess(selected.channel.id, latency, 0, upstreamModel)
+          tokenRouter.recordSuccess(selected.channel.id, latency, 0, upstreamModel, selected.account.id)
         ));
         recordDownstreamCostUsage(request, 0);
         logProxy(
@@ -172,7 +172,7 @@ export async function searchProxyRoute(app: FastifyInstance) {
           status,
           errorText,
           modelName: upstreamModel,
-        }));
+        }, selected.account.id));
         logProxy(
           selected,
           requestedModel,

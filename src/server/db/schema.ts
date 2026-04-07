@@ -81,6 +81,16 @@ export const accounts = sqliteTable('accounts', {
   oauthIdentityIdx: index('accounts_oauth_identity_idx').on(table.oauthProvider, table.oauthAccountKey, table.oauthProjectId),
 }));
 
+export const accountDispatchPreferences = sqliteTable('account_dispatch_preferences', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  accountId: integer('account_id').notNull().references(() => accounts.id, { onDelete: 'cascade' }),
+  mode: text('mode').notNull(),
+  updatedAt: text('updated_at').default(sql`(datetime('now'))`),
+}, (table) => ({
+  accountIdUnique: uniqueIndex('account_dispatch_preferences_account_id_unique').on(table.accountId),
+  modeIdx: index('account_dispatch_preferences_mode_idx').on(table.mode),
+}));
+
 export const accountTokens = sqliteTable('account_tokens', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   accountId: integer('account_id').notNull().references(() => accounts.id, { onDelete: 'cascade' }),

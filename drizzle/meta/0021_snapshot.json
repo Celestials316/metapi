@@ -1,9 +1,77 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "b486744a-7f0c-4e5d-8e62-496f0a7a2ae6",
-  "prevId": "acb4042f-d8bc-4081-8866-4701e9e16fa4",
+  "id": "caa1dec5-5dc1-4774-95f7-bec0dea05e1e",
+  "prevId": "b486744a-7f0c-4e5d-8e62-496f0a7a2ae6",
   "tables": {
+    "account_dispatch_preferences": {
+      "name": "account_dispatch_preferences",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "integer",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": true
+        },
+        "account_id": {
+          "name": "account_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "mode": {
+          "name": "mode",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false,
+          "default": "(datetime('now'))"
+        }
+      },
+      "indexes": {
+        "account_dispatch_preferences_account_id_unique": {
+          "name": "account_dispatch_preferences_account_id_unique",
+          "columns": [
+            "account_id"
+          ],
+          "isUnique": true
+        },
+        "account_dispatch_preferences_mode_idx": {
+          "name": "account_dispatch_preferences_mode_idx",
+          "columns": [
+            "mode"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "account_dispatch_preferences_account_id_accounts_id_fk": {
+          "name": "account_dispatch_preferences_account_id_accounts_id_fk",
+          "tableFrom": "account_dispatch_preferences",
+          "tableTo": "accounts",
+          "columnsFrom": [
+            "account_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
     "account_tokens": {
       "name": "account_tokens",
       "columns": {

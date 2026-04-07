@@ -221,6 +221,7 @@ async function runRecoveryProbeCandidate(candidate: RecoveryProbeCandidate, nowM
         candidate.channelId,
         result.latencyMs ?? 0,
         candidate.modelName,
+        candidate.account.id,
       );
     }
   } catch (error) {

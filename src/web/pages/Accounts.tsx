@@ -32,6 +32,29 @@ import { SITE_DOCS_URL } from '../docsLink.js';
 import { getSiteInitializationPreset } from '../../shared/siteInitializationPresets.js';
 
 type ConnectionsSegment = 'session' | 'apikey' | 'tokens';
+type AccountDispatchPreferenceMode = 'default' | 'force' | 'prefer';
+
+const ACCOUNT_DISPATCH_PREFERENCE_OPTIONS: Array<{
+  value: AccountDispatchPreferenceMode;
+  label: string;
+  description: string;
+}> = [
+  {
+    value: 'default',
+    label: '默认调度',
+    description: '完全按现有路由策略调度，不固定连接。',
+  },
+  {
+    value: 'force',
+    label: '强指定',
+    description: '以后只走这个连接；这个连接不可用时直接报错，不切别的连接。',
+  },
+  {
+    value: 'prefer',
+    label: '优先调用',
+    description: '优先走这个连接；不可用时暂时切别的连接，恢复后自动切回。',
+  },
+];
 
 const ACCOUNT_SEGMENTS: Array<{
   value: ConnectionsSegment;
@@ -72,6 +95,20 @@ function resolveConnectionsSegment(search: string): ConnectionsSegment {
   const rawSegment = new URLSearchParams(search).get('segment');
   if (rawSegment === 'apikey' || rawSegment === 'tokens') return rawSegment;
   return 'session';
+}
+
+function normalizeAccountDispatchPreferenceMode(value: unknown): AccountDispatchPreferenceMode {
+  return value === 'force' || value === 'prefer' ? value : 'default';
+}
+
+function getAccountDispatchPreferencePresentation(mode: AccountDispatchPreferenceMode) {
+  if (mode === 'force') {
+    return { label: '强指定', className: 'badge-warning' };
+  }
+  if (mode === 'prefer') {
+    return { label: '优先', className: 'badge-purple' };
+  }
+  return { label: '默认调度', className: 'badge-muted' };
 }
 
 export default function Accounts() {
@@ -126,6 +163,17 @@ export default function Accounts() {
   const [rebindSaving, setRebindSaving] = useState(false);
   const [probeModalOpen, setProbeModalOpen] = useState(false);
   const [probeAccount, setProbeAccount] = useState<any | null>(null);
+  const [dispatchPreferenceModal, setDispatchPreferenceModal] = useState<{
+    open: boolean;
+    account: any | null;
+    mode: AccountDispatchPreferenceMode;
+    saving: boolean;
+  }>({
+    open: false,
+    account: null,
+    mode: 'default',
+    saving: false,
+  });
   const [modelModal, setModelModal] = useState<{
     open: boolean;
     account: any | null;
@@ -537,6 +585,65 @@ export default function Accounts() {
     setProbeModalOpen(false);
   };
 
+  const patchAccountDispatchPreferenceMode = (accountId: number, mode: AccountDispatchPreferenceMode) => {
+    setAccounts((current) => current.map((account) => (
+      account.id === accountId
+        ? { ...account, dispatchPreferenceMode: mode }
+        : account
+    )));
+    setProbeAccount((current: any) => (
+      current?.id === accountId
+        ? { ...current, dispatchPreferenceMode: mode }
+        : current
+    ));
+    setEditingAccount((current: any) => (
+      current?.id === accountId
+        ? { ...current, dispatchPreferenceMode: mode }
+        : current
+    ));
+  };
+
+  const openDispatchPreferenceModal = (account: any) => {
+    setDispatchPreferenceModal({
+      open: true,
+      account,
+      mode: normalizeAccountDispatchPreferenceMode(account?.dispatchPreferenceMode),
+      saving: false,
+    });
+  };
+
+  const closeDispatchPreferenceModal = () => {
+    setDispatchPreferenceModal({
+      open: false,
+      account: null,
+      mode: 'default',
+      saving: false,
+    });
+  };
+
+  const saveDispatchPreferenceModal = async () => {
+    if (!dispatchPreferenceModal.account) return;
+    setDispatchPreferenceModal((current) => ({ ...current, saving: true }));
+    try {
+      const result = await api.updateAccount(dispatchPreferenceModal.account.id, {
+        dispatchPreferenceMode: dispatchPreferenceModal.mode,
+      });
+      const nextMode = normalizeAccountDispatchPreferenceMode(
+        result?.dispatchPreferenceMode ?? dispatchPreferenceModal.mode,
+      );
+      patchAccountDispatchPreferenceMode(dispatchPreferenceModal.account.id, nextMode);
+      toast.success(
+        nextMode === 'force'
+          ? '已改为强指定'
+          : (nextMode === 'prefer' ? '已改为优先调用' : '已切回默认调度'),
+      );
+      closeDispatchPreferenceModal();
+    } catch (e: any) {
+      toast.error(e.message || '保存指定调度失败');
+      setDispatchPreferenceModal((current) => ({ ...current, saving: false }));
+    }
+  };
+
   const toggleModelDisabled = (modelName: string) => {
     setModelModal(s => {
       const next = new Set(s.pendingDisabled);
@@ -644,6 +751,17 @@ export default function Accounts() {
       canRefreshBalance: hasSession,
       proxyOnly: !hasSession,
     };
+  };
+
+  const renderDispatchPreferenceBadge = (account: any, options: { fontSize?: number } = {}) => {
+    const mode = normalizeAccountDispatchPreferenceMode(account?.dispatchPreferenceMode);
+    if (mode === 'default') return null;
+    const presentation = getAccountDispatchPreferencePresentation(mode);
+    return (
+      <span className={`badge ${presentation.className}`} style={{ fontSize: options.fontSize ?? 10 }}>
+        {presentation.label}
+      </span>
+    );
   };
 
   const handleRefreshRuntimeHealth = async () => {
@@ -1613,6 +1731,86 @@ export default function Accounts() {
           )}
 
           <CenteredModal
+            open={dispatchPreferenceModal.open}
+            onClose={dispatchPreferenceModal.saving ? (() => {}) : closeDispatchPreferenceModal}
+            title={dispatchPreferenceModal.account ? `指定调度 · ${resolveAccountDisplayName(dispatchPreferenceModal.account)}` : '指定调度'}
+            maxWidth={640}
+            bodyStyle={{ display: 'flex', flexDirection: 'column', gap: 14 }}
+            footer={(
+              <>
+                <button
+                  type="button"
+                  onClick={closeDispatchPreferenceModal}
+                  className="btn btn-ghost"
+                  disabled={dispatchPreferenceModal.saving}
+                >
+                  取消
+                </button>
+                <button
+                  type="button"
+                  onClick={saveDispatchPreferenceModal}
+                  disabled={dispatchPreferenceModal.saving}
+                  className="btn btn-primary"
+                >
+                  {dispatchPreferenceModal.saving
+                    ? <><span className="spinner spinner-sm" style={{ borderTopColor: 'white', borderColor: 'rgba(255,255,255,0.3)' }} /> 保存中...</>
+                    : '保存设置'}
+                </button>
+              </>
+            )}
+          >
+            <div className="info-tip">
+              只改这条连接的调度语义，不会改路由优先级。优先调用在连接恢复后会自动切回，不会把兜底连接永久粘住。
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              {ACCOUNT_DISPATCH_PREFERENCE_OPTIONS.map((option) => {
+                const checked = dispatchPreferenceModal.mode === option.value;
+                return (
+                  <label
+                    key={option.value}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'flex-start',
+                      gap: 12,
+                      border: `1px solid ${checked ? 'var(--color-primary)' : 'var(--color-border)'}`,
+                      borderRadius: 'var(--radius-md)',
+                      padding: '14px 16px',
+                      background: checked ? 'rgba(59,130,246,0.08)' : 'var(--color-bg-card)',
+                      cursor: 'pointer',
+                      transition: 'all 0.2s ease',
+                    }}
+                  >
+                    <input
+                      type="radio"
+                      name="account-dispatch-preference-mode"
+                      value={option.value}
+                      checked={checked}
+                      onChange={() => setDispatchPreferenceModal((current) => ({ ...current, mode: option.value }))}
+                      disabled={dispatchPreferenceModal.saving}
+                      style={{ marginTop: 2 }}
+                    />
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                        <span style={{ fontSize: 14, fontWeight: 600, color: 'var(--color-text-primary)' }}>
+                          {option.label}
+                        </span>
+                        {checked ? <span className="badge badge-info" style={{ fontSize: 10 }}>当前选择</span> : null}
+                      </div>
+                      <span style={{ fontSize: 12, lineHeight: 1.7, color: 'var(--color-text-secondary)' }}>
+                        {option.description}
+                      </span>
+                    </div>
+                  </label>
+                );
+              })}
+            </div>
+            <div style={{ fontSize: 12, color: 'var(--color-text-muted)', lineHeight: 1.8 }}>
+              <div>· 强指定：当前连接不可用时直接返回错误，不会切到别的连接。</div>
+              <div>· 优先调用：当前连接短时异常会临时兜底到其他可用连接，恢复后会自动切回当前连接。</div>
+            </div>
+          </CenteredModal>
+
+          <CenteredModal
             open={Boolean(editingAccount)}
             onClose={closeEditPanel}
             title="编辑账号"
@@ -1718,6 +1916,7 @@ export default function Accounts() {
                         title={(
                           <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                             <span>{resolveAccountDisplayName(a)}</span>
+                            {renderDispatchPreferenceBadge(a)}
                             {a.site?.name ? (
                               <SiteBadgeLink
                                 siteId={a.site?.id}
@@ -1768,6 +1967,14 @@ export default function Accounts() {
                               data-testid={`account-probe-${a.id}`}
                             >
                               测活
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => openDispatchPreferenceModal(a)}
+                              className="btn btn-link btn-link-info"
+                              data-testid={`account-dispatch-preference-${a.id}`}
+                            >
+                              指定
                             </button>
                           </>
                         )}
@@ -1963,6 +2170,7 @@ export default function Accounts() {
                             <span className={`badge ${connectionMode === 'apikey' ? 'badge-warning' : 'badge-info'}`} style={{ fontSize: 10 }}>
                               {connectionMode === 'apikey' ? 'API Key' : 'Session'}
                             </span>
+                            {renderDispatchPreferenceBadge(a)}
                             {parseAccountExtraConfig(a)?.proxyUrl && (
                               <span className="badge badge-purple" style={{ fontSize: 10 }}>代理</span>
                             )}
@@ -2078,6 +2286,13 @@ export default function Accounts() {
                               data-testid={`account-probe-${a.id}`}
                             >
                               测活
+                            </button>
+                            <button
+                              onClick={() => openDispatchPreferenceModal(a)}
+                              className="btn btn-link btn-link-info"
+                              data-testid={`account-dispatch-preference-${a.id}`}
+                            >
+                              指定
                             </button>
                             {capabilities.canCheckin && (
                               <button onClick={() => withLoading(`checkin-${a.id}`, () => api.triggerCheckin(a.id), '签到完成')} disabled={actionLoading[`checkin-${a.id}`]} className="btn btn-link btn-link-warning">

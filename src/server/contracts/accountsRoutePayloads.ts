@@ -1,6 +1,7 @@
 import { z } from 'zod';
 
 const accountCredentialModeSchema = z.enum(['auto', 'session', 'apikey']);
+const accountDispatchPreferenceModeSchema = z.enum(['default', 'force', 'prefer']);
 
 const accountCreatePayloadSchema = z.object({
   siteId: z.number().int().positive(),
@@ -28,6 +29,7 @@ const accountUpdatePayloadSchema = z.object({
   isPinned: z.boolean().optional(),
   sortOrder: z.number().int().min(0).optional(),
   proxyUrl: z.union([z.string(), z.null()]).optional(),
+  dispatchPreferenceMode: accountDispatchPreferenceModeSchema.optional(),
 }).passthrough();
 
 const accountBatchPayloadSchema = z.object({
@@ -120,6 +122,9 @@ function formatAccountsPayloadError(error: z.ZodError): string {
   }
   if (firstPath === 'proxyUrl') {
     return 'Invalid proxyUrl. Expected string or null.';
+  }
+  if (firstPath === 'dispatchPreferenceMode') {
+    return 'Invalid dispatchPreferenceMode. Expected default/force/prefer.';
   }
   if (firstPath === 'ids') {
     return 'Invalid ids. Expected number[].';
