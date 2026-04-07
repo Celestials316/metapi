@@ -206,23 +206,25 @@ describe('Accounts dispatch preference', () => {
       });
       await flushMicrotasks();
 
+      const strip = root.root.find((node) => node.props['data-testid'] === 'manual-dispatch-strip');
+      expect(strip).toBeTruthy();
+
       const pageText = collectText(root.root);
-      expect(pageText).toContain('手动调度生效中');
+      expect(pageText).toContain('手动调度中');
       expect(pageText).toContain('强指定');
       expect(pageText).toContain('优先调用');
       expect(pageText).toContain('Site A');
       expect(pageText).toContain('alpha');
       expect(pageText).toContain('Site B');
       expect(pageText).toContain('beta');
-      expect(pageText).toContain('共享路由时会按强指定优先、最近修改优先生效');
+      expect(pageText).not.toContain('当前已有');
+      expect(pageText).not.toContain('共享路由时会按强指定优先、最近修改优先生效');
 
-      const restoreButtons = root.root.findAll((node) => (
-        node.type === 'button' && collectText(node).includes('恢复默认调用')
-      ));
-      expect(restoreButtons.length).toBeGreaterThan(0);
+      const restoreButton = root.root.find((node) => node.props['data-testid'] === 'manual-dispatch-restore-1');
+      expect(collectText(restoreButton)).toContain('恢复默认');
 
       await act(async () => {
-        await restoreButtons[0].props.onClick();
+        await restoreButton.props.onClick();
       });
       await flushMicrotasks();
 

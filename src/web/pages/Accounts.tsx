@@ -112,6 +112,12 @@ function getAccountDispatchPreferencePresentation(mode: AccountDispatchPreferenc
   return { label: '默认调度', className: 'badge-muted' };
 }
 
+function getManualDispatchModeLabel(mode: AccountDispatchPreferenceMode) {
+  if (mode === 'force') return '强指定';
+  if (mode === 'prefer') return '优先调用';
+  return '默认调度';
+}
+
 function renderAccountsLoadingState(isMobile: boolean) {
   return (
     <div
@@ -1252,21 +1258,19 @@ export default function Accounts() {
 
       {manualDispatchAccounts.length > 0 && (
         <div
-          className="alert alert-info animate-scale-in"
-          style={{
-            marginBottom: 16,
-            display: 'flex',
-            flexDirection: 'column',
-            gap: 12,
-          }}
+          className="manual-dispatch-strip animate-scale-in"
+          data-testid="manual-dispatch-strip"
+          role="status"
+          aria-live="polite"
         >
-          <div className="alert-title" style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-            <span>手动调度生效中</span>
-            <span style={{ fontSize: 12, color: 'var(--color-text-secondary)', fontWeight: 500 }}>
-              当前已有 {manualDispatchAccounts.length} 条连接处于强指定或优先调用状态
+          <div className="manual-dispatch-strip-summary">
+            <span className="manual-dispatch-strip-indicator" aria-hidden="true" />
+            <span className="manual-dispatch-strip-title">手动调度中</span>
+            <span className="manual-dispatch-strip-caption">
+              {manualDispatchAccounts.length > 1 ? `${manualDispatchAccounts.length} 条连接生效` : '当前连接已覆盖默认调度'}
             </span>
           </div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <div className="manual-dispatch-strip-chips">
             {manualDispatchAccounts.map((account) => {
               const mode = normalizeAccountDispatchPreferenceMode(account?.dispatchPreferenceMode);
               const presentation = getAccountDispatchPreferencePresentation(mode);
@@ -1274,49 +1278,34 @@ export default function Accounts() {
               return (
                 <div
                   key={`manual-dispatch-banner-${account.id}`}
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'space-between',
-                    gap: 12,
-                    padding: '10px 12px',
-                    border: '1px solid var(--color-border-light)',
-                    borderRadius: 'var(--radius-md)',
-                    background: 'var(--color-bg-card)',
-                    flexWrap: 'wrap',
-                  }}
+                  className="manual-dispatch-strip-chip"
+                  data-testid={`manual-dispatch-chip-${account.id}`}
                 >
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                  <div className="manual-dispatch-strip-chip-meta">
                     <span className={`badge ${presentation.className}`} style={{ fontSize: 11 }}>
-                      {mode === 'prefer' ? '优先调用' : presentation.label}
+                      {getManualDispatchModeLabel(mode)}
                     </span>
-                    <span style={{ color: 'var(--color-text-primary)', fontWeight: 600 }}>
-                      {account.site?.name || '未命名站点'}
-                    </span>
-                    <span style={{ color: 'var(--color-text-secondary)', fontSize: 13 }}>
-                      / {resolveAccountDisplayName(account)}
+                    <span className="manual-dispatch-strip-chip-label">
+                      {(account.site?.name || '未命名站点')}
+                      <span className="manual-dispatch-strip-chip-separator"> / </span>
+                      {resolveAccountDisplayName(account)}
                     </span>
                   </div>
                   <button
                     type="button"
-                    className="btn btn-ghost"
-                    style={{ border: '1px solid var(--color-border)' }}
+                    className="btn-link btn-link-primary manual-dispatch-strip-restore"
+                    data-testid={`manual-dispatch-restore-${account.id}`}
                     onClick={() => restoreDefaultDispatchPreference(account)}
                     disabled={!!actionLoading[restoreKey]}
                   >
                     {actionLoading[restoreKey]
-                      ? <><span className="spinner spinner-sm" />恢复中...</>
-                      : '恢复默认调用'}
+                      ? <><span className="spinner spinner-sm" />恢复中</>
+                      : '恢复默认'}
                   </button>
                 </div>
               );
             })}
           </div>
-          {manualDispatchAccounts.length > 1 && (
-            <div style={{ fontSize: 12, color: 'var(--color-text-muted)', lineHeight: 1.7 }}>
-              共享路由时会按强指定优先、最近修改优先生效。
-            </div>
-          )}
         </div>
       )}
 
