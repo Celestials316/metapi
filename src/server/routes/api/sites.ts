@@ -649,7 +649,12 @@ export async function sitesRoutes(app: FastifyInstance) {
     if (normalizedProxyUrl.present) updates.proxyUrl = normalizedProxyUrl.proxyUrl;
     if (body.useSystemProxy !== undefined) updates.useSystemProxy = normalizedUseSystemProxy;
     if (normalizedCustomHeaders.present) updates.customHeaders = normalizedCustomHeaders.customHeaders;
-    if (normalizedExternalCheckinUrl.present) updates.externalCheckinUrl = normalizedExternalCheckinUrl.url;
+    if (normalizedExternalCheckinUrl.present) {
+      updates.externalCheckinUrl = normalizedExternalCheckinUrl.url;
+      if (normalizedExternalCheckinUrl.url !== (existingSite.externalCheckinUrl || null)) {
+        updates.externalCheckinKind = null;
+      }
+    }
     if (body.status !== undefined) updates.status = normalizedStatus;
     if (body.isPinned !== undefined) updates.isPinned = normalizedPinned;
     if (body.sortOrder !== undefined) updates.sortOrder = normalizedSortOrder;

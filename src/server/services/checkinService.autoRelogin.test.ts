@@ -52,7 +52,13 @@ vi.mock('../db/index.js', () => {
     schema: {
       accounts: { id: 'id', siteId: 'siteId', checkinEnabled: 'checkinEnabled', status: 'status' },
       sites: { id: 'id' },
-      checkinLogs: {},
+      checkinLogs: {
+        accountId: 'accountId',
+        status: 'status',
+        reward: 'reward',
+        message: 'message',
+        createdAt: 'createdAt',
+      },
       events: {},
     },
   };

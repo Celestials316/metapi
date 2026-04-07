@@ -1,6 +1,6 @@
 import { db, schema } from '../db/index.js';
 import { getAdapter } from './platforms/index.js';
-import { eq, and } from 'drizzle-orm';
+import { eq, and, gte, lt } from 'drizzle-orm';
 import { sendNotification } from './notifyService.js';
 import { isCloudflareChallenge, isTokenExpiredError } from './alertRules.js';
 import { reportTokenExpired } from './alertService.js';
@@ -17,7 +17,7 @@ import {
 import { isSub2ApiPlatform } from './sub2apiManagedAuth.js';
 import { decryptAccountPassword } from './accountCredentialService.js';
 import { setAccountRuntimeHealth } from './accountHealthService.js';
-import { formatUtcSqlDateTime } from './localTimeService.js';
+import { formatUtcSqlDateTime, getLocalDayRangeUtc } from './localTimeService.js';
 import { withAccountProxyOverride } from './siteProxy.js';
 import {
   MANUAL_EXTERNAL_CHECKIN_MESSAGE,
@@ -95,6 +95,26 @@ function inferRewardFromBalanceDelta(previousBalance: unknown, latestBalance: un
   const delta = after - before;
   if (!Number.isFinite(delta) || delta <= 0) return 0;
   return Math.round(delta * 1_000_000) / 1_000_000;
+}
+
+async function hasRewardedCheckinLoggedToday(accountId: number, now = new Date()): Promise<boolean> {
+  const { startUtc, endUtc } = getLocalDayRangeUtc(now);
+  const rows = await db.select({
+    reward: schema.checkinLogs.reward,
+    message: schema.checkinLogs.message,
+  }).from(schema.checkinLogs)
+    .where(and(
+      eq(schema.checkinLogs.accountId, accountId),
+      eq(schema.checkinLogs.status, 'success'),
+      gte(schema.checkinLogs.createdAt, startUtc),
+      lt(schema.checkinLogs.createdAt, endUtc),
+    ))
+    .all();
+
+  return rows.some((row) => {
+    const reward = parseCheckinRewardAmount(row.reward) || parseCheckinRewardAmount(row.message);
+    return reward > 0;
+  });
 }
 
 async function tryAutoRelogin(account: any, site: any): Promise<string | null> {
@@ -295,7 +315,20 @@ export async function checkinAccount(accountId: number, options?: { skipEvent?: 
     }
 
     const parsedReward = parseCheckinRewardAmount(logReward) || parseCheckinRewardAmount(result.message);
-    if (directCheckinSuccess && parsedReward <= 0) {
+    if (alreadyCheckedIn && parsedReward > 0) {
+      const hasLoggedRewardToday = await hasRewardedCheckinLoggedToday(account.id);
+      if (hasLoggedRewardToday) {
+        logReward = undefined;
+      } else if (parseCheckinRewardAmount(logReward) <= 0) {
+        logReward = parsedReward.toString();
+      }
+    }
+    const canInferRewardFromBalanceDelta = shouldRefreshBalance
+      && parsedReward <= 0
+      && !unsupportedCheckin
+      && !manualVerificationRequired
+      && !manualExternalCheckinRequired;
+    if (canInferRewardFromBalanceDelta) {
       const inferredReward = inferRewardFromBalanceDelta(account.balance, refreshedBalanceInfo?.balance);
       if (inferredReward > 0) {
         logReward = inferredReward.toString();

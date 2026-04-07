@@ -54,7 +54,13 @@ vi.mock('../db/index.js', () => {
     schema: {
       accounts: { id: 'id', siteId: 'siteId', checkinEnabled: 'checkinEnabled', status: 'status' },
       sites: { id: 'id' },
-      checkinLogs: {},
+      checkinLogs: {
+        accountId: 'accountId',
+        status: 'status',
+        reward: 'reward',
+        message: 'message',
+        createdAt: 'createdAt',
+      },
       events: {},
     },
   };
@@ -145,7 +151,7 @@ describe('checkinService external checkin integration', () => {
     }));
   });
 
-  it('records automatic token-bridge external checkin as success', async () => {
+  it('records automatic token-bridge external checkin rewards directly from the success page', async () => {
     selectAllMock.mockReturnValue([
       {
         accounts: {
@@ -171,10 +177,11 @@ describe('checkinService external checkin integration', () => {
       kind: 'token_bridge',
       entryUrl: 'https://sign.example.com/embed',
       url: null,
-      message: '签到成功',
+      message: '签到成功：获得 40 刀',
       result: {
         success: true,
-        message: '签到成功',
+        message: '签到成功：获得 40 刀',
+        reward: '40',
       },
     });
     refreshBalanceMock.mockResolvedValue({ balance: 11, used: 0, quota: 11 });
@@ -188,7 +195,155 @@ describe('checkinService external checkin integration', () => {
     expect(refreshBalanceMock).toHaveBeenCalledWith(22);
     expect(insertValuesMock.mock.calls[0]?.[0]).toEqual(expect.objectContaining({
       status: 'success',
-      message: '签到成功',
+      message: '签到成功：获得 40 刀',
+      reward: '40',
+    }));
+  });
+
+  it('keeps the first explicit reward from an already-checked-in external page without double counting later', async () => {
+    selectAllMock
+      .mockReturnValueOnce([
+        {
+          accounts: {
+            id: 24,
+            username: 'sub2-user',
+            accessToken: 'token',
+            status: 'active',
+            balance: 10,
+            extraConfig: null,
+          },
+          sites: {
+            id: 24,
+            name: 'sub2-site',
+            url: 'https://sub2.example.com',
+            platform: 'sub2api',
+          },
+        },
+      ])
+      .mockReturnValueOnce([]);
+
+    performAccountExternalCheckinMock.mockResolvedValue({
+      handled: true,
+      mode: 'auto',
+      kind: 'token_bridge',
+      entryUrl: 'https://sign.example.com/embed',
+      url: null,
+      message: '今日已签到（签到成功：获得 40 刀）',
+      result: {
+        success: true,
+        message: '今日已签到（签到成功：获得 40 刀）',
+        reward: '40',
+      },
+    });
+    refreshBalanceMock.mockResolvedValue({ balance: 50, used: 0, quota: 50 });
+
+    const { checkinAccount } = await import('./checkinService.js');
+    const result = await checkinAccount(24);
+
+    expect(result.success).toBe(true);
+    expect(result.status).toBe('success');
+    expect(insertValuesMock.mock.calls[0]?.[0]).toEqual(expect.objectContaining({
+      status: 'success',
+      message: '今日已签到（签到成功：获得 40 刀）',
+      reward: '40',
+    }));
+  });
+
+  it('does not re-add reward when an already-checked-in page repeats a previously recorded amount', async () => {
+    selectAllMock
+      .mockReturnValueOnce([
+        {
+          accounts: {
+            id: 25,
+            username: 'sub2-user',
+            accessToken: 'token',
+            status: 'active',
+            balance: 10,
+            extraConfig: null,
+          },
+          sites: {
+            id: 25,
+            name: 'sub2-site',
+            url: 'https://sub2.example.com',
+            platform: 'sub2api',
+          },
+        },
+      ])
+      .mockReturnValueOnce([
+        { reward: '40', message: '签到成功：获得 40 刀' },
+      ]);
+
+    performAccountExternalCheckinMock.mockResolvedValue({
+      handled: true,
+      mode: 'auto',
+      kind: 'token_bridge',
+      entryUrl: 'https://sign.example.com/embed',
+      url: null,
+      message: '今日已签到（签到成功：获得 40 刀）',
+      result: {
+        success: true,
+        message: '今日已签到（签到成功：获得 40 刀）',
+        reward: '40',
+      },
+    });
+    refreshBalanceMock.mockResolvedValue({ balance: 50, used: 0, quota: 50 });
+
+    const { checkinAccount } = await import('./checkinService.js');
+    const result = await checkinAccount(25);
+
+    expect(result.success).toBe(true);
+    expect(result.status).toBe('success');
+    expect(insertValuesMock.mock.calls[0]?.[0]).toEqual(expect.objectContaining({
+      status: 'success',
+      message: '今日已签到（签到成功：获得 40 刀）',
+    }));
+    expect(insertValuesMock.mock.calls[0]?.[0]?.reward).toBeUndefined();
+  });
+
+  it('infers reward from refreshed balance when token-bridge reports today already checked in', async () => {
+    selectAllMock.mockReturnValue([
+      {
+        accounts: {
+          id: 23,
+          username: 'sub2-user',
+          accessToken: 'token',
+          status: 'active',
+          balance: 10,
+          extraConfig: null,
+        },
+        sites: {
+          id: 23,
+          name: 'sub2-site',
+          url: 'https://sub2.example.com',
+          platform: 'sub2api',
+        },
+      },
+    ]);
+
+    performAccountExternalCheckinMock.mockResolvedValue({
+      handled: true,
+      mode: 'auto',
+      kind: 'token_bridge',
+      entryUrl: 'https://sign.example.com/embed',
+      url: null,
+      message: '今日已签到',
+      result: {
+        success: true,
+        message: '今日已签到',
+      },
+    });
+    refreshBalanceMock.mockResolvedValue({ balance: 11.5, used: 0, quota: 11.5 });
+
+    const { checkinAccount } = await import('./checkinService.js');
+    const result = await checkinAccount(23);
+
+    expect(result.success).toBe(true);
+    expect(result.status).toBe('success');
+    expect(refreshBalanceMock).toHaveBeenCalledWith(23);
+    expect(insertValuesMock.mock.calls[0]?.[0]).toEqual(expect.objectContaining({
+      status: 'success',
+      message: '今日已签到',
+      reward: '1.5',
     }));
   });
 });

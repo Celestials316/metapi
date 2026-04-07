@@ -112,6 +112,24 @@ function getAccountDispatchPreferencePresentation(mode: AccountDispatchPreferenc
   return { label: '默认调度', className: 'badge-muted' };
 }
 
+function renderAccountsLoadingState(isMobile: boolean) {
+  return (
+    <div
+      data-testid="accounts-loading-state"
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        padding: isMobile ? '40px 0' : '56px 0',
+        gap: 10,
+      }}
+    >
+      <span className="spinner" />
+      <span style={{ color: 'var(--color-text-muted)', fontSize: 14 }}>加载连接列表...</span>
+    </div>
+  );
+}
+
 export default function Accounts() {
   const location = useLocation();
   const navigate = useNavigate();
@@ -803,14 +821,17 @@ export default function Accounts() {
     if (!checkinPresentation.showButton) return;
 
     const key = `checkin-${account.id}`;
-    if (checkinPresentation.mode === 'auto') {
+    const isSub2ApiSessionAccount = String(account?.site?.platform || '').trim().toLowerCase() === 'sub2api';
+    if (!isSub2ApiSessionAccount && checkinPresentation.mode === 'auto') {
       await withLoading(key, () => api.triggerCheckin(account.id), '签到完成');
       return;
     }
 
     setActionLoading((s) => ({ ...s, [key]: true }));
     try {
-      const action = await api.getCheckinAction(account.id);
+      const action = isSub2ApiSessionAccount
+        ? await api.getCheckinAction(account.id)
+        : { mode: 'auto' as const, url: null, message: '签到成功' };
       if (action.mode === 'auto') {
         await api.triggerCheckin(account.id);
         toast.success('签到完成');
@@ -1938,7 +1959,7 @@ export default function Accounts() {
           </CenteredModal>
 
           <div className="card">
-            {visibleAccounts.length > 0 ? (
+            {!loaded ? renderAccountsLoadingState(isMobile) : visibleAccounts.length > 0 ? (
               isMobile ? (
                 <div className="mobile-card-list">
                   {visibleAccounts.map((a: any) => {

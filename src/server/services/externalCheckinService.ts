@@ -185,6 +185,25 @@ export function normalizeExternalCheckinKind(value: unknown): ExternalCheckinKin
   return null;
 }
 
+export function resolveStoredAccountCheckinActionMode(
+  account: Pick<AccountRow, 'accessToken'>,
+  site: Pick<SiteRow, 'platform' | 'externalCheckinUrl' | 'externalCheckinKind'>,
+): AccountCheckinActionMode {
+  if (!hasSessionToken(account)) return 'none';
+  if (!isSub2ApiPlatform(site.platform)) return 'auto';
+
+  const entryUrl = normalizeExternalCheckinUrl(site.externalCheckinUrl);
+  const kind = normalizeExternalCheckinKind(site.externalCheckinKind);
+
+  if (kind === 'manual_oauth' && entryUrl) return 'manual_jump';
+  if (kind === 'token_bridge' && entryUrl) return 'auto';
+
+  // 管理端手动录入了签到页，但还未完成一次运行时识别时，先暴露安全的跳转按钮。
+  if (!kind && entryUrl) return 'manual_jump';
+
+  return 'none';
+}
+
 function normalizeSub2ApiManagementBaseUrl(baseUrl: string): string {
   let normalized = stripTrailingSlashes(baseUrl || '');
   if (!normalized) return normalized;
@@ -329,11 +348,42 @@ function stripHtmlTags(value: string): string {
   return value.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
+function decodeHtmlEntities(value: string): string {
+  return value
+    .replace(/&#(\d+);/g, (_, code) => String.fromCodePoint(Number.parseInt(code, 10)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, code) => String.fromCodePoint(Number.parseInt(code, 16)))
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/g, "'");
+}
+
+function normalizeHtmlText(value: string): string {
+  return decodeHtmlEntities(stripHtmlTags(value)).replace(/\s+/g, ' ').trim();
+}
+
+function looksLikeEmbeddedManualOauthPrompt(html: string): boolean {
+  const normalized = String(html || '').toLowerCase();
+  const text = normalizeHtmlText(html);
+  const hasPromptShell = normalized.includes('login-screen')
+    || normalized.includes('login-card')
+    || normalized.includes('login-button-disabled');
+  const hasSigninBranding = text.includes('签到系统') || text.includes('签到中心');
+  const hasManualPrompt = text.includes('欢迎登录')
+    || text.includes('请点击右上角在新窗口打开')
+    || text.includes('使用 Linux.do 登录');
+  return hasSigninBranding && hasManualPrompt && hasPromptShell;
+}
+
 function isManualOauthPage(html: string): boolean {
   const normalized = String(html || '').toLowerCase();
   return normalized.includes('/auth/linuxdo/login')
     || normalized.includes('connect.linux.do')
-    || (normalized.includes('linux.do') && (normalized.includes('oauth') || normalized.includes('登录') || normalized.includes('login')));
+    || normalized.includes('data-linuxdo-login')
+    || (normalized.includes('linux.do') && (normalized.includes('oauth') || normalized.includes('登录') || normalized.includes('login')))
+    || looksLikeEmbeddedManualOauthPrompt(html);
 }
 
 function extractFormByActionKeyword(html: string, actionKeyword: string): {
@@ -372,7 +422,7 @@ function extractFormByActionKeyword(html: string, actionKeyword: string): {
 function looksLikeTokenBridgePage(html: string): boolean {
   if (extractFormByActionKeyword(html, 'checkin')) return true;
 
-  const text = stripHtmlTags(html);
+  const text = normalizeHtmlText(html);
   if (!text) return false;
   return text.includes('今日已签到')
     || text.includes('今天已签到')
@@ -381,10 +431,64 @@ function looksLikeTokenBridgePage(html: string): boolean {
     || text.includes('签到成功');
 }
 
-function classifyExternalCheckinKindFromHtml(html: string): ExternalCheckinKind {
+export function classifyExternalCheckinKindFromHtml(html: string): ExternalCheckinKind {
   if (isManualOauthPage(html)) return 'manual_oauth';
   if (looksLikeTokenBridgePage(html)) return 'token_bridge';
   return 'unsupported';
+}
+
+type ExternalCheckinSuccessSummary = {
+  message: string;
+  reward: string | null;
+};
+
+function parseExternalCheckinRewardAmount(text: string): string | null {
+  const normalized = text.replace(/,/g, '');
+  const patterns = [
+    /签到成功[：:，,\s]*(?:获得|奖励)?\s*\+?\s*([0-9]+(?:\.\d+)?)/i,
+    /余额\s*\+?\s*([0-9]+(?:\.\d+)?)/i,
+    /获得\s*([0-9]+(?:\.\d+)?)\s*(?:刀|点|元|usd|usdt)?/i,
+    /奖励\s*\+?\s*([0-9]+(?:\.\d+)?)/i,
+  ];
+  for (const pattern of patterns) {
+    const match = normalized.match(pattern);
+    if (!match) continue;
+    const parsed = Number.parseFloat(match[1] || '');
+    if (!Number.isFinite(parsed) || parsed <= 0) continue;
+    return parsed.toString();
+  }
+  return null;
+}
+
+export function extractExternalCheckinSuccessSummary(html: string): ExternalCheckinSuccessSummary | null {
+  const candidates: string[] = [];
+  const blockPattern = /<(div|p|span)[^>]*class=["']([^"']+)["'][^>]*>([\s\S]*?)<\/\1>/gi;
+  for (const match of html.matchAll(blockPattern)) {
+    const className = String(match[2] || '').toLowerCase();
+    const text = normalizeHtmlText(match[3] || '');
+    if (!text) continue;
+    const isSuccessBlock = (className.includes('notice') || className.includes('banner') || className.includes('alert') || className.includes('message'))
+      && (className.includes('success') || /(?:^|\s)ok(?:\s|$)/.test(className) || className.includes('good'));
+    if (!isSuccessBlock) continue;
+    candidates.push(text);
+  }
+
+  const fullText = normalizeHtmlText(html);
+  const inlineSuccessMatch = fullText.match(/签到成功[^。！!?\n]{0,80}/);
+  if (inlineSuccessMatch?.[0]) {
+    candidates.push(inlineSuccessMatch[0].trim());
+  }
+
+  for (const candidate of candidates) {
+    if (!candidate.includes('签到成功')) continue;
+    const reward = parseExternalCheckinRewardAmount(candidate);
+    return {
+      message: candidate,
+      reward,
+    };
+  }
+
+  return null;
 }
 
 function buildAction(
@@ -588,6 +692,14 @@ export async function resolveAccountExternalCheckinAction(
   );
 }
 
+export function warmAccountExternalCheckinMetadata(
+  account: AccountRow,
+  site: SiteRow,
+): void {
+  if (!hasSessionToken(account) || !isSub2ApiPlatform(site.platform)) return;
+  void resolveAccountExternalCheckinAction(account, site).catch(() => undefined);
+}
+
 export async function resolveAccountExternalCheckinActionById(
   accountId: number,
 ): Promise<AccountExternalCheckinAction | null> {
@@ -615,7 +727,7 @@ function extractHtmlErrorMessage(html: string): string | null {
   ];
   for (const pattern of alertPatterns) {
     const match = html.match(pattern);
-    const text = stripHtmlTags(match?.[1] || '');
+    const text = normalizeHtmlText(match?.[1] || '');
     if (text) return text;
   }
   return null;
@@ -646,12 +758,21 @@ async function executeTokenBridgeCheckin(
     return null;
   }
 
-  if (stripHtmlTags(initialPage.text).includes(EXTERNAL_CHECKIN_ALREADY_MESSAGE) || stripHtmlTags(initialPage.text).includes('今天已签到')) {
+  const initialText = normalizeHtmlText(initialPage.text);
+  const initialSuccessSummary = extractExternalCheckinSuccessSummary(initialPage.text);
+  if (initialText.includes(EXTERNAL_CHECKIN_ALREADY_MESSAGE) || initialText.includes('今天已签到')) {
+    const message = initialSuccessSummary?.message
+      ? `${EXTERNAL_CHECKIN_ALREADY_MESSAGE}（${initialSuccessSummary.message}）`
+      : EXTERNAL_CHECKIN_ALREADY_MESSAGE;
     const action = buildAction('auto', 'token_bridge', entryUrl, null, EXTERNAL_CHECKIN_ALREADY_MESSAGE);
     return {
       ...action,
       handled: true,
-      result: { success: true, message: EXTERNAL_CHECKIN_ALREADY_MESSAGE },
+      result: {
+        success: true,
+        message,
+        reward: initialSuccessSummary?.reward || undefined,
+      },
     };
   }
 
@@ -678,21 +799,27 @@ async function executeTokenBridgeCheckin(
     },
   });
 
-  const finalText = stripHtmlTags(submitResult.text);
+  const finalText = normalizeHtmlText(submitResult.text);
+  const successSummary = extractExternalCheckinSuccessSummary(submitResult.text);
   if (
     finalText.includes(EXTERNAL_CHECKIN_ALREADY_MESSAGE)
     || finalText.includes('今天已签到')
     || finalText.includes(EXTERNAL_CHECKIN_SUCCESS_MESSAGE)
     || looksLikeTokenBridgePage(submitResult.text)
   ) {
-    const message = finalText.includes(EXTERNAL_CHECKIN_ALREADY_MESSAGE) || finalText.includes('今天已签到')
-      ? EXTERNAL_CHECKIN_ALREADY_MESSAGE
-      : EXTERNAL_CHECKIN_SUCCESS_MESSAGE;
+    const message = successSummary?.message
+      || (finalText.includes(EXTERNAL_CHECKIN_ALREADY_MESSAGE) || finalText.includes('今天已签到')
+        ? EXTERNAL_CHECKIN_ALREADY_MESSAGE
+        : EXTERNAL_CHECKIN_SUCCESS_MESSAGE);
     const action = buildAction('auto', 'token_bridge', entryUrl, null, message);
     return {
       ...action,
       handled: true,
-      result: { success: true, message },
+      result: {
+        success: true,
+        message,
+        reward: successSummary?.reward || undefined,
+      },
     };
   }
 

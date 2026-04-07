@@ -51,10 +51,10 @@ import {
   normalizeAccountDispatchPreferenceMode,
   setAccountDispatchPreferenceMode,
 } from '../../services/accountDispatchPreferenceService.js';
-import { isSub2ApiPlatform } from '../../services/sub2apiManagedAuth.js';
 import {
-  resolveAccountExternalCheckinAction,
+  resolveStoredAccountCheckinActionMode,
   type AccountCheckinActionMode as ExternalAccountCheckinActionMode,
+  warmAccountExternalCheckinMetadata,
 } from '../../services/externalCheckinService.js';
 
 type AccountWithSiteRow = {
@@ -146,47 +146,26 @@ function buildCapabilitiesForAccount(account: typeof schema.accounts.$inferSelec
   return buildCapabilitiesFromCredentialMode(credentialMode, hasSessionTokenValue(account.accessToken), account);
 }
 
-async function resolveAccountCheckinActionModes(
+function resolveAccountCheckinActionModes(
   rows: AccountWithSiteRow[],
-): Promise<Map<number, AccountCheckinActionMode>> {
-  const modeBySiteId = new Map<number, AccountCheckinActionMode>();
-  const sampleBySiteId = new Map<number, AccountWithSiteRow>();
-
-  for (const row of rows) {
-    if (!isSub2ApiPlatform(row.sites.platform)) continue;
-    const capabilities = buildCapabilitiesForAccount(row.accounts);
-    if (!capabilities.canCheckin) continue;
-    if (!sampleBySiteId.has(row.sites.id)) {
-      sampleBySiteId.set(row.sites.id, row);
-    }
-  }
-
-  await Promise.all(
-    Array.from(sampleBySiteId.entries()).map(async ([siteId, row]) => {
-      try {
-        const action = await resolveAccountExternalCheckinAction(row.accounts, row.sites);
-        modeBySiteId.set(siteId, action.mode);
-      } catch {
-        modeBySiteId.set(siteId, 'none');
-      }
-    }),
-  );
-
+): Map<number, AccountCheckinActionMode> {
   const modeByAccountId = new Map<number, AccountCheckinActionMode>();
   for (const row of rows) {
-    const capabilities = buildCapabilitiesForAccount(row.accounts);
-    if (!capabilities.canCheckin) {
-      modeByAccountId.set(row.accounts.id, 'none');
-      continue;
-    }
-    if (!isSub2ApiPlatform(row.sites.platform)) {
-      modeByAccountId.set(row.accounts.id, 'auto');
-      continue;
-    }
-    modeByAccountId.set(row.accounts.id, modeBySiteId.get(row.sites.id) || 'none');
+    modeByAccountId.set(
+      row.accounts.id,
+      resolveStoredAccountCheckinActionMode(row.accounts, row.sites),
+    );
   }
 
   return modeByAccountId;
+}
+
+function warmAccountCheckinMetadataBestEffort(
+  account: typeof schema.accounts.$inferSelect | null | undefined,
+  site: typeof schema.sites.$inferSelect,
+) {
+  if (!account) return;
+  warmAccountExternalCheckinMetadata(account, site);
 }
 
 function normalizeBatchIds(input: unknown): number[] {
@@ -541,7 +520,7 @@ export async function accountsRoutes(app: FastifyInstance) {
     const dispatchPreferenceByAccountId = await listAccountDispatchPreferences(
       rows.map((row) => row.accounts.id),
     );
-    const checkinActionModeByAccountId = await resolveAccountCheckinActionModes(rows);
+    const checkinActionModeByAccountId = resolveAccountCheckinActionModes(rows);
 
     const { localDay, startUtc, endUtc } = getLocalDayRangeUtc();
 
@@ -745,6 +724,7 @@ export async function accountsRoutes(app: FastifyInstance) {
     });
 
     const account = await db.select().from(schema.accounts).where(eq(schema.accounts.id, result.id)).get();
+    warmAccountCheckinMetadataBestEffort(account, site);
     return {
       success: true,
       account,
@@ -1204,6 +1184,7 @@ export async function accountsRoutes(app: FastifyInstance) {
       });
 
       const latest = await db.select().from(schema.accounts).where(eq(schema.accounts.id, accountId)).get();
+      warmAccountCheckinMetadataBestEffort(latest, site);
       return {
         success: true,
         account: latest,
@@ -1385,6 +1366,7 @@ export async function accountsRoutes(app: FastifyInstance) {
     }
 
     const account = await db.select().from(schema.accounts).where(eq(schema.accounts.id, result.id)).get();
+    warmAccountCheckinMetadataBestEffort(account, site);
     const finalCredentialMode = account ? resolveStoredCredentialMode(account) : resolvedCredentialMode;
     const capabilities = account
       ? buildCapabilitiesForAccount(account)
@@ -1528,6 +1510,8 @@ export async function accountsRoutes(app: FastifyInstance) {
     const dispatchPreferenceMode = requestedDispatchPreferenceMode
       ? (await setAccountDispatchPreferenceMode(id, requestedDispatchPreferenceMode)).mode
       : (await listAccountDispatchPreferences([id])).get(id)?.mode || 'default';
+
+    warmAccountCheckinMetadataBestEffort(updatedAccount, site);
 
     return attachDispatchPreferenceMode(updatedAccount, dispatchPreferenceMode);
   });
