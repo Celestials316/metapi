@@ -18,6 +18,7 @@ import {
 import { getSiteInitializationPreset } from '../../../shared/siteInitializationPresets.js';
 import { normalizeSiteApiEndpointBaseUrl } from '../../services/siteApiEndpointService.js';
 import { analyzePrimarySiteUrl } from '../../../shared/sitePrimaryUrl.js';
+import { normalizeOptionalExternalCheckinUrlInput } from '../../services/externalCheckinService.js';
 
 function normalizeSiteStatus(input: unknown): 'active' | 'disabled' | null {
   if (input === undefined || input === null) return null;
@@ -55,36 +56,6 @@ function normalizeGlobalWeight(input: unknown): number | null {
   const parsed = Number(input);
   if (!Number.isFinite(parsed) || parsed <= 0) return null;
   return Math.max(0.01, Math.min(100, Number(parsed.toFixed(3))));
-}
-
-function normalizeOptionalExternalCheckinUrl(input: unknown): {
-  valid: boolean;
-  present: boolean;
-  url: string | null;
-} {
-  if (input === undefined) {
-    return { valid: true, present: false, url: null };
-  }
-  if (input === null) {
-    return { valid: true, present: true, url: null };
-  }
-  if (typeof input !== 'string') {
-    return { valid: false, present: true, url: null };
-  }
-  const trimmed = input.trim();
-  if (!trimmed) {
-    return { valid: true, present: true, url: null };
-  }
-  let parsed: URL;
-  try {
-    parsed = new URL(trimmed);
-  } catch {
-    return { valid: false, present: true, url: null };
-  }
-  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-    return { valid: false, present: true, url: null };
-  }
-  return { valid: true, present: true, url: parsed.toString().replace(/\/+$/, '') };
 }
 
 type ErrorLike = {
@@ -486,7 +457,7 @@ export async function sitesRoutes(app: FastifyInstance) {
     if (!normalizedProxyUrl.valid) {
       return reply.code(400).send({ error: 'Invalid proxyUrl. Expected a valid http(s)/socks proxy URL.' });
     }
-    const normalizedExternalCheckinUrl = normalizeOptionalExternalCheckinUrl(externalCheckinUrl);
+    const normalizedExternalCheckinUrl = normalizeOptionalExternalCheckinUrlInput(externalCheckinUrl);
     if (!normalizedExternalCheckinUrl.valid) {
       return reply.code(400).send({ error: 'Invalid externalCheckinUrl. Expected a valid http(s) URL.' });
     }
@@ -626,7 +597,7 @@ export async function sitesRoutes(app: FastifyInstance) {
     if (!normalizedProxyUrl.valid) {
       return reply.code(400).send({ error: 'Invalid proxyUrl. Expected a valid http(s)/socks proxy URL.' });
     }
-    const normalizedExternalCheckinUrl = normalizeOptionalExternalCheckinUrl(body.externalCheckinUrl);
+    const normalizedExternalCheckinUrl = normalizeOptionalExternalCheckinUrlInput(body.externalCheckinUrl);
     if (!normalizedExternalCheckinUrl.valid) {
       return reply.code(400).send({ error: 'Invalid externalCheckinUrl. Expected a valid http(s) URL.' });
     }

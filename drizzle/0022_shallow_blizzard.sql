@@ -1,0 +1,1 @@
+ALTER TABLE `sites` ADD `external_checkin_kind` text;

@@ -750,6 +750,14 @@ export type DownstreamApiKeyTrendResponse = {
   buckets: DownstreamApiKeyTrendBucket[];
 };
 
+export type CheckinActionResponse = {
+  success: boolean;
+  mode: 'auto' | 'manual_jump' | 'none';
+  kind: 'token_bridge' | 'manual_oauth' | 'unsupported';
+  url?: string | null;
+  message?: string;
+};
+
 export const api = {
   // Sites
   getSites: () => request('/api/sites'),
@@ -801,6 +809,7 @@ export const api = {
   // Check-in
   triggerCheckinAll: () => request('/api/checkin/trigger', { method: 'POST' }),
   triggerCheckin: (id: number) => request(`/api/checkin/trigger/${id}`, { method: 'POST' }),
+  getCheckinAction: (id: number) => request(`/api/checkin/action/${id}`) as Promise<CheckinActionResponse>,
   getCheckinLogs: (params?: string) => request(`/api/checkin/logs${params ? '?' + params : ''}`),
   updateCheckinSchedule: (cron: string) => request('/api/checkin/schedule', { method: 'PUT', body: JSON.stringify({ cron }) }),
 

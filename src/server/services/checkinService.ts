@@ -19,6 +19,10 @@ import { decryptAccountPassword } from './accountCredentialService.js';
 import { setAccountRuntimeHealth } from './accountHealthService.js';
 import { formatUtcSqlDateTime } from './localTimeService.js';
 import { withAccountProxyOverride } from './siteProxy.js';
+import {
+  MANUAL_EXTERNAL_CHECKIN_MESSAGE,
+  performAccountExternalCheckin,
+} from './externalCheckinService.js';
 
 type CheckinExecutionStatus = 'success' | 'failed' | 'skipped';
 
@@ -189,16 +193,45 @@ export async function checkinAccount(accountId: number, options?: { skipEvent?: 
 
   const accountProxyUrl = resolveProxyUrlFromExtraConfig(account.extraConfig);
   let activeAccessToken = account.accessToken;
-  let result = await withAccountProxyOverride(accountProxyUrl,
-    () => adapter.checkin(site.url, activeAccessToken, platformUserId));
+  let manualExternalCheckinRequired = false;
+  let usedExternalCheckin = false;
+  const tryExternalCheckin = async (accessToken: string) => performAccountExternalCheckin(
+    {
+      ...account,
+      accessToken,
+    },
+    site,
+  );
+  const initialExternalCheckin = await tryExternalCheckin(activeAccessToken);
+  let result = initialExternalCheckin?.result;
 
-  if (!result.success && shouldAttemptAutoRelogin(result.message)) {
+  if (initialExternalCheckin) {
+    usedExternalCheckin = true;
+    manualExternalCheckinRequired = initialExternalCheckin.mode === 'manual_jump';
+  } else {
+    result = await withAccountProxyOverride(accountProxyUrl,
+      () => adapter.checkin(site.url, activeAccessToken, platformUserId));
+  }
+
+  if (!result?.success && shouldAttemptAutoRelogin(result?.message)) {
     const refreshedAccessToken = await tryAutoRelogin(account, site);
     if (refreshedAccessToken) {
       activeAccessToken = refreshedAccessToken;
-      result = await withAccountProxyOverride(accountProxyUrl,
-        () => adapter.checkin(site.url, activeAccessToken, platformUserId));
+      if (usedExternalCheckin) {
+        const retriedExternalCheckin = await tryExternalCheckin(activeAccessToken);
+        if (retriedExternalCheckin) {
+          manualExternalCheckinRequired = retriedExternalCheckin.mode === 'manual_jump';
+          result = retriedExternalCheckin.result;
+        }
+      } else {
+        result = await withAccountProxyOverride(accountProxyUrl,
+          () => adapter.checkin(site.url, activeAccessToken, platformUserId));
+      }
     }
+  }
+
+  if (!result) {
+    result = { success: false, message: 'checkin failed' };
   }
 
   const isCloudflare = isCloudflareChallenge(result.message);
@@ -206,21 +239,25 @@ export async function checkinAccount(accountId: number, options?: { skipEvent?: 
   const unsupportedCheckin = isUnsupportedCheckinMessage(result.message);
   const manualVerificationRequired = isManualVerificationRequiredMessage(result.message);
   const manualVerificationMessage = '\u7ad9\u70b9\u5f00\u542f\u4e86 Turnstile \u6821\u9a8c\uff0c\u9700\u8981\u4eba\u5de5\u7b7e\u5230';
-  const logMessage = manualVerificationRequired ? manualVerificationMessage : result.message;
-  const effectiveSuccess = result.success || alreadyCheckedIn || unsupportedCheckin || manualVerificationRequired;
+  const logMessage = manualExternalCheckinRequired
+    ? MANUAL_EXTERNAL_CHECKIN_MESSAGE
+    : (manualVerificationRequired ? manualVerificationMessage : result.message);
+  const effectiveSuccess = result.success || alreadyCheckedIn || unsupportedCheckin || manualVerificationRequired || manualExternalCheckinRequired;
   const shouldRefreshBalance = result.success || alreadyCheckedIn;
-  const directCheckinSuccess = result.success && !alreadyCheckedIn && !unsupportedCheckin;
+  const directCheckinSuccess = result.success && !alreadyCheckedIn && !unsupportedCheckin && !manualExternalCheckinRequired;
   const shouldAdvanceLastCheckinAt = directCheckinSuccess || (alreadyCheckedIn && options?.scheduleMode !== 'interval');
   const normalizedStatus: CheckinExecutionStatus = effectiveSuccess
-    ? ((unsupportedCheckin || manualVerificationRequired) ? 'skipped' : 'success')
+    ? ((unsupportedCheckin || manualVerificationRequired || manualExternalCheckinRequired) ? 'skipped' : 'success')
     : 'failed';
   let logReward = result.reward;
   let refreshedBalanceInfo: Awaited<ReturnType<typeof refreshBalance>> | null = null;
 
   if (effectiveSuccess) {
-    const healthState = (unsupportedCheckin || manualVerificationRequired) ? 'degraded' : 'healthy';
+    const healthState = (unsupportedCheckin || manualVerificationRequired || manualExternalCheckinRequired) ? 'degraded' : 'healthy';
     const healthReason = unsupportedCheckin
       ? '\u7ad9\u70b9\u4e0d\u652f\u6301\u7b7e\u5230\u63a5\u53e3'
+      : manualExternalCheckinRequired
+        ? MANUAL_EXTERNAL_CHECKIN_MESSAGE
       : manualVerificationRequired
         ? manualVerificationMessage
       : (alreadyCheckedIn ? '\u4eca\u65e5\u5df2\u7b7e\u5230' : (result.message || '\u7b7e\u5230\u6210\u529f'));
@@ -312,7 +349,7 @@ export async function checkinAccount(accountId: number, options?: { skipEvent?: 
       );
     }
 
-    if (!unsupportedCheckin && !manualVerificationRequired) {
+    if (!unsupportedCheckin && !manualVerificationRequired && !manualExternalCheckinRequired) {
       await sendNotification(
         'checkin failed',
         `${account.username || 'ID:' + accountId} @ ${site.name}: ${result.message}`,

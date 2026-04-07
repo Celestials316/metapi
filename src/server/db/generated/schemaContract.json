@@ -1707,6 +1707,12 @@
           "notNull": false,
           "defaultValue": "1",
           "primaryKey": false
+        },
+        "external_checkin_kind": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
         }
       }
     },

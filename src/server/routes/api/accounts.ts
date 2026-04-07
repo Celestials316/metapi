@@ -51,6 +51,11 @@ import {
   normalizeAccountDispatchPreferenceMode,
   setAccountDispatchPreferenceMode,
 } from '../../services/accountDispatchPreferenceService.js';
+import { isSub2ApiPlatform } from '../../services/sub2apiManagedAuth.js';
+import {
+  resolveAccountExternalCheckinAction,
+  type AccountCheckinActionMode as ExternalAccountCheckinActionMode,
+} from '../../services/externalCheckinService.js';
 
 type AccountWithSiteRow = {
   accounts: typeof schema.accounts.$inferSelect;
@@ -73,6 +78,7 @@ type AccountCapabilities = {
 };
 
 type AccountDispatchPreferenceMode = 'default' | 'force' | 'prefer';
+type AccountCheckinActionMode = ExternalAccountCheckinActionMode;
 
 type AccountInitializationParams = {
   accountId: number;
@@ -138,6 +144,49 @@ function buildCapabilitiesFromCredentialMode(
 function buildCapabilitiesForAccount(account: typeof schema.accounts.$inferSelect): AccountCapabilities {
   const credentialMode = resolveStoredCredentialMode(account);
   return buildCapabilitiesFromCredentialMode(credentialMode, hasSessionTokenValue(account.accessToken), account);
+}
+
+async function resolveAccountCheckinActionModes(
+  rows: AccountWithSiteRow[],
+): Promise<Map<number, AccountCheckinActionMode>> {
+  const modeBySiteId = new Map<number, AccountCheckinActionMode>();
+  const sampleBySiteId = new Map<number, AccountWithSiteRow>();
+
+  for (const row of rows) {
+    if (!isSub2ApiPlatform(row.sites.platform)) continue;
+    const capabilities = buildCapabilitiesForAccount(row.accounts);
+    if (!capabilities.canCheckin) continue;
+    if (!sampleBySiteId.has(row.sites.id)) {
+      sampleBySiteId.set(row.sites.id, row);
+    }
+  }
+
+  await Promise.all(
+    Array.from(sampleBySiteId.entries()).map(async ([siteId, row]) => {
+      try {
+        const action = await resolveAccountExternalCheckinAction(row.accounts, row.sites);
+        modeBySiteId.set(siteId, action.mode);
+      } catch {
+        modeBySiteId.set(siteId, 'none');
+      }
+    }),
+  );
+
+  const modeByAccountId = new Map<number, AccountCheckinActionMode>();
+  for (const row of rows) {
+    const capabilities = buildCapabilitiesForAccount(row.accounts);
+    if (!capabilities.canCheckin) {
+      modeByAccountId.set(row.accounts.id, 'none');
+      continue;
+    }
+    if (!isSub2ApiPlatform(row.sites.platform)) {
+      modeByAccountId.set(row.accounts.id, 'auto');
+      continue;
+    }
+    modeByAccountId.set(row.accounts.id, modeBySiteId.get(row.sites.id) || 'none');
+  }
+
+  return modeByAccountId;
 }
 
 function normalizeBatchIds(input: unknown): number[] {
@@ -492,6 +541,7 @@ export async function accountsRoutes(app: FastifyInstance) {
     const dispatchPreferenceByAccountId = await listAccountDispatchPreferences(
       rows.map((row) => row.accounts.id),
     );
+    const checkinActionModeByAccountId = await resolveAccountCheckinActionModes(rows);
 
     const { localDay, startUtc, endUtc } = getLocalDayRangeUtc();
 
@@ -554,6 +604,7 @@ export async function accountsRoutes(app: FastifyInstance) {
         site: r.sites,
         credentialMode,
         capabilities,
+        checkinActionMode: checkinActionModeByAccountId.get(r.accounts.id) || 'none',
         todaySpend: Math.round((spendByAccount[r.accounts.id] || 0) * 1_000_000) / 1_000_000,
         todayReward: Math.round(estimateRewardWithTodayIncomeFallback({
           day: localDay,

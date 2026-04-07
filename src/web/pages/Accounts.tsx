@@ -28,6 +28,7 @@ import { TokensPanel } from './Tokens.js';
 import { tr } from '../i18n.js';
 import { buildCustomReorderUpdates, sortItemsForDisplay, type SortMode } from './helpers/listSorting.js';
 import { shouldIgnoreRowSelectionClick } from './helpers/rowSelection.js';
+import { resolveAccountCheckinPresentation } from './helpers/accountCheckinAction.js';
 import { SITE_DOCS_URL } from '../docsLink.js';
 import { getSiteInitializationPreset } from '../../shared/siteInitializationPresets.js';
 
@@ -793,6 +794,44 @@ export default function Accounts() {
       toast.error(e.message || '切换签到状态失败');
     } finally {
       setActionLoading((s) => ({ ...s, [key]: false }));
+    }
+  };
+
+  const handleAccountCheckin = async (account: any) => {
+    const capabilities = resolveAccountCapabilities(account);
+    const checkinPresentation = resolveAccountCheckinPresentation(account, capabilities);
+    if (!checkinPresentation.showButton) return;
+
+    const key = `checkin-${account.id}`;
+    if (checkinPresentation.mode === 'auto') {
+      await withLoading(key, () => api.triggerCheckin(account.id), '签到完成');
+      return;
+    }
+
+    setActionLoading((s) => ({ ...s, [key]: true }));
+    try {
+      const action = await api.getCheckinAction(account.id);
+      if (action.mode === 'auto') {
+        await api.triggerCheckin(account.id);
+        toast.success('签到完成');
+        return;
+      }
+      if (action.mode !== 'manual_jump' || !action.url) {
+        throw new Error(action.message || '当前连接不支持签到');
+      }
+
+      const opened = typeof window !== 'undefined' && typeof window.open === 'function'
+        ? window.open(action.url, '_blank', 'noopener,noreferrer')
+        : null;
+      if (!opened && typeof window !== 'undefined' && window.location) {
+        window.location.href = action.url;
+      }
+      toast.success(action.message || '已打开签到页，请登录后完成签到');
+    } catch (e: any) {
+      toast.error(e.message || '打开签到页失败');
+    } finally {
+      setActionLoading((s) => ({ ...s, [key]: false }));
+      void load();
     }
   };
 
@@ -1904,6 +1943,7 @@ export default function Accounts() {
                 <div className="mobile-card-list">
                   {visibleAccounts.map((a: any) => {
                     const capabilities = resolveAccountCapabilities(a);
+                    const checkinPresentation = resolveAccountCheckinPresentation(a, capabilities);
                     const connectionMode = resolveAccountCredentialMode(a);
                     const health = resolveRuntimeHealth(a);
                     const isExpanded = expandedAccountIds.includes(a.id);
@@ -1961,6 +2001,15 @@ export default function Accounts() {
                             >
                               模型
                             </button>
+                            {checkinPresentation.showButton && (
+                              <button
+                                onClick={() => handleAccountCheckin(a)}
+                                disabled={actionLoading[`checkin-${a.id}`]}
+                                className="btn btn-link btn-link-warning"
+                              >
+                                {actionLoading[`checkin-${a.id}`] ? <span className="spinner spinner-sm" /> : '签到'}
+                              </button>
+                            )}
                             <button
                               onClick={() => openProbeModal(a)}
                               className="btn btn-link btn-link-primary"
@@ -2039,7 +2088,7 @@ export default function Accounts() {
                             />
                             <MobileField
                               label="签到"
-                              value={capabilities.canCheckin ? (
+                              value={checkinPresentation.showToggle ? (
                                 <button
                                   type="button"
                                   className={`checkin-toggle-badge ${a.checkinEnabled ? 'is-on' : 'is-off'}`}
@@ -2054,7 +2103,7 @@ export default function Accounts() {
                                 </button>
                               ) : (
                                 <span className="badge badge-muted" style={{ fontSize: 11 }}>
-                                  不支持
+                                  {checkinPresentation.statusLabel}
                                 </span>
                               )}
                             />
@@ -2098,8 +2147,8 @@ export default function Accounts() {
                                   {actionLoading[`refresh-${a.id}`] ? <span className="spinner spinner-sm" /> : '刷新'}
                                 </button>
                               )}
-                              {capabilities.canCheckin && (
-                                <button onClick={() => withLoading(`checkin-${a.id}`, () => api.triggerCheckin(a.id), '签到完成')} disabled={actionLoading[`checkin-${a.id}`]} className="btn btn-link btn-link-warning">
+                              {checkinPresentation.showButton && (
+                                <button onClick={() => handleAccountCheckin(a)} disabled={actionLoading[`checkin-${a.id}`]} className="btn btn-link btn-link-warning">
                                   {actionLoading[`checkin-${a.id}`] ? <span className="spinner spinner-sm" /> : '签到'}
                                 </button>
                               )}
@@ -2144,6 +2193,7 @@ export default function Accounts() {
                 <tbody>
                   {visibleAccounts.map((a: any, i: number) => {
                     const capabilities = resolveAccountCapabilities(a);
+                    const checkinPresentation = resolveAccountCheckinPresentation(a, capabilities);
                     const connectionMode = resolveAccountCredentialMode(a);
                     return (
                       <tr
@@ -2222,7 +2272,7 @@ export default function Accounts() {
                           </div>
                         </td>
                         <td>
-                          {capabilities.canCheckin ? (
+                          {checkinPresentation.showToggle ? (
                             <button
                               type="button"
                               className={`checkin-toggle-badge ${a.checkinEnabled ? 'is-on' : 'is-off'}`}
@@ -2237,7 +2287,7 @@ export default function Accounts() {
                             </button>
                           ) : (
                             <span className="badge badge-muted" style={{ fontSize: 11 }}>
-                              不支持
+                              {checkinPresentation.statusLabel}
                             </span>
                           )}
                         </td>
@@ -2280,6 +2330,11 @@ export default function Accounts() {
                             >
                               模型
                             </button>
+                            {checkinPresentation.showButton && (
+                              <button onClick={() => handleAccountCheckin(a)} disabled={actionLoading[`checkin-${a.id}`]} className="btn btn-link btn-link-warning">
+                                {actionLoading[`checkin-${a.id}`] ? <span className="spinner spinner-sm" /> : '签到'}
+                              </button>
+                            )}
                             <button
                               onClick={() => openProbeModal(a)}
                               className="btn btn-link btn-link-primary"
@@ -2294,11 +2349,6 @@ export default function Accounts() {
                             >
                               指定
                             </button>
-                            {capabilities.canCheckin && (
-                              <button onClick={() => withLoading(`checkin-${a.id}`, () => api.triggerCheckin(a.id), '签到完成')} disabled={actionLoading[`checkin-${a.id}`]} className="btn btn-link btn-link-warning">
-                                {actionLoading[`checkin-${a.id}`] ? <span className="spinner spinner-sm" /> : '签到'}
-                              </button>
-                            )}
                             {a.status === 'expired' && !capabilities.proxyOnly && (
                               <button
                                 onClick={() => openRebindPanel(a)}

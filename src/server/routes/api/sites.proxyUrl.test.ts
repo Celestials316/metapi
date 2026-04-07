@@ -186,6 +186,23 @@ describe('sites proxy settings', () => {
     expect((response.json() as { error?: string }).error).toContain('Invalid externalCheckinUrl');
   });
 
+  it('normalizes external checkin url by stripping dynamic query params on create', async () => {
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/sites',
+      payload: {
+        name: 'sub2api-site',
+        url: 'https://sub2api.example.com',
+        platform: 'sub2api',
+        externalCheckinUrl: 'https://sign.example.com/embed?token=abc&user_id=12&src_host=https%3A%2F%2Fsub2api.example.com&lang=zh-CN&foo=bar',
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect((response.json() as { externalCheckinUrl?: string | null }).externalCheckinUrl)
+      .toBe('https://sign.example.com/embed?foo=bar');
+  });
+
   it('updates per-site proxy settings for an existing site', async () => {
     const created = await app.inject({
       method: 'POST',
@@ -256,6 +273,32 @@ describe('sites proxy settings', () => {
     expect(payload.useSystemProxy).toBe(false);
     expect(payload.customHeaders).toBeNull();
     expect(payload.externalCheckinUrl).toBeNull();
+  });
+
+  it('normalizes external checkin url by stripping dynamic query params on update', async () => {
+    const created = await app.inject({
+      method: 'POST',
+      url: '/api/sites',
+      payload: {
+        name: 'editable-site',
+        url: 'https://editable-site.example.com',
+        platform: 'sub2api',
+      },
+    });
+    expect(created.statusCode).toBe(200);
+    const site = created.json() as { id: number };
+
+    const response = await app.inject({
+      method: 'PUT',
+      url: `/api/sites/${site.id}`,
+      payload: {
+        externalCheckinUrl: 'https://sign.example.com/embed/?token=abc&src_url=https%3A%2F%2Feditable-site.example.com&ui_mode=dark',
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect((response.json() as { externalCheckinUrl?: string | null }).externalCheckinUrl)
+      .toBe('https://sign.example.com/embed');
   });
 
   it('returns a conflict response when updating a site to an existing platform and url', async () => {

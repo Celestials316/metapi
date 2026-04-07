@@ -7,6 +7,7 @@ import { checkinAccount, checkinAll } from '../../services/checkinService.js';
 import { updateCheckinSchedule } from '../../services/checkinScheduler.js';
 import { startBackgroundTask, summarizeCheckinResults } from '../../services/backgroundTaskService.js';
 import { classifyFailureReason } from '../../services/failureReasonService.js';
+import { resolveAccountExternalCheckinActionById } from '../../services/externalCheckinService.js';
 
 function buildCheckinAccountLabel(item: any): string {
   const username = item?.username || (item?.accountId ? `#${item.accountId}` : 'unknown');
@@ -111,6 +112,26 @@ export async function checkinRoutes(app: FastifyInstance) {
     const id = parseInt(request.params.id, 10);
     const result = await checkinAccount(id, { scheduleMode: config.checkinScheduleMode });
     return result;
+  });
+
+  app.get<{ Params: { id: string } }>('/api/checkin/action/:id', async (request, reply) => {
+    const id = parseInt(request.params.id, 10);
+    if (!Number.isFinite(id) || id <= 0) {
+      return reply.code(400).send({ success: false, message: 'Invalid account id' });
+    }
+
+    const action = await resolveAccountExternalCheckinActionById(id);
+    if (!action) {
+      return reply.code(404).send({ success: false, message: 'account not found' });
+    }
+
+    return {
+      success: true,
+      mode: action.mode,
+      kind: action.kind,
+      url: action.url,
+      message: action.message,
+    };
   });
 
   // Get check-in logs

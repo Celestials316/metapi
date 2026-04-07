@@ -58,6 +58,14 @@ export const SITE_COLUMN_COMPATIBILITY_SPECS: SiteColumnCompatibilitySpec[] = [
     },
   },
   {
+    column: 'external_checkin_kind',
+    addSql: {
+      sqlite: 'ALTER TABLE sites ADD COLUMN external_checkin_kind text;',
+      mysql: 'ALTER TABLE `sites` ADD COLUMN `external_checkin_kind` TEXT NULL',
+      postgres: 'ALTER TABLE "sites" ADD COLUMN "external_checkin_kind" TEXT',
+    },
+  },
+  {
     column: 'global_weight',
     addSql: {
       sqlite: 'ALTER TABLE sites ADD COLUMN global_weight real DEFAULT 1;',

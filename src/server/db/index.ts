@@ -385,6 +385,16 @@ function ensureSiteExternalCheckinUrlSchema() {
   }
 }
 
+function ensureSiteExternalCheckinKindSchema() {
+  if (!tableExists('sites')) {
+    return;
+  }
+
+  if (!tableColumnExists('sites', 'external_checkin_kind')) {
+    execSqliteLegacyCompat(`ALTER TABLE sites ADD COLUMN external_checkin_kind text;`);
+  }
+}
+
 function ensureSiteGlobalWeightSchema() {
   if (!tableExists('sites')) {
     return;
@@ -1362,6 +1372,7 @@ function initSqliteDb() {
   ensureSiteUseSystemProxySchema();
   ensureSiteCustomHeadersSchema();
   ensureSiteExternalCheckinUrlSchema();
+  ensureSiteExternalCheckinKindSchema();
   ensureSiteGlobalWeightSchema();
   ensureRouteGroupingSchema();
   ensureDownstreamApiKeySchema();
