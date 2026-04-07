@@ -296,6 +296,10 @@ export default function Accounts() {
     return sortedAccounts.filter((account) => resolveAccountCredentialMode(account) === activeSegment);
   }, [activeSegment, sortedAccounts]);
   const allVisibleAccountsSelected = visibleAccounts.length > 0 && visibleAccounts.every((account) => selectedAccountIds.includes(account.id));
+  const manualDispatchAccounts = useMemo(
+    () => accounts.filter((account) => normalizeAccountDispatchPreferenceMode(account?.dispatchPreferenceMode) !== 'default'),
+    [accounts],
+  );
   const verifyFailureHint = buildVerifyFailureHint(verifyResult);
   const addAccountPrereqHint = buildAddAccountPrereqHint(verifyResult);
 
@@ -640,17 +644,28 @@ export default function Accounts() {
     });
   };
 
+  const persistAccountDispatchPreferenceMode = async (
+    accountId: number,
+    mode: AccountDispatchPreferenceMode,
+  ): Promise<AccountDispatchPreferenceMode> => {
+    const result = await api.updateAccount(accountId, {
+      dispatchPreferenceMode: mode,
+    });
+    const nextMode = normalizeAccountDispatchPreferenceMode(
+      result?.dispatchPreferenceMode ?? mode,
+    );
+    patchAccountDispatchPreferenceMode(accountId, nextMode);
+    return nextMode;
+  };
+
   const saveDispatchPreferenceModal = async () => {
     if (!dispatchPreferenceModal.account) return;
     setDispatchPreferenceModal((current) => ({ ...current, saving: true }));
     try {
-      const result = await api.updateAccount(dispatchPreferenceModal.account.id, {
-        dispatchPreferenceMode: dispatchPreferenceModal.mode,
-      });
-      const nextMode = normalizeAccountDispatchPreferenceMode(
-        result?.dispatchPreferenceMode ?? dispatchPreferenceModal.mode,
+      const nextMode = await persistAccountDispatchPreferenceMode(
+        dispatchPreferenceModal.account.id,
+        dispatchPreferenceModal.mode,
       );
-      patchAccountDispatchPreferenceMode(dispatchPreferenceModal.account.id, nextMode);
       toast.success(
         nextMode === 'force'
           ? '已改为强指定'
@@ -660,6 +675,19 @@ export default function Accounts() {
     } catch (e: any) {
       toast.error(e.message || '保存指定调度失败');
       setDispatchPreferenceModal((current) => ({ ...current, saving: false }));
+    }
+  };
+
+  const restoreDefaultDispatchPreference = async (account: any) => {
+    const key = `dispatch-restore-${account.id}`;
+    setActionLoading((current) => ({ ...current, [key]: true }));
+    try {
+      await persistAccountDispatchPreferenceMode(account.id, 'default');
+      toast.success(`已恢复 ${resolveAccountDisplayName(account)} 的默认调用`);
+    } catch (e: any) {
+      toast.error(e.message || '恢复默认调用失败');
+    } finally {
+      setActionLoading((current) => ({ ...current, [key]: false }));
     }
   };
 
@@ -1221,6 +1249,76 @@ export default function Accounts() {
         )}
         {activeSegment === 'tokens' && embeddedTokenActions}
       </div>
+
+      {manualDispatchAccounts.length > 0 && (
+        <div
+          className="alert alert-info animate-scale-in"
+          style={{
+            marginBottom: 16,
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 12,
+          }}
+        >
+          <div className="alert-title" style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+            <span>手动调度生效中</span>
+            <span style={{ fontSize: 12, color: 'var(--color-text-secondary)', fontWeight: 500 }}>
+              当前已有 {manualDispatchAccounts.length} 条连接处于强指定或优先调用状态
+            </span>
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {manualDispatchAccounts.map((account) => {
+              const mode = normalizeAccountDispatchPreferenceMode(account?.dispatchPreferenceMode);
+              const presentation = getAccountDispatchPreferencePresentation(mode);
+              const restoreKey = `dispatch-restore-${account.id}`;
+              return (
+                <div
+                  key={`manual-dispatch-banner-${account.id}`}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: 12,
+                    padding: '10px 12px',
+                    border: '1px solid var(--color-border-light)',
+                    borderRadius: 'var(--radius-md)',
+                    background: 'var(--color-bg-card)',
+                    flexWrap: 'wrap',
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                    <span className={`badge ${presentation.className}`} style={{ fontSize: 11 }}>
+                      {mode === 'prefer' ? '优先调用' : presentation.label}
+                    </span>
+                    <span style={{ color: 'var(--color-text-primary)', fontWeight: 600 }}>
+                      {account.site?.name || '未命名站点'}
+                    </span>
+                    <span style={{ color: 'var(--color-text-secondary)', fontSize: 13 }}>
+                      / {resolveAccountDisplayName(account)}
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    className="btn btn-ghost"
+                    style={{ border: '1px solid var(--color-border)' }}
+                    onClick={() => restoreDefaultDispatchPreference(account)}
+                    disabled={!!actionLoading[restoreKey]}
+                  >
+                    {actionLoading[restoreKey]
+                      ? <><span className="spinner spinner-sm" />恢复中...</>
+                      : '恢复默认调用'}
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+          {manualDispatchAccounts.length > 1 && (
+            <div style={{ fontSize: 12, color: 'var(--color-text-muted)', lineHeight: 1.7 }}>
+              共享路由时会按强指定优先、最近修改优先生效。
+            </div>
+          )}
+        </div>
+      )}
 
       <ResponsiveFilterPanel
         isMobile={isMobile}
@@ -1820,7 +1918,7 @@ export default function Accounts() {
             )}
           >
             <div className="info-tip">
-              只改这条连接的调度语义，不会改路由优先级。优先调用在连接恢复后会自动切回，不会把兜底连接永久粘住。
+              只改这条连接的调度语义，不会改路由优先级。手动调度生效时会在页面顶部提示，并可随时恢复默认调用。
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
               {ACCOUNT_DISPATCH_PREFERENCE_OPTIONS.map((option) => {

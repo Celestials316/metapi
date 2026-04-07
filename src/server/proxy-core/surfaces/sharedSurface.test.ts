@@ -4,6 +4,7 @@ import { EMPTY_DOWNSTREAM_ROUTING_POLICY } from '../../services/downstreamPolicy
 const selectChannelMock = vi.fn();
 const selectNextChannelMock = vi.fn();
 const selectPreferredChannelMock = vi.fn();
+const hasManualDispatchPreferenceMock = vi.fn();
 const recordFailureMock = vi.fn();
 const refreshModelsAndRebuildRoutesMock = vi.fn();
 const composeProxyLogMessageMock = vi.fn();
@@ -35,6 +36,7 @@ vi.mock('../../services/tokenRouter.js', () => ({
     selectChannel: (...args: unknown[]) => selectChannelMock(...args),
     selectNextChannel: (...args: unknown[]) => selectNextChannelMock(...args),
     selectPreferredChannel: (...args: unknown[]) => selectPreferredChannelMock(...args),
+    hasManualDispatchPreference: (...args: unknown[]) => hasManualDispatchPreferenceMock(...args),
     recordFailure: (...args: unknown[]) => recordFailureMock(...args),
     recordSuccess: (...args: unknown[]) => recordSuccessMock(...args),
   },
@@ -116,6 +118,7 @@ describe('selectSurfaceChannelForAttempt', () => {
     selectChannelMock.mockReset();
     selectNextChannelMock.mockReset();
     selectPreferredChannelMock.mockReset();
+    hasManualDispatchPreferenceMock.mockReset();
     recordFailureMock.mockReset();
     refreshModelsAndRebuildRoutesMock.mockReset();
     composeProxyLogMessageMock.mockReset();
@@ -187,6 +190,7 @@ describe('selectSurfaceChannelForAttempt', () => {
 
   it('prefers the sticky session channel on the first attempt when it is still eligible', async () => {
     const selected = { channel: { id: 55 } };
+    hasManualDispatchPreferenceMock.mockResolvedValueOnce(false);
     getStickyChannelIdMock.mockReturnValueOnce(55);
     selectPreferredChannelMock.mockResolvedValueOnce(selected);
 
@@ -208,6 +212,31 @@ describe('selectSurfaceChannelForAttempt', () => {
     );
     expect(selectChannelMock).not.toHaveBeenCalled();
     expect(clearStickyChannelMock).not.toHaveBeenCalled();
+  });
+
+  it('clears the sticky session binding and falls back to route selection when manual dispatch is active', async () => {
+    const selected = { channel: { id: 77 } };
+    hasManualDispatchPreferenceMock.mockResolvedValueOnce(true);
+    getStickyChannelIdMock.mockReturnValueOnce(55);
+    selectChannelMock.mockResolvedValueOnce(selected);
+
+    const { selectSurfaceChannelForAttempt } = await import('./sharedSurface.js');
+    const result = await selectSurfaceChannelForAttempt({
+      requestedModel: 'gpt-5.2',
+      downstreamPolicy: EMPTY_DOWNSTREAM_ROUTING_POLICY,
+      excludeChannelIds: [],
+      retryCount: 0,
+      stickySessionKey: 'sticky-session',
+    });
+
+    expect(result).toBe(selected);
+    expect(hasManualDispatchPreferenceMock).toHaveBeenCalledWith(
+      'gpt-5.2',
+      EMPTY_DOWNSTREAM_ROUTING_POLICY,
+    );
+    expect(clearStickyChannelMock).toHaveBeenCalledWith('sticky-session', 55);
+    expect(selectPreferredChannelMock).not.toHaveBeenCalled();
+    expect(selectChannelMock).toHaveBeenCalledWith('gpt-5.2', EMPTY_DOWNSTREAM_ROUTING_POLICY);
   });
 
   it('uses the forced tester channel before sticky or automatic selection', async () => {

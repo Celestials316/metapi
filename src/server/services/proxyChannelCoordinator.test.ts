@@ -80,6 +80,40 @@ describe('proxyChannelCoordinator', () => {
     expect(proxyChannelCoordinator.getStickyChannelId(key)).toBe(42);
   });
 
+  it('clears sticky bindings by channel ids in bulk', () => {
+    const keyA = proxyChannelCoordinator.buildStickySessionKey({
+      clientKind: 'codex',
+      sessionId: 'turn-a',
+      requestedModel: 'gpt-5.2',
+      downstreamPath: '/v1/responses',
+      downstreamApiKeyId: 9,
+    });
+    const keyB = proxyChannelCoordinator.buildStickySessionKey({
+      clientKind: 'codex',
+      sessionId: 'turn-b',
+      requestedModel: 'gpt-5.2',
+      downstreamPath: '/v1/responses',
+      downstreamApiKeyId: 9,
+    });
+    const keyC = proxyChannelCoordinator.buildStickySessionKey({
+      clientKind: 'codex',
+      sessionId: 'turn-c',
+      requestedModel: 'gpt-5.2',
+      downstreamPath: '/v1/responses',
+      downstreamApiKeyId: 9,
+    });
+
+    proxyChannelCoordinator.bindStickyChannel(keyA, 42, JSON.stringify({ credentialMode: 'session' }));
+    proxyChannelCoordinator.bindStickyChannel(keyB, 43, JSON.stringify({ credentialMode: 'session' }));
+    proxyChannelCoordinator.bindStickyChannel(keyC, 99, JSON.stringify({ credentialMode: 'session' }));
+
+    proxyChannelCoordinator.clearStickyChannelsByChannelIds([42, 43]);
+
+    expect(proxyChannelCoordinator.getStickyChannelId(keyA)).toBeNull();
+    expect(proxyChannelCoordinator.getStickyChannelId(keyB)).toBeNull();
+    expect(proxyChannelCoordinator.getStickyChannelId(keyC)).toBe(99);
+  });
+
   it('queues requests behind the active lease and grants the next waiter after release', async () => {
     const first = await proxyChannelCoordinator.acquireChannelLease({
       channelId: 11,

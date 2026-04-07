@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  clearAccountDispatchRuntimeStatesForAccount,
   getAccountDispatchRuntimeSnapshot,
   recordAccountDispatchFailure,
   recordAccountDispatchProbeSuccess,
@@ -100,5 +101,19 @@ describe('accountDispatchRuntimeMemory', () => {
       nowMs: 202_000,
     });
     expect(failedDuringRecovery.status).toBe('degraded');
+  });
+
+  it('clears all runtime states for a specific account only', () => {
+    resetAccountDispatchRuntimeMemory();
+
+    recordAccountDispatchSelectionBlocked(routeId, modelName, accountId, 300_000);
+    recordAccountDispatchSelectionBlocked(routeId + 1, `${modelName}-mini`, accountId, 301_000);
+    recordAccountDispatchSelectionBlocked(routeId, modelName, accountId + 1, 302_000);
+
+    clearAccountDispatchRuntimeStatesForAccount(accountId);
+
+    expect(getAccountDispatchRuntimeSnapshot(routeId, modelName, accountId, 303_000).status).toBe('healthy');
+    expect(getAccountDispatchRuntimeSnapshot(routeId + 1, `${modelName}-mini`, accountId, 303_000).status).toBe('healthy');
+    expect(getAccountDispatchRuntimeSnapshot(routeId, modelName, accountId + 1, 303_000).status).toBe('degraded');
   });
 });

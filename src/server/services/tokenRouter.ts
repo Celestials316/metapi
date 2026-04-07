@@ -1909,6 +1909,17 @@ export class TokenRouter {
     return await this.selectFromMatch(match, requestedModel, downstreamPolicy, [], false);
   }
 
+  async hasManualDispatchPreference(
+    requestedModel: string,
+    downstreamPolicy: DownstreamRoutingPolicy = DEFAULT_DOWNSTREAM_POLICY,
+  ): Promise<boolean> {
+    if (!isModelAllowedByDownstreamPolicy(requestedModel, downstreamPolicy)) return false;
+
+    const match = await this.findRoute(requestedModel, downstreamPolicy);
+    if (!match) return false;
+    return Boolean(await this.resolveManualDispatchPreferenceForMatch(match));
+  }
+
   /**
    * Select next channel for failover (exclude already-tried channels).
    */

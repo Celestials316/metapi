@@ -39,7 +39,10 @@ function collectText(node: any): string {
   }).join('');
 }
 
-function createAccount(dispatchPreferenceMode: 'default' | 'force' | 'prefer' = 'default') {
+function createAccount(
+  dispatchPreferenceMode: 'default' | 'force' | 'prefer' = 'default',
+  overrides: Record<string, unknown> = {},
+) {
   return {
     id: 1,
     siteId: 1,
@@ -48,6 +51,7 @@ function createAccount(dispatchPreferenceMode: 'default' | 'force' | 'prefer' = 
     status: 'active',
     dispatchPreferenceMode,
     site: { id: 1, name: 'Site A', status: 'active', platform: 'new-api' },
+    ...overrides,
   };
 }
 
@@ -172,6 +176,58 @@ describe('Accounts dispatch preference', () => {
 
       expect(apiMock.updateAccount).toHaveBeenCalledWith(1, {
         dispatchPreferenceMode: 'force',
+      });
+    } finally {
+      root?.unmount();
+    }
+  });
+
+  it('shows active manual dispatch summary at the top and supports restoring default mode', async () => {
+    apiMock.getAccounts.mockResolvedValue([
+      createAccount('force'),
+      createAccount('prefer', {
+        id: 2,
+        username: 'beta',
+        accessToken: 'session-beta',
+        site: { id: 2, name: 'Site B', status: 'active', platform: 'new-api' },
+      }),
+    ]);
+
+    let root!: WebTestRenderer;
+    try {
+      await act(async () => {
+        root = create(
+          <MemoryRouter initialEntries={['/accounts']}>
+            <ToastProvider>
+              <Accounts />
+            </ToastProvider>
+          </MemoryRouter>,
+        );
+      });
+      await flushMicrotasks();
+
+      const pageText = collectText(root.root);
+      expect(pageText).toContain('手动调度生效中');
+      expect(pageText).toContain('强指定');
+      expect(pageText).toContain('优先调用');
+      expect(pageText).toContain('Site A');
+      expect(pageText).toContain('alpha');
+      expect(pageText).toContain('Site B');
+      expect(pageText).toContain('beta');
+      expect(pageText).toContain('共享路由时会按强指定优先、最近修改优先生效');
+
+      const restoreButtons = root.root.findAll((node) => (
+        node.type === 'button' && collectText(node).includes('恢复默认调用')
+      ));
+      expect(restoreButtons.length).toBeGreaterThan(0);
+
+      await act(async () => {
+        await restoreButtons[0].props.onClick();
+      });
+      await flushMicrotasks();
+
+      expect(apiMock.updateAccount).toHaveBeenCalledWith(1, {
+        dispatchPreferenceMode: 'default',
       });
     } finally {
       root?.unmount();

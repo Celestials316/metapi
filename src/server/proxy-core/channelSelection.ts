@@ -117,23 +117,31 @@ export async function selectProxyChannelForAttempt(input: {
 
   if (input.retryCount === 0 && input.stickySessionKey) {
     const preferredChannelId = proxyChannelCoordinator.getStickyChannelId(input.stickySessionKey);
-    if (preferredChannelId && !input.excludeChannelIds.includes(preferredChannelId)) {
-      selected = await tokenRouter.selectPreferredChannel(
+    if (preferredChannelId) {
+      const hasManualDispatchPreference = await tokenRouter.hasManualDispatchPreference(
         input.requestedModel,
-        preferredChannelId,
         input.downstreamPolicy,
-        input.excludeChannelIds,
       );
-      if (!selected) {
-        const refreshSucceeded = await refreshRoutesForFirstAttempt();
+      if (hasManualDispatchPreference) {
+        proxyChannelCoordinator.clearStickyChannel(input.stickySessionKey, preferredChannelId);
+      } else if (!input.excludeChannelIds.includes(preferredChannelId)) {
         selected = await tokenRouter.selectPreferredChannel(
           input.requestedModel,
           preferredChannelId,
           input.downstreamPolicy,
           input.excludeChannelIds,
         );
-        if (!selected && refreshSucceeded) {
-          proxyChannelCoordinator.clearStickyChannel(input.stickySessionKey, preferredChannelId);
+        if (!selected) {
+          const refreshSucceeded = await refreshRoutesForFirstAttempt();
+          selected = await tokenRouter.selectPreferredChannel(
+            input.requestedModel,
+            preferredChannelId,
+            input.downstreamPolicy,
+            input.excludeChannelIds,
+          );
+          if (!selected && refreshSucceeded) {
+            proxyChannelCoordinator.clearStickyChannel(input.stickySessionKey, preferredChannelId);
+          }
         }
       }
     }

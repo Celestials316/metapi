@@ -49,8 +49,8 @@ import { isAccountProbeServiceError, probeAccountChat } from '../../services/acc
 import {
   listAccountDispatchPreferences,
   normalizeAccountDispatchPreferenceMode,
-  setAccountDispatchPreferenceMode,
 } from '../../services/accountDispatchPreferenceService.js';
+import { updateAccountDispatchPreferenceMode } from '../../services/accountDispatchPreferenceMutationService.js';
 import {
   resolveStoredAccountCheckinActionMode,
   type AccountCheckinActionMode as ExternalAccountCheckinActionMode,
@@ -1465,7 +1465,7 @@ export async function accountsRoutes(app: FastifyInstance) {
     }
 
     if (Object.keys(updates).length === 0 && requestedDispatchPreferenceMode !== null) {
-      const dispatchPreferenceMode = (await setAccountDispatchPreferenceMode(id, requestedDispatchPreferenceMode)).mode;
+      const dispatchPreferenceMode = (await updateAccountDispatchPreferenceMode(id, requestedDispatchPreferenceMode)).mode;
       return attachDispatchPreferenceMode(account, dispatchPreferenceMode);
     }
 
@@ -1508,7 +1508,7 @@ export async function accountsRoutes(app: FastifyInstance) {
     });
 
     const dispatchPreferenceMode = requestedDispatchPreferenceMode
-      ? (await setAccountDispatchPreferenceMode(id, requestedDispatchPreferenceMode)).mode
+      ? (await updateAccountDispatchPreferenceMode(id, requestedDispatchPreferenceMode)).mode
       : (await listAccountDispatchPreferences([id])).get(id)?.mode || 'default';
 
     warmAccountCheckinMetadataBestEffort(updatedAccount, site);

@@ -193,6 +193,22 @@ class ProxyChannelCoordinator {
     stickySessionBindings.delete(normalizedKey);
   }
 
+  clearStickyChannelsByChannelIds(channelIds: number[]): void {
+    const normalizedChannelIds = new Set(
+      (Array.isArray(channelIds) ? channelIds : [])
+        .filter((channelId): channelId is number => Number.isFinite(channelId) && channelId > 0)
+        .map((channelId) => Math.trunc(channelId)),
+    );
+    if (normalizedChannelIds.size <= 0) return;
+
+    cleanupExpiredStickyBindings();
+    for (const [stickySessionKey, entry] of stickySessionBindings.entries()) {
+      if (normalizedChannelIds.has(entry.channelId)) {
+        stickySessionBindings.delete(stickySessionKey);
+      }
+    }
+  }
+
   getActiveChannelIds(): number[] {
     const ids: number[] = [];
     for (const [channelId, state] of channelRuntimeStates.entries()) {

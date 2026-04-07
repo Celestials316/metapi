@@ -9,6 +9,7 @@ const fetchMock = vi.fn();
 const selectChannelMock = vi.fn();
 const selectNextChannelMock = vi.fn();
 const selectPreferredChannelMock = vi.fn();
+const hasManualDispatchPreferenceMock = vi.fn();
 const recordSuccessMock = vi.fn();
 const recordFailureMock = vi.fn();
 const refreshModelsAndRebuildRoutesMock = vi.fn();
@@ -48,6 +49,7 @@ vi.mock('../../services/tokenRouter.js', () => ({
     selectChannel: (...args: unknown[]) => selectChannelMock(...args),
     selectNextChannel: (...args: unknown[]) => selectNextChannelMock(...args),
     selectPreferredChannel: (...args: unknown[]) => selectPreferredChannelMock(...args),
+    hasManualDispatchPreference: (...args: unknown[]) => hasManualDispatchPreferenceMock(...args),
     recordSuccess: (...args: unknown[]) => recordSuccessMock(...args),
     recordFailure: (...args: unknown[]) => recordFailureMock(...args),
   },
@@ -191,6 +193,7 @@ describe('responses proxy codex oauth refresh', () => {
     selectChannelMock.mockReset();
     selectNextChannelMock.mockReset();
     selectPreferredChannelMock.mockReset();
+    hasManualDispatchPreferenceMock.mockReset();
     recordSuccessMock.mockReset();
     recordFailureMock.mockReset();
     refreshModelsAndRebuildRoutesMock.mockReset();
@@ -225,6 +228,7 @@ describe('responses proxy codex oauth refresh', () => {
     selectPreferredChannelMock.mockReturnValue(null);
     selectNextChannelMock.mockReturnValue(null);
     selectPreferredChannelMock.mockReturnValue(null);
+    hasManualDispatchPreferenceMock.mockResolvedValue(false);
     refreshOauthAccessTokenSingleflightMock.mockResolvedValue({
       accessToken: 'fresh-access-token',
       accountId: 33,

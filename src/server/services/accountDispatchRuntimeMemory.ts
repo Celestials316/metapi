@@ -237,3 +237,14 @@ export function recordAccountDispatchSuccess(
 export function resetAccountDispatchRuntimeMemory(): void {
   accountDispatchRuntimeStates.clear();
 }
+
+export function clearAccountDispatchRuntimeStatesForAccount(accountId: number): void {
+  const normalizedAccountId = Math.trunc(accountId || 0);
+  if (normalizedAccountId <= 0) return;
+
+  for (const key of accountDispatchRuntimeStates.keys()) {
+    if (parseAccountDispatchRuntimeKey(key).accountId === normalizedAccountId) {
+      accountDispatchRuntimeStates.delete(key);
+    }
+  }
+}
