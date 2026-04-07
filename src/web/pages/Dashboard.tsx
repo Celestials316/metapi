@@ -697,9 +697,9 @@ export default function Dashboard({ adminName = '\u7ba1\u7406\u5458' }: { adminN
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 300px', gap: 16 }}>
-        <div className="chart-container animate-slide-up stagger-8">
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 14 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 14, fontWeight: 600, color: 'var(--color-text-primary)' }}>
+        <div className="chart-container animate-slide-up stagger-8 dashboard-model-analysis-panel">
+          <div className="dashboard-section-title-row">
+            <div className="dashboard-section-title">
               <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
               模型数据分析
             </div>
@@ -709,16 +709,15 @@ export default function Dashboard({ adminName = '\u7ba1\u7406\u5458' }: { adminN
           </Suspense>
         </div>
 
-        <div className="chart-container animate-slide-up stagger-9" style={{ display: 'flex', flexDirection: 'column' }}>
-          <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 16, display: 'flex', alignItems: 'center', justifyContent: 'space-between', color: 'var(--color-text-primary)' }}>
-            <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+        <div className="chart-container animate-slide-up stagger-9 dashboard-site-info-panel" style={{ display: 'flex', flexDirection: 'column' }}>
+          <div className="dashboard-site-info-header">
+            <span className="dashboard-site-info-title">
               <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2m-2-4h.01M17 16h.01" /></svg>
               站点信息
             </span>
             {sites.length > 0 && (
               <button
-                className="btn btn-ghost"
-                style={{ fontSize: 11, padding: '3px 10px', border: '1px solid var(--color-border)', borderRadius: 6, display: 'inline-flex', alignItems: 'center', gap: 4 }}
+                className="btn btn-ghost dashboard-site-info-bulk-speed"
                 onClick={async () => {
                   await Promise.all(sites.map(async (s: any, idx: number) => {
                     const siteKey = getSiteSpeedKey(s, idx);
@@ -740,15 +739,15 @@ export default function Dashboard({ adminName = '\u7ba1\u7406\u5458' }: { adminN
               </button>
             )}
           </div>
-          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <div className="dashboard-site-info-content">
             {(sites.length > 0)
               ? sites.map((site: any, idx: number) => (
-                <div key={site.id || idx} style={{ padding: '10px 12px', border: '1px solid var(--color-border-light)', borderRadius: 'var(--radius-md)', background: 'var(--color-bg)' }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6, flexWrap: 'wrap' }}>
-                    <span style={{ fontWeight: 600, fontSize: 13 }}>{site.name}</span>
+                <div key={site.id || idx} className="dashboard-site-info-card">
+                  <div className="dashboard-site-info-card-header">
+                    <span className="dashboard-site-info-card-name">{site.name}</span>
+                    <div className="dashboard-site-info-card-actions">
                     <button
-                      className="btn btn-ghost"
-                      style={{ fontSize: 11, padding: '2px 8px', border: '1px solid var(--color-border)', borderRadius: 6, display: 'inline-flex', alignItems: 'center', gap: 3 }}
+                      className="btn btn-ghost dashboard-site-info-action"
                       onClick={async () => {
                         const siteKey = getSiteSpeedKey(site, idx);
                         setSiteSpeedState(siteKey, { status: 'loading' });
@@ -771,32 +770,32 @@ export default function Dashboard({ adminName = '\u7ba1\u7406\u5458' }: { adminN
                       href={site.url}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="btn btn-ghost"
-                      style={{ fontSize: 11, padding: '2px 8px', border: '1px solid var(--color-border)', borderRadius: 6, textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: 3 }}
+                      className="btn btn-ghost dashboard-site-info-action"
                     >
                       <svg width="12" height="12" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" /></svg>
                       跳转
                     </a>
+                    </div>
                   </div>
-                  <a href={site.url} target="_blank" rel="noopener noreferrer" style={{ fontSize: 12, color: 'var(--color-info)', wordBreak: 'break-all' }}>{site.url}</a>
+                  <a href={site.url} target="_blank" rel="noopener noreferrer" className="dashboard-site-info-url">{site.url}</a>
                 </div>
               ))
               : (
-                <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 8, padding: 20 }}>
+                <div className="dashboard-site-info-empty">
                   <div style={{ width: 60, height: 60, opacity: 0.25 }}>
                     <svg fill="none" viewBox="0 0 24 24" stroke="var(--color-text-muted)" width="60" height="60">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={0.6} d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
                     </svg>
                   </div>
-                  <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--color-text-secondary)' }}>代理端点可用</div>
-                  <div style={{ fontSize: 11, color: 'var(--color-text-muted)', textAlign: 'center', lineHeight: 1.6 }}>
-                    使用 <code style={{ background: 'var(--color-bg)', padding: '2px 6px', borderRadius: 4, fontSize: 10 }}>/v1/chat/completions</code> 访问
+                  <div className="dashboard-site-info-empty-title">代理端点可用</div>
+                  <div className="dashboard-site-info-empty-note">
+                    使用 <code className="dashboard-site-info-empty-code">/v1/chat/completions</code> 访问
                   </div>
                 </div>
               )}
-            <div style={{ marginTop: 'auto', paddingTop: 8, borderTop: '1px solid var(--color-border-light)' }}>
-              <div style={{ fontSize: 11, color: 'var(--color-text-muted)', marginBottom: 2 }}>24h 活跃调用</div>
-              <div style={{ fontSize: 18, fontWeight: 700 }}>
+            <div className="dashboard-site-info-footer">
+              <div className="dashboard-site-info-footer-label">24h 活跃调用</div>
+              <div className="dashboard-site-info-footer-value">
                 {proxy24hTotal > 0 ? `${Math.round(proxy24hSuccess)}/${Math.round(proxy24hTotal)}` : '—'}
               </div>
             </div>

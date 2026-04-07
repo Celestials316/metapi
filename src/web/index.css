@@ -3717,6 +3717,7 @@ textarea {
   border: 1px solid var(--color-border-light);
   box-shadow: var(--shadow-card);
   padding: 20px;
+  min-width: 0;
 }
 
 /* ===== Frontend Skill Surfaces ===== */
@@ -5378,6 +5379,326 @@ textarea {
   background: linear-gradient(135deg, #ea580c, #fb923c);
 }
 
+.dashboard-model-analysis-panel,
+.dashboard-site-info-panel {
+  min-width: 0;
+}
+
+.dashboard-section-title-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 14px;
+  min-width: 0;
+}
+
+.dashboard-section-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  min-width: 0;
+}
+
+.model-analysis-panel {
+  min-width: 0;
+}
+
+.model-analysis-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.model-analysis-tabs {
+  margin-bottom: 16px;
+}
+
+.model-analysis-tabs .pill-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  width: 100%;
+  max-width: 100%;
+}
+
+.model-analysis-tabs .pill-tab {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+}
+
+.model-analysis-tab-pane,
+.model-analysis-chart {
+  min-width: 0;
+}
+
+.model-analysis-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  margin-top: 10px;
+  padding: 0 4px;
+  min-width: 0;
+}
+
+.model-analysis-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  font-size: 11px;
+  color: var(--color-text-secondary);
+}
+
+.model-analysis-legend-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+
+.model-analysis-legend-model {
+  min-width: 0;
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-analysis-legend-value {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+.model-analysis-rank-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.model-analysis-rank-card {
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-md);
+  background: var(--color-bg);
+  padding: 12px;
+  min-width: 0;
+}
+
+.model-analysis-rank-card-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+  min-width: 0;
+}
+
+.model-analysis-rank-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.model-analysis-rank-model {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.model-analysis-rank-model code {
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.model-analysis-rank-metrics {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.model-analysis-rank-metric {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.model-analysis-rank-metric-label {
+  font-size: 11px;
+  color: var(--color-text-muted);
+}
+
+.model-analysis-rank-metric-value {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.model-analysis-rank-chip {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  max-width: 100%;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.dashboard-site-info-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+  color: var(--color-text-primary);
+}
+
+.dashboard-site-info-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.dashboard-site-info-bulk-speed,
+.dashboard-site-info-action {
+  font-size: 11px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  text-decoration: none;
+}
+
+.dashboard-site-info-bulk-speed {
+  padding: 3px 10px;
+}
+
+.dashboard-site-info-action {
+  padding: 2px 8px;
+  gap: 3px;
+}
+
+.dashboard-site-info-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+.dashboard-site-info-card {
+  padding: 10px 12px;
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-md);
+  background: var(--color-bg);
+  min-width: 0;
+}
+
+.dashboard-site-info-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 6px;
+  min-width: 0;
+}
+
+.dashboard-site-info-card-name {
+  font-weight: 600;
+  font-size: 13px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.dashboard-site-info-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.dashboard-site-info-url {
+  font-size: 12px;
+  color: var(--color-info);
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+
+.dashboard-site-info-url:hover {
+  text-decoration: underline;
+}
+
+.dashboard-site-info-empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 20px;
+}
+
+.dashboard-site-info-empty-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+}
+
+.dashboard-site-info-empty-note {
+  font-size: 11px;
+  color: var(--color-text-muted);
+  text-align: center;
+  line-height: 1.6;
+}
+
+.dashboard-site-info-empty-code {
+  background: var(--color-bg);
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 10px;
+}
+
+.dashboard-site-info-footer {
+  margin-top: auto;
+  padding-top: 8px;
+  border-top: 1px solid var(--color-border-light);
+}
+
+.dashboard-site-info-footer-label {
+  font-size: 11px;
+  color: var(--color-text-muted);
+  margin-bottom: 2px;
+}
+
+.dashboard-site-info-footer-value {
+  font-size: 18px;
+  font-weight: 700;
+}
+
 /* ===== Log Detail Row ===== */
 .log-detail-row {
   background: var(--color-bg);
@@ -6551,6 +6872,95 @@ textarea {
 @media (max-width: 640px) {
   .topbar-search-kbd {
     display: none;
+  }
+}
+
+@media (max-width: 768px) {
+  .model-analysis-summary-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .model-analysis-summary-grid .stat-summary-card:last-child {
+    grid-column: 1 / -1;
+  }
+
+  .stat-summary-card {
+    padding: 14px 16px;
+  }
+
+  .stat-summary-card-value {
+    font-size: 18px;
+    overflow-wrap: anywhere;
+  }
+
+  .model-analysis-tabs .pill-tabs {
+    gap: 6px;
+    padding: 0;
+    background: transparent;
+  }
+
+  .model-analysis-tabs .pill-tab {
+    flex: 1 1 calc(50% - 3px);
+    padding: 8px 10px;
+    font-size: 12px;
+    line-height: 1.35;
+    border: 1px solid var(--color-border-light);
+    background: var(--color-bg);
+  }
+
+  .model-analysis-tabs .pill-tab.active {
+    border-color: color-mix(in srgb, var(--color-primary) 28%, var(--color-border));
+  }
+
+  .model-analysis-legend {
+    gap: 8px;
+    padding: 0;
+  }
+
+  .model-analysis-legend-item {
+    flex: 1 1 calc(50% - 4px);
+    align-items: flex-start;
+  }
+
+  .model-analysis-legend-model {
+    max-width: none;
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
+    overflow-wrap: anywhere;
+  }
+
+  .dashboard-site-info-header {
+    flex-wrap: wrap;
+    align-items: flex-start;
+  }
+
+  .dashboard-site-info-bulk-speed {
+    width: 100%;
+  }
+
+  .dashboard-site-info-card-header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .dashboard-site-info-card-actions {
+    width: 100%;
+  }
+
+  .dashboard-site-info-action {
+    flex: 1 1 calc(50% - 4px);
+    min-width: 0;
+  }
+}
+
+@media (max-width: 420px) {
+  .model-analysis-rank-metrics {
+    grid-template-columns: 1fr;
+  }
+
+  .dashboard-site-info-action {
+    flex-basis: 100%;
   }
 }
 
