@@ -380,11 +380,26 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: Resolve Docker image repository
+        id: docker-image
+        shell: bash
+        run: |
+          set -euo pipefail
+          repository='${{ vars.DOCKERHUB_REPOSITORY }}'
+          if [ -n "$repository" ]; then
+            :
+          elif [ '${{ secrets.DOCKERHUB_USERNAME }}' = '1467078763' ]; then
+            repository='1467078763/metapi'
+          else
+            repository='${{ secrets.DOCKERHUB_USERNAME }}/metapi'
+          fi
+          echo "repository=$repository" >> "$GITHUB_OUTPUT"
+
       - name: Extract Docker metadata
         id: meta
         uses: docker/metadata-action@v6
         with:
-          images: 1467078763/metapi
+          images: ${{ steps.docker-image.outputs.repository }}
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=ref,event=branch
@@ -445,11 +460,26 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: Resolve Docker image repository
+        id: docker-image
+        shell: bash
+        run: |
+          set -euo pipefail
+          repository='${{ vars.DOCKERHUB_REPOSITORY }}'
+          if [ -n "$repository" ]; then
+            :
+          elif [ '${{ secrets.DOCKERHUB_USERNAME }}' = '1467078763' ]; then
+            repository='1467078763/metapi'
+          else
+            repository='${{ secrets.DOCKERHUB_USERNAME }}/metapi'
+          fi
+          echo "repository=$repository" >> "$GITHUB_OUTPUT"
+
       - name: Extract Docker metadata
         id: meta
         uses: docker/metadata-action@v6
         with:
-          images: 1467078763/metapi
+          images: ${{ steps.docker-image.outputs.repository }}
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=ref,event=branch
