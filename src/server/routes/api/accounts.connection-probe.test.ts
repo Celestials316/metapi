@@ -202,6 +202,65 @@ describeIfBetterSqlite('accounts connection probe route', { timeout: 15_000 }, (
     }));
   });
 
+  it('returns a friendly success placeholder when upstream omits reply text', async () => {
+    dispatchRuntimeRequestMock.mockResolvedValue(new Response(JSON.stringify({
+      id: 'resp_probe_empty',
+      model: 'gpt-5.4',
+      choices: [
+        {
+          message: {
+            role: 'assistant',
+          },
+          finish_reason: 'stop',
+        },
+      ],
+    }), {
+      status: 200,
+      headers: {
+        'content-type': 'application/json',
+      },
+    }));
+
+    const site = await db.insert(schema.sites).values({
+      name: 'Empty Reply Site',
+      url: 'https://empty-reply.example.com',
+      platform: 'new-api',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'empty-user',
+      accessToken: 'session-token',
+      apiToken: null,
+      status: 'active',
+      extraConfig: JSON.stringify({ credentialMode: 'session' }),
+    }).returning().get();
+
+    await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'default',
+      token: 'sk-managed-default',
+      enabled: true,
+      isDefault: true,
+      valueStatus: 'ready',
+    }).run();
+
+    const response = await app.inject({
+      method: 'POST',
+      url: `/api/accounts/${account.id}/probe-chat`,
+      payload: { model: 'gpt-5.4' },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      success: true,
+      statusText: '服务正常',
+      replyText: '模型已正常响应，但未返回可展示文本',
+      model: 'gpt-5.4',
+    });
+    expect(response.body).not.toContain('"choices"');
+  });
+
   it('rejects malformed probe payloads at the route boundary', async () => {
     const response = await app.inject({
       method: 'POST',

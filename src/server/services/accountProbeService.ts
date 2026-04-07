@@ -20,7 +20,7 @@ import { readRuntimeResponseText } from '../proxy-core/executors/types.js';
 import { normalizeUpstreamFinalResponse } from '../transformers/shared/chatFormatsCore.js';
 
 const ACCOUNT_PROBE_TIMEOUT_MS = 15_000;
-const ACCOUNT_PROBE_EMPTY_REPLY_MESSAGE = '上游未返回可展示文本';
+const ACCOUNT_PROBE_EMPTY_REPLY_MESSAGE = '模型已正常响应，但未返回可展示文本';
 
 type AccountWithSiteRow = {
   accounts: typeof schema.accounts.$inferSelect;
@@ -309,14 +309,14 @@ export async function probeAccountChat(input: {
       payload = rawText;
     }
 
-    const normalized = normalizeUpstreamFinalResponse(payload, modelName, rawText);
+    const normalized = normalizeUpstreamFinalResponse(payload, modelName);
     const replyText = asTrimmedString(normalized.content);
 
     if (!replyText) {
       return {
-        success: false,
-        statusText: '测活失败',
-        errorMessage: ACCOUNT_PROBE_EMPTY_REPLY_MESSAGE,
+        success: true,
+        statusText: '服务正常',
+        replyText: ACCOUNT_PROBE_EMPTY_REPLY_MESSAGE,
         latencyMs,
         model: normalized.model || modelName,
       };

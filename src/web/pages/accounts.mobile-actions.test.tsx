@@ -114,6 +114,30 @@ describe('Accounts mobile actions', () => {
     }
   });
 
+  it('shows the site name directly in the mobile card header without expanding details', async () => {
+    let root!: WebTestRenderer;
+    try {
+      await act(async () => {
+        root = create(
+          <MemoryRouter initialEntries={['/accounts']}>
+            <ToastProvider>
+              <Accounts />
+            </ToastProvider>
+          </MemoryRouter>,
+        );
+      });
+      await flushMicrotasks();
+
+      const titleNodes = root.root.findAll((node) => node.props?.className === 'mobile-card-title');
+      const firstTitleText = collectText(titleNodes[0]);
+
+      expect(firstTitleText).toContain('alpha');
+      expect(firstTitleText).toContain('Site A');
+    } finally {
+      root?.unmount();
+    }
+  });
+
   it('clears only the visible segment selection when toggling mobile select-all off', async () => {
     let root!: WebTestRenderer;
     try {

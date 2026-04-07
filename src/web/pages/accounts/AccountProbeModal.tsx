@@ -43,6 +43,7 @@ export default function AccountProbeModal({
     && typeof document.body.appendChild === 'function'
     && typeof document.body.removeChild === 'function';
   const requestSeqRef = useRef(0);
+  const resultCardRef = useRef<HTMLDivElement | null>(null);
   const [loadingModels, setLoadingModels] = useState(false);
   const [models, setModels] = useState<AccountModelOption[]>([]);
   const [selectedModel, setSelectedModel] = useState('');
@@ -109,6 +110,23 @@ export default function AccountProbeModal({
       document.removeEventListener('keydown', handleKeydown);
     };
   }, [canUsePortal, isMobile, onClose, open]);
+
+  useEffect(() => {
+    if (!probeResult) return;
+    const resultNode = resultCardRef.current;
+    if (!resultNode || typeof resultNode.scrollIntoView !== 'function') return;
+
+    const timer = setTimeout(() => {
+      resultNode.scrollIntoView({
+        block: 'nearest',
+        behavior: 'smooth',
+      });
+    }, 32);
+
+    return () => {
+      clearTimeout(timer);
+    };
+  }, [probeResult]);
 
   const currentModelMeta = useMemo(
     () => models.find((item) => item.name === selectedModel) || null,
@@ -200,7 +218,10 @@ export default function AccountProbeModal({
       ) : null}
 
       {probeResult ? (
-        <div className={`account-probe-result-card ${probeResult.success ? 'is-success' : 'is-error'}`.trim()}>
+        <div
+          ref={resultCardRef}
+          className={`account-probe-result-card ${probeResult.success ? 'is-success' : 'is-error'}`.trim()}
+        >
           <div className="account-probe-result-head">
             <span className={`account-probe-status-pill ${probeResult.success ? 'is-success' : 'is-error'}`.trim()}>
               {probeResult.statusText}
@@ -242,6 +263,7 @@ export default function AccountProbeModal({
         onClose={onClose}
         title={modalTitle}
         maxWidth={560}
+        bodyStyle={{ maxHeight: 'min(72vh, 640px)', overflowY: 'auto' }}
         footer={footer}
       >
         {content}

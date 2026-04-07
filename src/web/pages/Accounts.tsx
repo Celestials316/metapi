@@ -1715,7 +1715,18 @@ export default function Accounts() {
                     return (
                       <MobileCard
                         key={a.id}
-                        title={resolveAccountDisplayName(a)}
+                        title={(
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                            <span>{resolveAccountDisplayName(a)}</span>
+                            {a.site?.name ? (
+                              <SiteBadgeLink
+                                siteId={a.site?.id}
+                                siteName={a.site?.name}
+                                badgeStyle={{ fontSize: 11 }}
+                              />
+                            ) : null}
+                          </div>
+                        )}
                         headerActions={(
                           <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                             <input

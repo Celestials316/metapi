@@ -7026,7 +7026,7 @@ textarea {
 
 .account-probe-sheet-content {
   width: 100%;
-  max-height: 52vh;
+  max-height: min(78vh, 760px);
   background: var(--color-bg-card);
   border-radius: 22px 22px 0 0;
   box-shadow: 0 -18px 40px rgba(15, 23, 42, 0.18);

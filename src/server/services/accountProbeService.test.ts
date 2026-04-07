@@ -195,4 +195,42 @@ describe('accountProbeService', () => {
       modelName: 'gpt-4.1-mini',
     }));
   });
+
+  it('treats empty textual payloads as a healthy response with a friendly placeholder', async () => {
+    executeEndpointFlowMock.mockResolvedValue({
+      ok: true,
+      upstream: new Response(JSON.stringify({
+        id: 'resp_probe_empty',
+        model: 'gpt-5.4',
+        choices: [
+          {
+            message: {
+              role: 'assistant',
+            },
+            finish_reason: 'stop',
+          },
+        ],
+        usage: {
+          prompt_tokens: 18,
+          completion_tokens: 11,
+          total_tokens: 29,
+        },
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+      upstreamPath: '/v1/chat/completions',
+    });
+
+    const { probeAccountChat } = await import('./accountProbeService.js');
+    const result = await probeAccountChat({ accountId: 1, modelName: 'gpt-5.4' });
+
+    expect(result).toMatchObject({
+      success: true,
+      statusText: '服务正常',
+      replyText: '模型已正常响应，但未返回可展示文本',
+      model: 'gpt-5.4',
+    });
+    expect(result.replyText).not.toContain('"choices"');
+  });
 });

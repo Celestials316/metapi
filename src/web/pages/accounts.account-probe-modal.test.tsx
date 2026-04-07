@@ -98,11 +98,11 @@ describe('AccountProbeModal', () => {
     }
   });
 
-  it('uses a half-screen mobile sheet style in shared css', () => {
+  it('uses a taller mobile sheet style in shared css', () => {
     const source = readFileSync(resolve(process.cwd(), 'src/web/pages/accounts/AccountProbeModal.tsx'), 'utf8').replace(/\r\n/g, '\n');
     const css = readFileSync(resolve(process.cwd(), 'src/web/index.css'), 'utf8').replace(/\r\n/g, '\n');
 
     expect(source).toContain('account-probe-sheet-content');
-    expect(css).toMatch(/\.account-probe-sheet-content\s*\{[\s\S]*max-height:\s*52vh/);
+    expect(css).toMatch(/\.account-probe-sheet-content\s*\{[\s\S]*max-height:\s*min\(78vh,\s*760px\)/);
   });
 });
