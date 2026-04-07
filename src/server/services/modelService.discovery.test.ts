@@ -590,6 +590,66 @@ describe('refreshModelsForAccount credential discovery', () => {
     });
   });
 
+  it('keeps existing availability and routes when a scheduled full refresh fails transiently', async () => {
+    getApiTokenMock.mockResolvedValue(null);
+    getModelsMock.mockResolvedValueOnce(['gpt-4.1']).mockRejectedValue(new Error('upstream unavailable'));
+
+    const site = await db.insert(schema.sites).values({
+      name: 'site-transient-refresh',
+      url: 'https://site-transient-refresh.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'transient-user',
+      accessToken: '',
+      apiToken: 'sk-stable',
+      status: 'active',
+      extraConfig: JSON.stringify({ credentialMode: 'apikey' }),
+    }).returning().get();
+
+    await expect(refreshModelsForAccount(account.id)).resolves.toMatchObject({
+      accountId: account.id,
+      status: 'success',
+      modelCount: 1,
+      modelsPreview: ['gpt-4.1'],
+    });
+
+    await expect(rebuildTokenRoutesFromAvailability()).resolves.toMatchObject({
+      createdRoutes: 1,
+      createdChannels: 1,
+    });
+
+    const refreshResult = await refreshModelsAndRebuildRoutes();
+    expect(refreshResult.refresh).toHaveLength(1);
+    expect(refreshResult.refresh[0]).toMatchObject({
+      accountId: account.id,
+      status: 'failed',
+      errorMessage: 'upstream unavailable',
+    });
+
+    const modelRows = await db.select().from(schema.modelAvailability)
+      .where(eq(schema.modelAvailability.accountId, account.id))
+      .all();
+    expect(modelRows).toHaveLength(1);
+    expect(modelRows[0]).toMatchObject({
+      accountId: account.id,
+      modelName: 'gpt-4.1',
+      available: true,
+    });
+
+    const routes = await db.select().from(schema.tokenRoutes).all();
+    const channels = await db.select().from(schema.routeChannels).all();
+    expect(routes).toHaveLength(1);
+    expect(channels).toHaveLength(1);
+    expect(channels[0]).toMatchObject({
+      accountId: account.id,
+      tokenId: null,
+    });
+  });
+
   it('does not scan masked_pending placeholders as token credentials', async () => {
     getApiTokenMock.mockResolvedValue(null);
     getModelsMock.mockImplementation(async (_baseUrl: string, token: string) => (
@@ -1349,7 +1409,12 @@ describe('refreshModelsForAccount credential discovery', () => {
     const rows = await db.select().from(schema.modelAvailability)
       .where(eq(schema.modelAvailability.accountId, account.id))
       .all();
-    expect(rows).toEqual([]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      accountId: account.id,
+      modelName: 'gpt-5.2-codex',
+      available: true,
+    });
 
     const latest = await db.select().from(schema.accounts)
       .where(eq(schema.accounts.id, account.id))

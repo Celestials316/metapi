@@ -2985,10 +2985,7 @@ export class TokenRouter {
         accountIds.add(member.account.id);
       }
     }
-    if (accountIds.size <= 0) return null;
-
-    const preferenceMap = await listAccountDispatchPreferences([...accountIds]);
-    const activePreferences = [...preferenceMap.values()]
+    const activePreferences = [...(await listAccountDispatchPreferences()).values()]
       .filter((item): item is MatchManualDispatchPreference => item.mode === 'force' || item.mode === 'prefer')
       .sort((left, right) => {
         const modeRankDiff = (right.mode === 'force' ? 2 : 1) - (left.mode === 'force' ? 2 : 1);
@@ -2999,7 +2996,11 @@ export class TokenRouter {
         return left.accountId - right.accountId;
       });
 
-    return activePreferences[0] ?? null;
+    const globalForce = activePreferences.find((item) => item.mode === 'force');
+    if (globalForce) return globalForce;
+
+    if (accountIds.size <= 0) return null;
+    return activePreferences.find((item) => accountIds.has(item.accountId)) ?? null;
   }
 
   private resolvePreferredAccountModelName(

@@ -387,65 +387,37 @@ export async function refreshModelsForAccount(
   const adapter = getAdapter(site.platform);
   const accountProxyUrl = resolveProxyUrlFromExtraConfig(account.extraConfig);
 
-  const restoreAvailabilityOnFailure = options?.allowInactive === true;
-  const previousAccountTokens = restoreAvailabilityOnFailure
-    ? await db.select()
-      .from(schema.accountTokens)
-      .where(eq(schema.accountTokens.accountId, accountId))
-      .all()
-    : [];
-  const previousModelAvailability = restoreAvailabilityOnFailure
-    ? await db.select()
-      .from(schema.modelAvailability)
-      .where(and(
-        eq(schema.modelAvailability.accountId, accountId),
-        eq(schema.modelAvailability.isManual, false),
-      ))
-      .all()
-    : [];
-  const previousTokenModelAvailability = restoreAvailabilityOnFailure
-    ? (await Promise.all(previousAccountTokens.map(async (token) => db.select()
-      .from(schema.tokenModelAvailability)
-      .where(eq(schema.tokenModelAvailability.tokenId, token.id))
-      .all()))).flat()
-    : [];
-
-  const clearExistingAvailability = async () => {
-    await db.delete(schema.modelAvailability)
-      .where(and(
-        eq(schema.modelAvailability.accountId, accountId),
-        eq(schema.modelAvailability.isManual, false),
-      ))
-      .run();
-
-    const currentAccountTokens = await db.select({ id: schema.accountTokens.id })
-      .from(schema.accountTokens)
-      .where(eq(schema.accountTokens.accountId, accountId))
-      .all();
-
-    for (const token of currentAccountTokens) {
-      await db.delete(schema.tokenModelAvailability)
-        .where(eq(schema.tokenModelAvailability.tokenId, token.id))
+  const replaceDiscoveredAvailability = async (input: {
+    accountRows: Array<typeof schema.modelAvailability.$inferInsert>;
+    tokenRows: Array<typeof schema.tokenModelAvailability.$inferInsert>;
+  }) => {
+    await db.transaction(async (tx) => {
+      await tx.delete(schema.modelAvailability)
+        .where(and(
+          eq(schema.modelAvailability.accountId, accountId),
+          eq(schema.modelAvailability.isManual, false),
+        ))
         .run();
-    }
-  };
 
-  const restorePreviousAvailability = async () => {
-    if (!restoreAvailabilityOnFailure) return;
-    await clearExistingAvailability();
-    if (previousModelAvailability.length > 0) {
-      await db.insert(schema.modelAvailability).values(
-        previousModelAvailability.map(({ id: _id, ...row }) => row),
-      ).run();
-    }
-    if (previousTokenModelAvailability.length > 0) {
-      await db.insert(schema.tokenModelAvailability).values(
-        previousTokenModelAvailability.map(({ id: _id, ...row }) => row),
-      ).run();
-    }
-  };
+      const currentAccountTokens = await tx.select({ id: schema.accountTokens.id })
+        .from(schema.accountTokens)
+        .where(eq(schema.accountTokens.accountId, accountId))
+        .all();
 
-  await clearExistingAvailability();
+      for (const token of currentAccountTokens) {
+        await tx.delete(schema.tokenModelAvailability)
+          .where(eq(schema.tokenModelAvailability.tokenId, token.id))
+          .run();
+      }
+
+      if (input.accountRows.length > 0) {
+        await tx.insert(schema.modelAvailability).values(input.accountRows).run();
+      }
+      if (input.tokenRows.length > 0) {
+        await tx.insert(schema.tokenModelAvailability).values(input.tokenRows).run();
+      }
+    });
+  };
 
   // Collect manual model names so discovered models that collide are skipped (unique index).
   const manualModelNames = new Set(
@@ -487,17 +459,16 @@ export async function refreshModelsForAccount(
       }
 
       const newCodexModels = codexModels.filter((m) => !manualModelNames.has(m.toLowerCase()));
-      if (newCodexModels.length > 0) {
-        await db.insert(schema.modelAvailability).values(
-          newCodexModels.map((modelName) => ({
-            accountId,
-            modelName,
-            available: true,
-            latencyMs: Date.now() - startedAt,
-            checkedAt,
-          })),
-        ).run();
-      }
+      await replaceDiscoveredAvailability({
+        accountRows: newCodexModels.map((modelName) => ({
+          accountId,
+          modelName,
+          available: true,
+          latencyMs: Date.now() - startedAt,
+          checkedAt,
+        })),
+        tokenRows: [],
+      });
       await updateOauthModelDiscoveryState({
         account: discoveryAccount,
         checkedAt,
@@ -536,7 +507,6 @@ export async function refreshModelsForAccount(
         source: 'model-discovery',
         checkedAt,
       });
-      await restorePreviousAvailability();
       return buildFailedRefreshResult({
         accountId,
         errorCode,
@@ -567,17 +537,16 @@ export async function refreshModelsForAccount(
         throw new Error('未获取到可用模型');
       }
       const newClaudeModels = claudeModels.filter((m) => !manualModelNames.has(m.toLowerCase()));
-      if (newClaudeModels.length > 0) {
-        await db.insert(schema.modelAvailability).values(
-          newClaudeModels.map((modelName) => ({
-            accountId,
-            modelName,
-            available: true,
-            latencyMs: Date.now() - startedAt,
-            checkedAt,
-          })),
-        ).run();
-      }
+      await replaceDiscoveredAvailability({
+        accountRows: newClaudeModels.map((modelName) => ({
+          accountId,
+          modelName,
+          available: true,
+          latencyMs: Date.now() - startedAt,
+          checkedAt,
+        })),
+        tokenRows: [],
+      });
       await updateOauthModelDiscoveryState({
         account: discoveryAccount,
         checkedAt,
@@ -616,7 +585,6 @@ export async function refreshModelsForAccount(
         source: 'model-discovery',
         checkedAt,
       });
-      await restorePreviousAvailability();
       return buildFailedRefreshResult({
         accountId,
         errorCode,
@@ -661,17 +629,16 @@ export async function refreshModelsForAccount(
         );
       }
       const newGeminiModels = GEMINI_CLI_STATIC_MODELS.filter((m) => !manualModelNames.has(m.toLowerCase()));
-      if (newGeminiModels.length > 0) {
-        await db.insert(schema.modelAvailability).values(
-          newGeminiModels.map((modelName) => ({
-            accountId,
-            modelName,
-            available: true,
-            latencyMs: Date.now() - startedAt,
-            checkedAt,
-          })),
-        ).run();
-      }
+      await replaceDiscoveredAvailability({
+        accountRows: newGeminiModels.map((modelName) => ({
+          accountId,
+          modelName,
+          available: true,
+          latencyMs: Date.now() - startedAt,
+          checkedAt,
+        })),
+        tokenRows: [],
+      });
       await updateOauthModelDiscoveryState({
         account: discoveryAccount,
         checkedAt,
@@ -709,7 +676,6 @@ export async function refreshModelsForAccount(
         source: 'model-discovery',
         checkedAt,
       });
-      await restorePreviousAvailability();
       return buildFailedRefreshResult({
         accountId,
         errorCode,
@@ -741,17 +707,16 @@ export async function refreshModelsForAccount(
       }
 
       const newAntigravityModels = antigravityModels.filter((m) => !manualModelNames.has(m.toLowerCase()));
-      if (newAntigravityModels.length > 0) {
-        await db.insert(schema.modelAvailability).values(
-          newAntigravityModels.map((modelName) => ({
-            accountId,
-            modelName,
-            available: true,
-            latencyMs: Date.now() - startedAt,
-            checkedAt,
-          })),
-        ).run();
-      }
+      await replaceDiscoveredAvailability({
+        accountRows: newAntigravityModels.map((modelName) => ({
+          accountId,
+          modelName,
+          available: true,
+          latencyMs: Date.now() - startedAt,
+          checkedAt,
+        })),
+        tokenRows: [],
+      });
       await updateOauthModelDiscoveryState({
         account: discoveryAccount,
         checkedAt,
@@ -790,7 +755,6 @@ export async function refreshModelsForAccount(
         source: 'model-discovery',
         checkedAt,
       });
-      await restorePreviousAvailability();
       return buildFailedRefreshResult({
         accountId,
         errorCode,
@@ -818,7 +782,7 @@ export async function refreshModelsForAccount(
         `api token discovery timeout (${Math.round(API_TOKEN_DISCOVERY_TIMEOUT_MS / 1000)}s)`,
       );
       if (discoveredApiToken && !isMaskedTokenValue(discoveredApiToken)) {
-        ensureDefaultTokenForAccount(account.id, discoveredApiToken, { name: 'default', source: 'sync' });
+        await ensureDefaultTokenForAccount(account.id, discoveredApiToken, { name: 'default', source: 'sync' });
         await db.update(schema.accounts).set({
           apiToken: discoveredApiToken,
           updatedAt: new Date().toISOString(),
@@ -846,7 +810,7 @@ export async function refreshModelsForAccount(
   if (usesManagedTokens && enabledTokens.length === 0) {
     const fallback = discoveredApiToken || account.apiToken || null;
     if (fallback) {
-      ensureDefaultTokenForAccount(account.id, fallback, { name: 'default', source: 'legacy' });
+      await ensureDefaultTokenForAccount(account.id, fallback, { name: 'default', source: 'legacy' });
       enabledTokens = await db.select()
         .from(schema.accountTokens)
         .where(and(
@@ -872,7 +836,6 @@ export async function refreshModelsForAccount(
       source: 'model-discovery',
       checkedAt: new Date().toISOString(),
     });
-    await restorePreviousAvailability();
     return buildFailedRefreshResult({
       accountId,
       errorCode,
@@ -941,6 +904,7 @@ export async function refreshModelsForAccount(
   await discoverModelsWithCredential(discoveredApiToken);
   await discoverModelsWithCredential(account.accessToken);
 
+  const pendingTokenAvailability: Array<typeof schema.tokenModelAvailability.$inferInsert> = [];
   for (const token of enabledTokens) {
     const startedAt = Date.now();
     let models: string[] = [];
@@ -964,15 +928,15 @@ export async function refreshModelsForAccount(
     const latencyMs = Date.now() - startedAt;
     const checkedAt = new Date().toISOString();
 
-    await db.insert(schema.tokenModelAvailability).values(
-      models.map((modelName) => ({
+    pendingTokenAvailability.push(
+      ...models.map((modelName) => ({
         tokenId: token.id,
         modelName,
         available: true,
         latencyMs,
         checkedAt,
       })),
-    ).run();
+    );
 
     scannedTokenCount++;
     mergeDiscoveredModels(models, latencyMs);
@@ -988,7 +952,6 @@ export async function refreshModelsForAccount(
       source: 'model-discovery',
       checkedAt: new Date().toISOString(),
     });
-    await restorePreviousAvailability();
     return buildFailedRefreshResult({
       accountId,
       errorCode,
@@ -1001,17 +964,16 @@ export async function refreshModelsForAccount(
 
   const checkedAt = new Date().toISOString();
   const newAccountModels = Array.from(accountModels.values()).filter((m) => !manualModelNames.has(m.toLowerCase()));
-  if (newAccountModels.length > 0) {
-    await db.insert(schema.modelAvailability).values(
-      newAccountModels.map((modelName) => ({
-        accountId: account.id,
-        modelName,
-        available: true,
-        latencyMs: modelLatency.get(modelName.toLowerCase()) ?? null,
-        checkedAt,
-      })),
-    ).run();
-  }
+  await replaceDiscoveredAvailability({
+    accountRows: newAccountModels.map((modelName) => ({
+      accountId: account.id,
+      modelName,
+      available: true,
+      latencyMs: modelLatency.get(modelName.toLowerCase()) ?? null,
+      checkedAt,
+    })),
+    tokenRows: pendingTokenAvailability,
+  });
 
   await setAccountRuntimeHealth(account.id, {
     state: 'healthy',

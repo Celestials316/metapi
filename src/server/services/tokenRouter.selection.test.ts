@@ -246,6 +246,28 @@ describe('TokenRouter selection scoring', () => {
     await expect(router.selectChannel('gpt-5.4')).resolves.toBeNull();
   });
 
+  it('does not fall back when the forced account is no longer part of the matched route candidates', async () => {
+    const route = await createRoute('gpt-5.4');
+    const siteA = await createSite('force-missing-site-a');
+    const siteB = await createSite('force-missing-site-b');
+    const accountA = await createAccount(siteA.id, 'force-missing-user-a');
+    const accountB = await createAccount(siteB.id, 'force-missing-user-b');
+
+    await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: accountB.id,
+      tokenId: null,
+      priority: 0,
+      weight: 100,
+      enabled: true,
+    }).run();
+
+    await setAccountDispatchPreferenceMode(accountA.id, 'force');
+
+    const router = new TokenRouter();
+    await expect(router.selectChannel('gpt-5.4')).resolves.toBeNull();
+  });
+
   it('falls back for prefer preference and fails back after the preferred account recovers', async () => {
     const route = await createRoute('gpt-5.4');
     const siteA = await createSite('prefer-site-a');
