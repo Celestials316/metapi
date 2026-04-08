@@ -42,7 +42,7 @@ function findButtonByText(root: any, text: string) {
   return root.find((node: any) => (
     node.type === 'button'
     && typeof node.props.onClick === 'function'
-    && collectText(node).includes(text)
+    && collectText(node).trim() === text
   ));
 }
 
