@@ -13,6 +13,7 @@ import DeleteConfirmModal from '../components/DeleteConfirmModal.js';
 import SiteBadgeLink from '../components/SiteBadgeLink.js';
 import AccountModelsModal from './accounts/AccountModelsModal.js';
 import AccountProbeModal from './accounts/AccountProbeModal.js';
+import BatchAccountProbeModal from './accounts/BatchAccountProbeModal.js';
 import {
   buildAddAccountPrereqHint,
   buildVerifyFailureHint,
@@ -188,6 +189,7 @@ export default function Accounts() {
   const [rebindSaving, setRebindSaving] = useState(false);
   const [probeModalOpen, setProbeModalOpen] = useState(false);
   const [probeAccount, setProbeAccount] = useState<any | null>(null);
+  const [batchProbeModalOpen, setBatchProbeModalOpen] = useState(false);
   const [dispatchPreferenceModal, setDispatchPreferenceModal] = useState<{
     open: boolean;
     account: any | null;
@@ -301,6 +303,10 @@ export default function Accounts() {
     if (activeSegment === 'tokens') return [];
     return sortedAccounts.filter((account) => resolveAccountCredentialMode(account) === activeSegment);
   }, [activeSegment, sortedAccounts]);
+  const batchProbeAccounts = useMemo(() => sortedAccounts.filter((account) => {
+    const mode = resolveAccountCredentialMode(account);
+    return mode === 'session' || mode === 'apikey';
+  }), [sortedAccounts]);
   const allVisibleAccountsSelected = visibleAccounts.length > 0 && visibleAccounts.every((account) => selectedAccountIds.includes(account.id));
   const manualDispatchAccounts = useMemo(
     () => accounts.filter((account) => normalizeAccountDispatchPreferenceMode(account?.dispatchPreferenceMode) !== 'default'),
@@ -612,6 +618,15 @@ export default function Accounts() {
 
   const closeProbeModal = () => {
     setProbeModalOpen(false);
+  };
+
+  const openBatchProbeModal = () => {
+    if (activeSegment === 'tokens') return;
+    setBatchProbeModalOpen(true);
+  };
+
+  const closeBatchProbeModal = () => {
+    setBatchProbeModalOpen(false);
   };
 
   const patchAccountDispatchPreferenceMode = (accountId: number, mode: AccountDispatchPreferenceMode) => {
@@ -1233,6 +1248,14 @@ export default function Accounts() {
                 >
                   {actionLoading['health-refresh'] ? <><span className="spinner spinner-sm" />{tr('刷新状态中...')}</> : tr('刷新账户状态')}
                 </button>
+                <button
+                  type="button"
+                  onClick={openBatchProbeModal}
+                  disabled={visibleAccounts.length <= 0}
+                  className="btn btn-soft-primary"
+                >
+                  全部测活
+                </button>
               </>
             )}
             <button
@@ -1352,6 +1375,18 @@ export default function Accounts() {
               style={{ border: '1px solid var(--color-border)' }}
             >
               {actionLoading['health-refresh'] ? <><span className="spinner spinner-sm" />{tr('刷新状态中...')}</> : tr('刷新账户状态')}
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setShowMobileTools(false);
+                openBatchProbeModal();
+              }}
+              disabled={visibleAccounts.length <= 0}
+              className="btn btn-ghost"
+              style={{ border: '1px solid var(--color-border)' }}
+            >
+              全部测活
             </button>
           </div>
         )}
@@ -2516,6 +2551,13 @@ export default function Accounts() {
         open={probeModalOpen}
         account={probeAccount}
         onClose={closeProbeModal}
+      />
+      <BatchAccountProbeModal
+        open={batchProbeModalOpen}
+        activeSegment={activeSegment}
+        segmentAccounts={visibleAccounts}
+        allAccounts={batchProbeAccounts}
+        onClose={closeBatchProbeModal}
       />
     </div>
   );

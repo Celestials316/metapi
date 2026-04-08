@@ -142,21 +142,24 @@ async function request<T = any>(url: string, options: RequestOptions = {}): Prom
   return res.json() as Promise<T>;
 }
 
-async function streamSse(
+async function streamSseRequest(
   url: string,
-  handlers: {
-    onLog?: (entry: any) => void;
-    onDone?: (payload: any) => void;
+  options: {
+    method?: 'GET' | 'POST';
+    body?: string;
     signal?: AbortSignal;
+    timeoutMs?: number;
+    onEvent?: (eventName: string, payload: any) => void;
   },
 ) {
   const response = await fetchAuthenticatedResponse(url, {
-    method: 'GET',
-    signal: handlers.signal,
+    method: options.method || 'GET',
+    body: options.body,
+    signal: options.signal,
     headers: {
       Accept: 'text/event-stream',
     },
-    timeoutMs: 120_000,
+    timeoutMs: options.timeoutMs ?? 120_000,
   });
 
   if (!response.ok) {
@@ -196,11 +199,7 @@ async function streamSse(
         // keep string payload
       }
 
-      if (eventName === 'log') {
-        handlers.onLog?.(payload);
-      } else if (eventName === 'done') {
-        handlers.onDone?.(payload);
-      }
+      options.onEvent?.(eventName, payload);
     }
   };
 
@@ -214,6 +213,28 @@ async function streamSse(
   if (buffer.trim()) {
     flushBuffer(true);
   }
+}
+
+async function streamSse(
+  url: string,
+  handlers: {
+    onLog?: (entry: any) => void;
+    onDone?: (payload: any) => void;
+    signal?: AbortSignal;
+  },
+) {
+  return streamSseRequest(url, {
+    method: 'GET',
+    signal: handlers.signal,
+    timeoutMs: 120_000,
+    onEvent: (eventName, payload) => {
+      if (eventName === 'log') {
+        handlers.onLog?.(payload);
+      } else if (eventName === 'done') {
+        handlers.onDone?.(payload);
+      }
+    },
+  });
 }
 
 function buildQueryString(params?: Record<string, string | number | boolean | null | undefined>) {
@@ -404,6 +425,38 @@ export type AccountProbeChatResponse = {
   errorMessage?: string;
   latencyMs: number | null;
   model: string;
+};
+
+export type BatchAccountProbeStatus = 'success' | 'failed' | 'skipped_disabled' | 'skipped_no_model';
+
+export type BatchAccountProbeResultItem = {
+  accountId: number;
+  accountName: string;
+  siteName: string;
+  status: BatchAccountProbeStatus;
+  latencyMs: number | null;
+  model: string | null;
+  usedFallbackModel: boolean;
+  message: string;
+};
+
+export type BatchAccountProbeStartEvent = {
+  totalAccounts: number;
+  scheduledAccounts: number;
+  hiddenDisabledAccounts: number;
+  concurrency: number;
+};
+
+export type BatchAccountProbeDoneSummary = {
+  totalAccounts: number;
+  scheduledAccounts: number;
+  hiddenDisabledAccounts: number;
+  completedAccounts: number;
+  success: number;
+  failed: number;
+  skipped: number;
+  durationMs: number;
+  errorMessage?: string;
 };
 
 export type ProxyLogStatusFilter = 'all' | 'success' | 'failed';
@@ -783,6 +836,34 @@ export const api = {
   refreshBalance: (id: number) => request(`/api/accounts/${id}/balance`, { method: 'POST' }),
   getAccountModels: (id: number) => request(`/api/accounts/${id}/models`),
   probeAccountChat: (accountId: number, data: { model: string }) => request(`/api/accounts/${accountId}/probe-chat`, { method: 'POST', body: JSON.stringify(data) }) as Promise<AccountProbeChatResponse>,
+  streamBatchAccountProbe: (
+    data: {
+      accountIds: number[];
+      preferredModel: string;
+      includeDisabled: boolean;
+      concurrency: 3 | 4 | 5;
+    },
+    handlers: {
+      onStart?: (payload: BatchAccountProbeStartEvent) => void;
+      onResult?: (payload: BatchAccountProbeResultItem) => void;
+      onDone?: (payload: BatchAccountProbeDoneSummary) => void;
+      signal?: AbortSignal;
+    },
+  ) => streamSseRequest('/api/accounts/probe-chat/batch', {
+    method: 'POST',
+    body: JSON.stringify(data),
+    signal: handlers.signal,
+    timeoutMs: 120_000,
+    onEvent: (eventName, payload) => {
+      if (eventName === 'start') {
+        handlers.onStart?.(payload as BatchAccountProbeStartEvent);
+      } else if (eventName === 'result') {
+        handlers.onResult?.(payload as BatchAccountProbeResultItem);
+      } else if (eventName === 'done') {
+        handlers.onDone?.(payload as BatchAccountProbeDoneSummary);
+      }
+    },
+  }),
   addAccountAvailableModels: (accountId: number, models: string[]) => request(`/api/accounts/${accountId}/models/manual`, { method: 'POST', body: JSON.stringify({ models }) }),
   refreshAccountHealth: (data?: { accountId?: number; wait?: boolean }) => request('/api/accounts/health/refresh', {
     method: 'POST',

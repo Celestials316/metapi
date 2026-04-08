@@ -70,12 +70,20 @@ const accountProbeChatPayloadSchema = z.object({
   model: z.string().min(1),
 }).passthrough();
 
+const accountBatchProbeChatPayloadSchema = z.object({
+  accountIds: z.array(z.number().int().positive()).optional(),
+  preferredModel: z.string().min(1),
+  includeDisabled: z.boolean().optional(),
+  concurrency: z.number().int().min(1).max(5).optional(),
+}).passthrough();
+
 export type AccountBatchPayload = z.output<typeof accountBatchPayloadSchema>;
 export type AccountCreatePayload = z.output<typeof accountCreatePayloadSchema>;
 export type AccountHealthRefreshPayload = z.output<typeof accountHealthRefreshPayloadSchema>;
 export type AccountLoginPayload = z.output<typeof accountLoginPayloadSchema>;
 export type AccountManualModelsPayload = z.output<typeof accountManualModelsPayloadSchema>;
 export type AccountProbeChatPayload = z.output<typeof accountProbeChatPayloadSchema>;
+export type AccountBatchProbeChatPayload = z.output<typeof accountBatchProbeChatPayloadSchema>;
 export type AccountRebindSessionPayload = z.output<typeof accountRebindSessionPayloadSchema>;
 export type AccountUpdatePayload = z.output<typeof accountUpdatePayloadSchema>;
 export type AccountVerifyTokenPayload = z.output<typeof accountVerifyTokenPayloadSchema>;
@@ -153,6 +161,18 @@ function formatAccountsPayloadError(error: z.ZodError): string {
   if (firstPath === 'model') {
     return 'Invalid model. Expected non-empty string.';
   }
+  if (firstPath == 'accountIds') {
+    return 'Invalid accountIds. Expected positive number[]';
+  }
+  if (firstPath == 'preferredModel') {
+    return 'Invalid preferredModel. Expected non-empty string.';
+  }
+  if (firstPath == 'includeDisabled') {
+    return 'Invalid includeDisabled. Expected boolean.';
+  }
+  if (firstPath == 'concurrency') {
+    return 'Invalid concurrency. Expected integer between 1 and 5.';
+  }
   return 'Invalid account payload.';
 }
 
@@ -214,4 +234,9 @@ export function parseAccountManualModelsPayload(input: unknown):
 export function parseAccountProbeChatPayload(input: unknown):
 { success: true; data: AccountProbeChatPayload } | { success: false; error: string } {
   return parseAccountsPayload(accountProbeChatPayloadSchema, input);
+}
+
+export function parseAccountBatchProbeChatPayload(input: unknown):
+{ success: true; data: AccountBatchProbeChatPayload } | { success: false; error: string } {
+  return parseAccountsPayload(accountBatchProbeChatPayloadSchema, input);
 }

@@ -35,6 +35,7 @@ import { parseSiteProxyUrlInput, withAccountProxyOverride, withSiteRecordProxyRe
 import { createRateLimitGuard } from '../../middleware/requestRateLimit.js';
 import {
   parseAccountBatchPayload,
+  parseAccountBatchProbeChatPayload,
   parseAccountCreatePayload,
   parseAccountHealthRefreshPayload,
   parseAccountLoginPayload,
@@ -46,6 +47,7 @@ import {
 } from '../../contracts/accountsRoutePayloads.js';
 import { requireSiteApiBaseUrl, runWithSiteApiEndpointPool } from '../../services/siteApiEndpointService.js';
 import { isAccountProbeServiceError, probeAccountChat } from '../../services/accountProbeService.js';
+import { executeAccountBatchProbe } from '../../services/accountBatchProbeService.js';
 import {
   listAccountDispatchPreferences,
   normalizeAccountDispatchPreferenceMode,
@@ -79,6 +81,10 @@ type AccountCapabilities = {
 
 type AccountDispatchPreferenceMode = 'default' | 'force' | 'prefer';
 type AccountCheckinActionMode = ExternalAccountCheckinActionMode;
+
+function writeSseEvent(reply: { raw: NodeJS.WritableStream & { write: (chunk: string) => void } }, event: string, data: unknown) {
+  reply.raw.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+}
 
 type AccountInitializationParams = {
   accountId: number;
@@ -1710,6 +1716,61 @@ export async function accountsRoutes(app: FastifyInstance) {
       totalCount: models.length,
       disabledCount: models.filter((m) => m.disabled).length,
     };
+  });
+
+  app.post<{ Body: unknown }>('/api/accounts/probe-chat/batch', async (request, reply) => {
+    const parsedBody = parseAccountBatchProbeChatPayload(request.body);
+    if (!parsedBody.success) {
+      return reply.code(400).send({ message: parsedBody.error });
+    }
+
+    reply.hijack();
+    reply.raw.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+    reply.raw.setHeader('Cache-Control', 'no-cache, no-transform');
+    reply.raw.setHeader('Connection', 'keep-alive');
+
+    let streamClosed = false;
+    request.raw.on('close', () => {
+      streamClosed = true;
+    });
+
+    try {
+      const summary = await executeAccountBatchProbe({
+        accountIds: parsedBody.data.accountIds || [],
+        preferredModel: parsedBody.data.preferredModel,
+        includeDisabled: parsedBody.data.includeDisabled === true,
+        concurrency: parsedBody.data.concurrency || 4,
+        shouldContinue: () => !streamClosed,
+        onStart: async (payload) => {
+          if (streamClosed) return;
+          writeSseEvent(reply, 'start', payload);
+        },
+        onResult: async (payload) => {
+          if (streamClosed) return;
+          writeSseEvent(reply, 'result', payload);
+        },
+      });
+
+      if (!streamClosed) {
+        writeSseEvent(reply, 'done', summary);
+        reply.raw.end();
+      }
+    } catch (error) {
+      if (!streamClosed) {
+        writeSseEvent(reply, 'done', {
+          totalAccounts: Array.isArray(parsedBody.data.accountIds) ? parsedBody.data.accountIds.length : 0,
+          scheduledAccounts: 0,
+          hiddenDisabledAccounts: 0,
+          completedAccounts: 0,
+          success: 0,
+          failed: 0,
+          skipped: 0,
+          durationMs: 0,
+          errorMessage: error instanceof Error ? error.message : '批量测活失败',
+        });
+        reply.raw.end();
+      }
+    }
   });
 
   app.post<{ Params: { id: string }; Body: unknown }>('/api/accounts/:id/probe-chat', async (request, reply) => {
