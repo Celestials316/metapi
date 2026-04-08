@@ -4,6 +4,7 @@ import BatchAccountProbeModal from './accounts/BatchAccountProbeModal.js';
 
 const { apiMock } = vi.hoisted(() => ({
   apiMock: {
+    getAccountModels: vi.fn(),
     streamBatchAccountProbe: vi.fn(),
   },
 }));
@@ -19,6 +20,13 @@ vi.mock('react-dom', () => ({
 vi.mock('../components/useIsMobile.js', () => ({
   useIsMobile: () => false,
 }));
+
+async function flushMicrotasks() {
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+}
 
 function collectText(node: any): string {
   return (node.children || []).map((child: any) => {
@@ -38,6 +46,25 @@ function findButtonByText(root: any, text: string) {
 describe('BatchAccountProbeModal', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    apiMock.getAccountModels.mockImplementation((accountId: number) => {
+      if (accountId === 1) {
+        return Promise.resolve({
+          siteName: 'Site A',
+          models: [
+            { name: 'gpt-4.1', disabled: false },
+            { name: 'gpt-4.1-mini', disabled: false },
+          ],
+        });
+      }
+
+      return Promise.resolve({
+        siteName: 'Site B',
+        models: [
+          { name: 'gpt-4.1-mini', disabled: false },
+          { name: 'gemini-2.5-flash', disabled: false },
+        ],
+      });
+    });
     apiMock.streamBatchAccountProbe.mockImplementation(async (payload: any, handlers: any) => {
       handlers.onStart?.({
         totalAccounts: payload.accountIds.length,
@@ -91,10 +118,13 @@ describe('BatchAccountProbeModal', () => {
           />,
         );
       });
+      await flushMicrotasks();
 
-      const modelInput = root.root.findByProps({ 'data-testid': 'batch-probe-model-input' });
+      expect(apiMock.getAccountModels).toHaveBeenCalledWith(1);
+
+      const modelSelect = root.root.findByProps({ 'data-testid': 'batch-probe-model-select' });
       await act(async () => {
-        modelInput.props.onChange({ target: { value: 'preferred-one' } });
+        modelSelect.props.onChange({ target: { value: 'gpt-4.1-mini' } });
       });
 
       const startButton = findButtonByText(root.root, '开始测活');
@@ -104,7 +134,7 @@ describe('BatchAccountProbeModal', () => {
 
       expect(apiMock.streamBatchAccountProbe).toHaveBeenCalledWith({
         accountIds: [1],
-        preferredModel: 'preferred-one',
+        preferredModel: 'gpt-4.1-mini',
         includeDisabled: false,
         concurrency: 4,
       }, expect.objectContaining({
@@ -116,8 +146,48 @@ describe('BatchAccountProbeModal', () => {
       expect(collectText(root.root)).toContain('测活结果');
       expect(collectText(root.root)).toContain('alpha');
       expect(collectText(root.root)).toContain('hello from upstream');
-      expect(collectText(root.root)).not.toContain('preferred-one');
+      expect(collectText(root.root)).not.toContain('默认测活模型');
       expect(collectText(root.root)).toContain('fallback-model');
+    } finally {
+      root?.unmount();
+    }
+  });
+
+  it('reloads aggregated model options when switching to all scope', async () => {
+    let root!: WebTestRenderer;
+    try {
+      await act(async () => {
+        root = create(
+          <BatchAccountProbeModal
+            open
+            activeSegment="session"
+            segmentAccounts={[
+              { id: 1, username: 'alpha', status: 'active', site: { name: 'Site A' } },
+            ]}
+            allAccounts={[
+              { id: 1, username: 'alpha', status: 'active', site: { name: 'Site A' } },
+              { id: 2, username: 'beta', status: 'active', site: { name: 'Site B' } },
+            ]}
+            onClose={() => {}}
+          />,
+        );
+      });
+      await flushMicrotasks();
+
+      const scopeButton = findButtonByText(root.root, '全部分段');
+      await act(async () => {
+        scopeButton.props.onClick();
+      });
+      await flushMicrotasks();
+
+      expect(apiMock.getAccountModels).toHaveBeenCalledWith(1);
+      expect(apiMock.getAccountModels).toHaveBeenCalledWith(2);
+
+      const modelSelect = root.root.findByProps({ 'data-testid': 'batch-probe-model-select' });
+      const optionValues = modelSelect.props.children.map((child: any) => child.props.value);
+
+      expect(optionValues).toContain('gemini-2.5-flash');
+      expect(optionValues[0]).toBe('gpt-4.1-mini');
     } finally {
       root?.unmount();
     }

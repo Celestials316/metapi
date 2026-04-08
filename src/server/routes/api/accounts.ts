@@ -1728,11 +1728,14 @@ export async function accountsRoutes(app: FastifyInstance) {
     reply.raw.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
     reply.raw.setHeader('Cache-Control', 'no-cache, no-transform');
     reply.raw.setHeader('Connection', 'keep-alive');
+    reply.raw.flushHeaders?.();
 
     let streamClosed = false;
-    request.raw.on('close', () => {
+    const markStreamClosed = () => {
       streamClosed = true;
-    });
+    };
+    request.raw.on('aborted', markStreamClosed);
+    reply.raw.on('close', markStreamClosed);
 
     try {
       const summary = await executeAccountBatchProbe({

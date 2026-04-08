@@ -7,6 +7,7 @@ import Accounts from './Accounts.js';
 const { apiMock } = vi.hoisted(() => ({
   apiMock: {
     getAccounts: vi.fn(),
+    getAccountModels: vi.fn(),
     getSites: vi.fn(),
   },
 }));
@@ -72,6 +73,25 @@ describe('Accounts batch account probe entry', () => {
         site: { id: 2, name: 'Site B', status: 'active', platform: 'new-api' },
       },
     ]);
+    apiMock.getAccountModels.mockImplementation((accountId: number) => {
+      if (accountId === 1) {
+        return Promise.resolve({
+          siteName: 'Site A',
+          models: [
+            { name: 'gpt-4.1', disabled: false },
+            { name: 'gpt-4.1-mini', disabled: false },
+          ],
+        });
+      }
+
+      return Promise.resolve({
+        siteName: 'Site B',
+        models: [
+          { name: 'gpt-4.1-mini', disabled: false },
+          { name: 'gemini-2.5-flash', disabled: false },
+        ],
+      });
+    });
   });
 
   afterEach(() => {
@@ -100,6 +120,7 @@ describe('Accounts batch account probe entry', () => {
       await flushMicrotasks();
 
       expect(collectText(sessionRoot.root)).toContain('默认测活模型');
+      expect(apiMock.getAccountModels).toHaveBeenCalledWith(1);
 
       await act(async () => {
         apikeyRoot = create(

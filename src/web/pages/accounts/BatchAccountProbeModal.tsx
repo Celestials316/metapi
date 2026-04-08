@@ -16,6 +16,10 @@ type BatchProbeCandidate = {
   status?: string | null;
   site?: { name?: string | null } | null;
 };
+type BatchProbeModelOption = {
+  name: string;
+  count: number;
+};
 
 type BatchAccountProbeModalProps = {
   open: boolean;
@@ -65,6 +69,23 @@ function formatLatency(latencyMs: number | null | undefined): string {
   return `${Math.round(latencyMs)}ms`;
 }
 
+function buildBatchProbeModelOptions(results: unknown[]): BatchProbeModelOption[] {
+  const counts = new Map<string, number>();
+
+  for (const result of results) {
+    const models = Array.isArray((result as any)?.models) ? (result as any).models : [];
+    for (const item of models) {
+      const modelName = typeof item?.name === 'string' ? item.name.trim() : '';
+      if (!modelName || item?.disabled) continue;
+      counts.set(modelName, (counts.get(modelName) || 0) + 1);
+    }
+  }
+
+  return Array.from(counts.entries())
+    .map(([name, count]) => ({ name, count }))
+    .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+}
+
 function summarizeResult(summary: ProbeSummary, result: BatchAccountProbeResultItem): ProbeSummary {
   const next = {
     ...summary,
@@ -90,8 +111,12 @@ export default function BatchAccountProbeModal({
     && typeof document.body.appendChild === 'function'
     && typeof document.body.removeChild === 'function';
   const abortControllerRef = useRef<AbortController | null>(null);
+  const modelRequestSeqRef = useRef(0);
   const [scope, setScope] = useState<ProbeScope>('segment');
   const [preferredModel, setPreferredModel] = useState('');
+  const [modelOptions, setModelOptions] = useState<BatchProbeModelOption[]>([]);
+  const [loadingModels, setLoadingModels] = useState(false);
+  const [modelLoadError, setModelLoadError] = useState('');
   const [includeDisabled, setIncludeDisabled] = useState(false);
   const [concurrency, setConcurrency] = useState<3 | 4 | 5>(4);
   const [phase, setPhase] = useState<ProbePhase>('config');
@@ -115,8 +140,12 @@ export default function BatchAccountProbeModal({
     if (open) return;
     abortControllerRef.current?.abort();
     abortControllerRef.current = null;
+    modelRequestSeqRef.current += 1;
     setScope('segment');
     setPreferredModel('');
+    setModelOptions([]);
+    setLoadingModels(false);
+    setModelLoadError('');
     setIncludeDisabled(false);
     setConcurrency(4);
     setPhase('config');
@@ -127,6 +156,56 @@ export default function BatchAccountProbeModal({
     setStreamError('');
     setDoneSummary(null);
   }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+
+    const requestId = ++modelRequestSeqRef.current;
+    setLoadingModels(true);
+    setModelLoadError('');
+    setModelOptions([]);
+
+    if (targetAccountIds.length <= 0) {
+      setPreferredModel('');
+      setLoadingModels(false);
+      return;
+    }
+
+    void Promise.allSettled(targetAccountIds.map((accountId) => api.getAccountModels(accountId)))
+      .then((results) => {
+        if (modelRequestSeqRef.current !== requestId) return;
+
+        const fulfilled = results
+          .filter((result): result is PromiseFulfilledResult<unknown> => result.status === 'fulfilled')
+          .map((result) => result.value);
+        const options = buildBatchProbeModelOptions(fulfilled);
+
+        setModelOptions(options);
+        setPreferredModel((current) => (
+          options.some((item) => item.name === current)
+            ? current
+            : (options[0]?.name || '')
+        ));
+
+        if (options.length === 0 && fulfilled.length === 0) {
+          const firstRejected = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
+          setModelLoadError(firstRejected?.reason?.message || '加载模型列表失败');
+          return;
+        }
+
+        setModelLoadError('');
+      })
+      .catch((error: any) => {
+        if (modelRequestSeqRef.current !== requestId) return;
+        setModelOptions([]);
+        setPreferredModel('');
+        setModelLoadError(error?.message || '加载模型列表失败');
+      })
+      .finally(() => {
+        if (modelRequestSeqRef.current !== requestId) return;
+        setLoadingModels(false);
+      });
+  }, [open, targetAccountIds]);
 
   useEffect(() => {
     if (!isMobile || !open || !canUsePortal) return;
@@ -254,14 +333,31 @@ export default function BatchAccountProbeModal({
 
       <div className="batch-account-probe-field-group">
         <div className="batch-account-probe-field-label">默认测活模型</div>
-        <input
-          value={preferredModel}
-          onChange={(event) => setPreferredModel(event.target.value)}
-          className="batch-account-probe-input"
-          placeholder="例如 gpt-4.1-mini"
-          data-testid="batch-probe-model-input"
-        />
-        <div className="batch-account-probe-hint-text">没有该模型时，自动回退到该连接第一个可用且未禁用模型。</div>
+        {loadingModels ? (
+          <div className="batch-account-probe-model-state" data-testid="batch-probe-model-loading">加载模型列表...</div>
+        ) : modelLoadError ? (
+          <div className="batch-account-probe-model-state is-error" data-testid="batch-probe-model-error">{modelLoadError}</div>
+        ) : modelOptions.length === 0 ? (
+          <div className="batch-account-probe-model-state" data-testid="batch-probe-model-empty">当前范围没有可选模型，请先同步模型。</div>
+        ) : (
+          <select
+            value={preferredModel}
+            onChange={(event) => setPreferredModel(event.target.value)}
+            className="batch-account-probe-select"
+            data-testid="batch-probe-model-select"
+          >
+            {modelOptions.map((item) => (
+              <option key={item.name} value={item.name}>
+                {item.name}
+              </option>
+            ))}
+          </select>
+        )}
+        <div className="batch-account-probe-hint-text">
+          {modelOptions.length > 0
+            ? `已汇总 ${modelOptions.length} 个可用模型，没有该模型时会自动回退到该连接第一个可用且未禁用模型。`
+            : '没有该模型时，自动回退到该连接第一个可用且未禁用模型。'}
+        </div>
       </div>
 
       <div className="batch-account-probe-config-grid">
@@ -360,7 +456,7 @@ export default function BatchAccountProbeModal({
       <button
         type="button"
         className="btn btn-primary"
-        disabled={!preferredModel.trim() || targetAccountIds.length <= 0}
+        disabled={loadingModels || !preferredModel.trim() || targetAccountIds.length <= 0}
         onClick={handleStart}
       >
         开始测活

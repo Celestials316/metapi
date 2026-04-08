@@ -7647,7 +7647,8 @@ textarea {
   color: var(--color-text-secondary);
 }
 
-.batch-account-probe-input {
+.batch-account-probe-input,
+.batch-account-probe-select {
   width: 100%;
   padding: 12px 14px;
   border-radius: var(--radius-sm);
@@ -7658,9 +7659,27 @@ textarea {
   font-size: 13px;
 }
 
-.batch-account-probe-input:focus {
+.batch-account-probe-input:focus,
+.batch-account-probe-select:focus {
   border-color: color-mix(in srgb, var(--color-primary) 54%, var(--color-border));
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-primary) 14%, transparent);
+}
+
+.batch-account-probe-model-state {
+  min-height: 44px;
+  padding: 12px 14px;
+  border-radius: var(--radius-sm);
+  border: 1px dashed var(--color-border);
+  background: color-mix(in srgb, var(--color-bg-card) 90%, var(--color-bg));
+  color: var(--color-text-muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.batch-account-probe-model-state.is-error {
+  border-color: color-mix(in srgb, var(--color-danger) 30%, var(--color-border));
+  color: var(--color-danger);
+  background: color-mix(in srgb, var(--color-danger) 6%, var(--color-bg-card));
 }
 
 .batch-account-probe-config-grid {
