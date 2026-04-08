@@ -144,6 +144,15 @@ function normalizePositiveInt(value: unknown): number | null {
   return Math.trunc(numeric);
 }
 
+function normalizeAisignChallengeId(value: unknown): string | null {
+  if (typeof value === 'string' && value.trim()) {
+    return value.trim();
+  }
+  const numeric = normalizePositiveInt(value);
+  if (!numeric) return null;
+  return String(numeric);
+}
+
 function cloneFallbackTiers(): AisignTierOption[] {
   return AISIGN_FALLBACK_TIERS.map((tier) => ({ ...tier }));
 }
@@ -525,6 +534,32 @@ function resolveRequestedTierId(tierOverride: number | null | undefined, tierOpt
   return resolveDefaultAisignTierId(tierOptions);
 }
 
+export function parseAisignChallengePayload(payload: unknown): {
+  challengeId: string;
+  challenge: string;
+  difficulty: number;
+} | null {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null;
+  const record = payload as Record<string, unknown>;
+  const challengeId = normalizeAisignChallengeId(
+    record.challengeId ?? record.challenge_id ?? record.id,
+  );
+  const difficulty = normalizePositiveInt(record.difficulty);
+  const challenge = typeof record.challenge === 'string'
+    ? record.challenge.trim()
+    : '';
+
+  if (!challengeId || !difficulty || !challenge) {
+    return null;
+  }
+
+  return {
+    challengeId,
+    challenge,
+    difficulty,
+  };
+}
+
 function buildSubmitSuccessResult(payload: Record<string, unknown>): CheckinResult {
   const reward = formatRewardValue(payload.rewardFinal ?? payload.reward_final ?? payload.reward);
   const notes = typeof payload.notes === 'string' && payload.notes.trim()
@@ -601,17 +636,11 @@ export async function executeAisignCheckin(options: {
     throw error;
   }
 
-  const challengeId = normalizePositiveInt(
-    challengePayload.challengeId ?? challengePayload.challenge_id ?? challengePayload.id,
-  );
-  const difficulty = normalizePositiveInt(challengePayload.difficulty);
-  const challenge = typeof challengePayload.challenge === 'string'
-    ? challengePayload.challenge.trim()
-    : '';
-
-  if (!challengeId || !difficulty || !challenge) {
+  const parsedChallengePayload = parseAisignChallengePayload(challengePayload);
+  if (!parsedChallengePayload) {
     throw new Error('aisign challenge payload invalid');
   }
+  const { challengeId, difficulty, challenge } = parsedChallengePayload;
 
   const powResult = await solvePow(powRuntime, challenge, difficulty);
   if (!Number.isFinite(powResult.nonce) || powResult.nonce < 0) {
