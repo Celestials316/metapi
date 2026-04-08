@@ -10,6 +10,8 @@ import { useAnimatedVisibility } from '../../components/useAnimatedVisibility.js
 import { useIsMobile } from '../../components/useIsMobile.js';
 
 type ProbeScope = 'segment' | 'all';
+type ProbeResultView = 'stream' | 'stats';
+type ProbeStatsFilter = 'all' | 'success' | 'failed' | 'skipped';
 type BatchProbeCandidate = {
   id: number;
   username?: string | null;
@@ -97,6 +99,30 @@ function summarizeResult(summary: ProbeSummary, result: BatchAccountProbeResultI
   return next;
 }
 
+function matchesStatsFilter(
+  item: BatchAccountProbeResultItem,
+  filter: ProbeStatsFilter,
+): boolean {
+  if (filter === 'all') return true;
+  if (filter === 'success') return item.status === 'success';
+  if (filter === 'failed') return item.status === 'failed';
+  return item.status === 'skipped_disabled' || item.status === 'skipped_no_model';
+}
+
+function resolveStatsFilterLabel(filter: ProbeStatsFilter): string {
+  if (filter === 'success') return '成功';
+  if (filter === 'failed') return '失败';
+  if (filter === 'skipped') return '跳过';
+  return '全部';
+}
+
+function resolveStatsFilterSummary(filter: ProbeStatsFilter): string {
+  if (filter === 'success') return '只看成功';
+  if (filter === 'failed') return '只看失败';
+  if (filter === 'skipped') return '只看跳过';
+  return '全部结果';
+}
+
 export default function BatchAccountProbeModal({
   open,
   activeSegment,
@@ -122,6 +148,8 @@ export default function BatchAccountProbeModal({
   const [phase, setPhase] = useState<ProbePhase>('config');
   const [running, setRunning] = useState(false);
   const [aborted, setAborted] = useState(false);
+  const [resultView, setResultView] = useState<ProbeResultView>('stream');
+  const [statsFilter, setStatsFilter] = useState<ProbeStatsFilter>('all');
   const [items, setItems] = useState<BatchAccountProbeResultItem[]>([]);
   const [summary, setSummary] = useState<ProbeSummary>(buildInitialSummary);
   const [streamError, setStreamError] = useState('');
@@ -151,6 +179,8 @@ export default function BatchAccountProbeModal({
     setPhase('config');
     setRunning(false);
     setAborted(false);
+    setResultView('stream');
+    setStatsFilter('all');
     setItems([]);
     setSummary(buildInitialSummary());
     setStreamError('');
@@ -246,6 +276,8 @@ export default function BatchAccountProbeModal({
     setPhase('running');
     setRunning(true);
     setAborted(false);
+    setResultView('stream');
+    setStatsFilter('all');
     setItems([]);
     setSummary(buildInitialSummary());
     setStreamError('');
@@ -298,6 +330,49 @@ export default function BatchAccountProbeModal({
       }
     }
   };
+
+  const statsItems = useMemo(() => (
+    [...items]
+      .filter((item) => matchesStatsFilter(item, statsFilter))
+      .sort((left, right) => (
+        left.accountName.localeCompare(right.accountName)
+        || left.siteName.localeCompare(right.siteName)
+        || String(left.model || '').localeCompare(String(right.model || ''))
+      ))
+  ), [items, statsFilter]);
+
+  const statsTabs: Array<{ key: ProbeStatsFilter; label: string }> = [
+    { key: 'all', label: `全部 ${items.length}` },
+    { key: 'success', label: `成功 ${summary.success}` },
+    { key: 'failed', label: `失败 ${summary.failed}` },
+    { key: 'skipped', label: `跳过 ${summary.skipped}` },
+  ];
+
+  const openStatsView = (filter: ProbeStatsFilter) => {
+    setStatsFilter(filter);
+    setResultView('stats');
+  };
+
+  const renderResultItem = (item: BatchAccountProbeResultItem, compact = false) => (
+    <div
+      key={`${item.accountId}-${item.status}-${item.model || 'none'}-${item.message}`}
+      className={`batch-account-probe-result-row ${resolveStatusClass(item.status)} ${compact ? 'is-compact' : ''}`.trim()}
+      data-testid={compact ? 'batch-probe-stats-item' : undefined}
+    >
+      <div className={`batch-account-probe-result-line ${compact ? 'is-compact' : ''}`.trim()}>
+        <div className="batch-account-probe-result-title">{item.accountName}</div>
+        <div className="batch-account-probe-result-meta">
+          {formatLatency(item.latencyMs) ? <span>{formatLatency(item.latencyMs)}</span> : null}
+          <span className={`batch-account-probe-status-pill ${resolveStatusClass(item.status)}`.trim()}>{resolveStatusLabel(item.status)}</span>
+        </div>
+      </div>
+      <div className={`batch-account-probe-result-subline ${compact ? 'is-compact' : ''}`.trim()}>
+        {item.siteName ? <span>{item.siteName}</span> : null}
+        {item.model ? <span>{item.model}{item.usedFallbackModel ? ' · 已回退' : ''}</span> : null}
+      </div>
+      <div className={`batch-account-probe-result-message ${compact ? 'is-compact' : ''}`.trim()}>{item.message}</div>
+    </div>
+  );
 
   const configContent = (
     <div className="batch-account-probe-layout" data-testid="batch-account-probe-modal">
@@ -392,7 +467,7 @@ export default function BatchAccountProbeModal({
     </div>
   );
 
-  const resultContent = (
+  const streamResultContent = (
     <div className="batch-account-probe-layout" data-testid="batch-account-probe-results">
       <div className="batch-account-probe-result-header">
         <div>
@@ -409,9 +484,33 @@ export default function BatchAccountProbeModal({
       </div>
 
       <div className="batch-account-probe-stat-grid">
-        <div className="batch-account-probe-stat-card"><span>成功</span><strong>{summary.success}</strong></div>
-        <div className="batch-account-probe-stat-card"><span>失败</span><strong>{summary.failed}</strong></div>
-        <div className="batch-account-probe-stat-card"><span>跳过</span><strong>{summary.skipped}</strong></div>
+        <button
+          type="button"
+          className="batch-account-probe-stat-card is-clickable"
+          data-testid="batch-probe-stat-success"
+          onClick={() => openStatsView('success')}
+        >
+          <span>成功</span>
+          <strong>{summary.success}</strong>
+        </button>
+        <button
+          type="button"
+          className="batch-account-probe-stat-card is-clickable"
+          data-testid="batch-probe-stat-failed"
+          onClick={() => openStatsView('failed')}
+        >
+          <span>失败</span>
+          <strong>{summary.failed}</strong>
+        </button>
+        <button
+          type="button"
+          className="batch-account-probe-stat-card is-clickable"
+          data-testid="batch-probe-stat-skipped"
+          onClick={() => openStatsView('skipped')}
+        >
+          <span>跳过</span>
+          <strong>{summary.skipped}</strong>
+        </button>
         <div className="batch-account-probe-stat-card"><span>等待</span><strong>{summary.pending}</strong></div>
       </div>
 
@@ -423,32 +522,62 @@ export default function BatchAccountProbeModal({
       ) : null}
 
       <div className="batch-account-probe-result-list">
-        {items.length > 0 ? items.map((item) => (
-          <div
-            key={`${item.accountId}-${item.status}-${item.model || 'none'}-${item.message}`}
-            className={`batch-account-probe-result-row ${resolveStatusClass(item.status)}`.trim()}
-          >
-            <div className="batch-account-probe-result-line">
-              <div className="batch-account-probe-result-title">{item.accountName}</div>
-              <div className="batch-account-probe-result-meta">
-                {item.siteName ? <span>{item.siteName}</span> : null}
-                {formatLatency(item.latencyMs) ? <span>{formatLatency(item.latencyMs)}</span> : null}
-                <span className={`batch-account-probe-status-pill ${resolveStatusClass(item.status)}`.trim()}>{resolveStatusLabel(item.status)}</span>
-              </div>
-            </div>
-            {item.model ? (
-              <div className="batch-account-probe-result-subline">
-                {item.model}{item.usedFallbackModel ? ' · 已回退' : ''}
-              </div>
-            ) : null}
-            <div className="batch-account-probe-result-message">{item.message}</div>
-          </div>
-        )) : (
+        {items.length > 0 ? items.map((item) => renderResultItem(item)) : (
           <div className="batch-account-probe-empty">还没有结果返回。</div>
         )}
       </div>
     </div>
   );
+
+  const statsResultContent = (
+    <div className="batch-account-probe-layout" data-testid="batch-account-probe-stats">
+      <div className="batch-account-probe-stats-header">
+        <button
+          type="button"
+          className="btn btn-ghost batch-account-probe-stats-back"
+          onClick={() => setResultView('stream')}
+        >
+          返回结果
+        </button>
+        <div className="batch-account-probe-stats-copy">
+          <div className="batch-account-probe-summary-title">结果统计</div>
+          <div className="batch-account-probe-summary-text">
+            {resolveStatsFilterSummary(statsFilter)} · {statsItems.length} 条
+          </div>
+        </div>
+      </div>
+
+      <div className="batch-account-probe-filter-tabs">
+        <div className="pill-tabs">
+          {statsTabs.map((tab) => (
+            <button
+              key={tab.key}
+              type="button"
+              className={`pill-tab ${statsFilter === tab.key ? 'active' : ''}`.trim()}
+              onClick={() => setStatsFilter(tab.key)}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="batch-account-probe-summary-card is-compact">
+        <div className="batch-account-probe-summary-title">筛选概览</div>
+        <div className="batch-account-probe-summary-text">
+          {resolveStatsFilterLabel(statsFilter)}视图下仅保留紧凑结果卡片，方便移动端快速扫一遍全部账号状态。
+        </div>
+      </div>
+
+      <div className="batch-account-probe-result-list is-compact">
+        {statsItems.length > 0 ? statsItems.map((item) => renderResultItem(item, true)) : (
+          <div className="batch-account-probe-empty">当前筛选没有结果。</div>
+        )}
+      </div>
+    </div>
+  );
+
+  const resultContent = resultView === 'stats' ? statsResultContent : streamResultContent;
 
   const footer = phase === 'config' ? (
     <div className="batch-account-probe-actions">
@@ -470,6 +599,8 @@ export default function BatchAccountProbeModal({
       ) : (
         <button type="button" className="btn btn-primary" onClick={() => {
           setPhase('config');
+          setResultView('stream');
+          setStatsFilter('all');
           setItems([]);
           setSummary(buildInitialSummary());
           setStreamError('');

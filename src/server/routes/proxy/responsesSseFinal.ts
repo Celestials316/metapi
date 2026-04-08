@@ -252,8 +252,15 @@ function mergeMissingResponsesTerminalFields(
 }
 
 export function looksLikeResponsesSseText(rawText: string): boolean {
-  const { events, rest } = openAiResponsesTransformer.pullSseEvents(rawText);
-  if (events.length === 0 || rest.trim().length > 0) return false;
+  const pulled = openAiResponsesTransformer.pullSseEvents(rawText);
+  const events = [...pulled.events];
+  if (pulled.rest.trim().length > 0) {
+    const trailing = openAiResponsesTransformer.pullSseEvents(`${pulled.rest}\n\n`);
+    if (trailing.events.length > 0 && trailing.rest.trim().length === 0) {
+      events.push(...trailing.events);
+    }
+  }
+  if (events.length === 0) return false;
   return events.some((event) => {
     if (event.data === '[DONE]') return true;
     if (event.event === 'error' || event.event.startsWith('response.')) return true;
@@ -288,7 +295,14 @@ export function collectResponsesFinalPayloadFromSseText(
   rawText: string,
   modelName: string,
 ): { payload: Record<string, unknown>; rawText: string } {
-  const { events } = openAiResponsesTransformer.pullSseEvents(rawText);
+  const pulled = openAiResponsesTransformer.pullSseEvents(rawText);
+  const events = [...pulled.events];
+  if (pulled.rest.trim().length > 0) {
+    const trailing = openAiResponsesTransformer.pullSseEvents(`${pulled.rest}\n\n`);
+    if (trailing.events.length > 0 && trailing.rest.trim().length === 0) {
+      events.push(...trailing.events);
+    }
+  }
   const streamContext = openAiResponsesTransformer.createStreamContext(modelName);
   const aggregateState = openAiResponsesTransformer.aggregator.createState(modelName);
   let usage = {

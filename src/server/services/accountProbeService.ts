@@ -22,6 +22,7 @@ import {
   createStreamTransformContext,
   normalizeUpstreamFinalResponse,
   normalizeUpstreamStreamEvent,
+  type ParsedSseEvent,
   pullSseEventsWithDone,
 } from '../transformers/shared/chatFormatsCore.js';
 
@@ -131,26 +132,29 @@ async function resolveProbeCredential(account: typeof schema.accounts.$inferSele
 
 function collectChatTextFromSse(rawText: string, modelName: string): string {
   const context = createStreamTransformContext(modelName);
-  let buffer = rawText;
   let replyText = '';
 
-  while (buffer) {
-    const { events, rest } = pullSseEventsWithDone(buffer);
-    for (const event of events) {
-      if (event.data === '[DONE]') continue;
-      let payload: unknown;
-      try {
-        payload = JSON.parse(event.data);
-      } catch {
-        continue;
-      }
-      const normalized = normalizeUpstreamStreamEvent(payload, context, modelName);
-      if (typeof normalized.contentDelta === 'string' && normalized.contentDelta.length > 0) {
-        replyText += normalized.contentDelta;
-      }
+  const pulled = pullSseEventsWithDone(rawText);
+  const events: ParsedSseEvent[] = [...pulled.events];
+  if (pulled.rest.trim().length > 0) {
+    const trailing = pullSseEventsWithDone(`${pulled.rest}\n\n`);
+    if (trailing.events.length > 0 && trailing.rest.trim().length === 0) {
+      events.push(...trailing.events);
     }
-    if (!rest || rest === buffer) break;
-    buffer = rest;
+  }
+
+  for (const event of events) {
+    if (event.data === '[DONE]') continue;
+    let payload: unknown;
+    try {
+      payload = JSON.parse(event.data);
+    } catch {
+      continue;
+    }
+    const normalized = normalizeUpstreamStreamEvent(payload, context, modelName);
+    if (typeof normalized.contentDelta === 'string' && normalized.contentDelta.length > 0) {
+      replyText += normalized.contentDelta;
+    }
   }
 
   return replyText.trim();
