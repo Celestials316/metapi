@@ -3,13 +3,19 @@ import type { RequestInit as UndiciRequestInit } from 'undici';
 import { db, schema } from '../db/index.js';
 import type { CheckinResult } from './platforms/base.js';
 import { resolvePlatformUserId, resolveProxyUrlFromExtraConfig } from './accountExtraConfig.js';
+import {
+  executeAisignCheckin,
+  isAisignExternalCheckinUrl,
+  resolveAisignTierMetadata,
+  type AisignTierOption,
+} from './aisignCheckinService.js';
 import { withAccountProxyOverride, withSiteProxyRequestInit } from './siteProxy.js';
 import { stripTrailingSlashes } from './urlNormalization.js';
 
 type AccountRow = typeof schema.accounts.$inferSelect;
 type SiteRow = typeof schema.sites.$inferSelect;
 
-export type ExternalCheckinKind = 'token_bridge' | 'manual_oauth' | 'unsupported';
+export type ExternalCheckinKind = 'token_bridge' | 'manual_oauth' | 'aisign' | 'unsupported';
 export type AccountCheckinActionMode = 'auto' | 'manual_jump' | 'none';
 
 export type AccountExternalCheckinAction = {
@@ -18,6 +24,9 @@ export type AccountExternalCheckinAction = {
   entryUrl: string | null;
   url: string | null;
   message: string;
+  requiresTierSelection?: boolean;
+  defaultTierId?: number | null;
+  tierOptions?: AisignTierOption[];
 };
 
 export type AccountExternalCheckinExecution = AccountExternalCheckinAction & {
@@ -69,10 +78,17 @@ function normalizeHeaders(headers?: unknown): Record<string, string> {
     return Object.fromEntries(headers.entries());
   }
   if (Array.isArray(headers)) {
-    return Object.fromEntries(headers.map(([key, value]) => [key, String(value)]));
+    return Object.fromEntries(
+      headers
+        .filter((entry): entry is [string, unknown] => Array.isArray(entry) && entry.length >= 2)
+        .filter(([, value]) => value !== undefined && value !== null)
+        .map(([key, value]) => [key, String(value)]),
+    );
   }
   return Object.fromEntries(
-    Object.entries(headers).map(([key, value]) => [key, String(value)]),
+    Object.entries(headers)
+      .filter(([, value]) => value !== undefined && value !== null)
+      .map(([key, value]) => [key, String(value)]),
   );
 }
 
@@ -180,6 +196,7 @@ export function normalizeOptionalExternalCheckinUrlInput(input: unknown): Normal
 export function normalizeExternalCheckinKind(value: unknown): ExternalCheckinKind | null {
   const normalized = String(value || '').trim().toLowerCase();
   if (normalized === 'token_bridge') return 'token_bridge';
+  if (normalized === 'aisign') return 'aisign';
   if (normalized === 'manual_oauth') return 'manual_oauth';
   if (normalized === 'unsupported') return 'unsupported';
   return null;
@@ -196,7 +213,9 @@ export function resolveStoredAccountCheckinActionMode(
   const kind = normalizeExternalCheckinKind(site.externalCheckinKind);
 
   if (kind === 'manual_oauth' && entryUrl) return 'manual_jump';
+  if (kind === 'aisign' && entryUrl) return 'auto';
   if (kind === 'token_bridge' && entryUrl) return 'auto';
+  if (!kind && entryUrl && isAisignExternalCheckinUrl(entryUrl)) return 'auto';
 
   // 管理端手动录入了签到页，但还未完成一次运行时识别时，先暴露安全的跳转按钮。
   if (!kind && entryUrl) return 'manual_jump';
@@ -497,8 +516,9 @@ function buildAction(
   entryUrl: string | null,
   url: string | null,
   message: string,
+  extras?: Partial<Pick<AccountExternalCheckinAction, 'requiresTierSelection' | 'defaultTierId' | 'tierOptions'>>,
 ): AccountExternalCheckinAction {
-  return { mode, kind, entryUrl, url, message };
+  return { mode, kind, entryUrl, url, message, ...extras };
 }
 
 async function fetchJsonValue(url: string, options?: UndiciRequestInit): Promise<unknown> {
@@ -525,6 +545,7 @@ async function fetchTextFollowingRedirects(
 
   if (baseHeaders.Cookie || baseHeaders.cookie) {
     cookieHeader = cookieHeader || baseHeaders.Cookie || baseHeaders.cookie;
+    delete baseHeaders.Cookie;
     delete baseHeaders.cookie;
   }
 
@@ -636,6 +657,12 @@ async function resolveSub2ApiExternalDefinition(
     return resolved;
   }
 
+  if (isAisignExternalCheckinUrl(entryUrl)) {
+    const resolved = { entryUrl, kind: 'aisign' as const };
+    await persistSiteExternalCheckinMetadata(site, resolved);
+    return resolved;
+  }
+
   if (!kind || kind === 'unsupported') {
     try {
       const probeUrl = buildExternalCheckinRuntimeUrl(entryUrl, site, account);
@@ -677,6 +704,11 @@ async function resolveAccountExternalCheckinActionInternal(
   const runtimeUrl = buildExternalCheckinRuntimeUrl(definition.entryUrl, site, account);
   if (definition.kind === 'manual_oauth') {
     return buildAction('manual_jump', definition.kind, definition.entryUrl, runtimeUrl, MANUAL_EXTERNAL_CHECKIN_MESSAGE);
+  }
+
+  if (definition.kind === 'aisign') {
+    const tierMetadata = await resolveAisignTierMetadata(definition.entryUrl);
+    return buildAction('auto', definition.kind, definition.entryUrl, null, EXTERNAL_CHECKIN_SUCCESS_MESSAGE, tierMetadata);
   }
 
   return buildAction('auto', definition.kind, definition.entryUrl, null, EXTERNAL_CHECKIN_SUCCESS_MESSAGE);
@@ -836,6 +868,7 @@ async function executeTokenBridgeCheckin(
 export async function performAccountExternalCheckin(
   account: AccountRow,
   site: SiteRow,
+  options?: { tier?: number | null },
 ): Promise<AccountExternalCheckinExecution | null> {
   if (!isSub2ApiPlatform(site.platform) || !hasSessionToken(account)) {
     return null;
@@ -853,6 +886,18 @@ export async function performAccountExternalCheckin(
           ...action,
           handled: true,
           result: { success: false, message: MANUAL_EXTERNAL_CHECKIN_MESSAGE },
+        };
+      }
+      if (action.kind === 'aisign') {
+        const runtimeUrl = buildExternalCheckinRuntimeUrl(action.entryUrl, site, account);
+        return {
+          ...action,
+          handled: true,
+          result: await executeAisignCheckin({
+            entryUrl: action.entryUrl,
+            runtimeUrl,
+            tier: options?.tier,
+          }),
         };
       }
       return executeTokenBridgeCheckin(account, site, action.entryUrl);

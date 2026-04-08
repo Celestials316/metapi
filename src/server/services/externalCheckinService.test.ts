@@ -10,6 +10,7 @@ import {
 describe('externalCheckinService', () => {
   it('normalizes supported external checkin kinds', () => {
     expect(normalizeExternalCheckinKind('token_bridge')).toBe('token_bridge');
+    expect(normalizeExternalCheckinKind(' aisign ')).toBe('aisign');
     expect(normalizeExternalCheckinKind(' manual_oauth ')).toBe('manual_oauth');
     expect(normalizeExternalCheckinKind('unsupported')).toBe('unsupported');
     expect(normalizeExternalCheckinKind('unknown')).toBeNull();
@@ -128,6 +129,24 @@ describe('externalCheckinService', () => {
         externalCheckinKind: null,
       } as any,
     )).toBe('manual_jump');
+
+    expect(resolveStoredAccountCheckinActionMode(
+      { accessToken: 'session-token' } as any,
+      {
+        platform: 'sub2api',
+        externalCheckinUrl: 'https://aisign.td.ee/app',
+        externalCheckinKind: 'aisign',
+      } as any,
+    )).toBe('auto');
+
+    expect(resolveStoredAccountCheckinActionMode(
+      { accessToken: 'session-token' } as any,
+      {
+        platform: 'sub2api',
+        externalCheckinUrl: 'https://aisign.td.ee/app',
+        externalCheckinKind: null,
+      } as any,
+    )).toBe('auto');
 
     expect(resolveStoredAccountCheckinActionMode(
       { accessToken: '' } as any,

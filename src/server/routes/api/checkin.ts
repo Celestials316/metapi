@@ -108,9 +108,13 @@ export async function checkinRoutes(app: FastifyInstance) {
   });
 
   // Trigger check-in for a specific account
-  app.post<{ Params: { id: string } }>('/api/checkin/trigger/:id', async (request) => {
+  app.post<{ Params: { id: string }; Body: { tier?: number } }>('/api/checkin/trigger/:id', async (request) => {
     const id = parseInt(request.params.id, 10);
-    const result = await checkinAccount(id, { scheduleMode: config.checkinScheduleMode });
+    const tier = Number.parseInt(String(request.body?.tier ?? ''), 10);
+    const result = await checkinAccount(id, {
+      scheduleMode: config.checkinScheduleMode,
+      tierOverride: Number.isFinite(tier) && tier > 0 ? tier : undefined,
+    });
     return result;
   });
 
@@ -131,6 +135,9 @@ export async function checkinRoutes(app: FastifyInstance) {
       kind: action.kind,
       url: action.url,
       message: action.message,
+      requiresTierSelection: action.requiresTierSelection,
+      defaultTierId: action.defaultTierId,
+      tierOptions: action.tierOptions,
     };
   });
 

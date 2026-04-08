@@ -154,7 +154,11 @@ async function tryAutoRelogin(account: any, site: any): Promise<string | null> {
   return result.accessToken;
 }
 
-export async function checkinAccount(accountId: number, options?: { skipEvent?: boolean; scheduleMode?: 'cron' | 'interval' }) {
+export async function checkinAccount(accountId: number, options?: {
+  skipEvent?: boolean;
+  scheduleMode?: 'cron' | 'interval';
+  tierOverride?: number | null;
+}) {
   const rows = await db
     .select()
     .from(schema.accounts)
@@ -221,6 +225,7 @@ export async function checkinAccount(accountId: number, options?: { skipEvent?: 
       accessToken,
     },
     site,
+    { tier: options?.tierOverride },
   );
   const initialExternalCheckin = await tryExternalCheckin(activeAccessToken);
   let result = initialExternalCheckin?.result;

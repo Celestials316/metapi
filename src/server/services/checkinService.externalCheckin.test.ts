@@ -346,4 +346,51 @@ describe('checkinService external checkin integration', () => {
       reward: '1.5',
     }));
   });
+
+  it('forwards tier overrides to aisign external checkin execution', async () => {
+    selectAllMock.mockReturnValue([
+      {
+        accounts: {
+          id: 26,
+          username: 'aisign-user',
+          accessToken: 'token',
+          status: 'active',
+          balance: 12,
+          extraConfig: null,
+        },
+        sites: {
+          id: 26,
+          name: 'sub2-site',
+          url: 'https://sub2.example.com',
+          platform: 'sub2api',
+        },
+      },
+    ]);
+
+    performAccountExternalCheckinMock.mockResolvedValue({
+      handled: true,
+      mode: 'auto',
+      kind: 'aisign',
+      entryUrl: 'https://aisign.td.ee/app',
+      url: null,
+      message: '签到成功',
+      result: {
+        success: true,
+        message: '签到成功',
+        reward: '12',
+      },
+    });
+    refreshBalanceMock.mockResolvedValue({ balance: 24, used: 0, quota: 24 });
+
+    const { checkinAccount } = await import('./checkinService.js');
+    const result = await checkinAccount(26, { tierOverride: 4 });
+
+    expect(result.success).toBe(true);
+    expect(result.status).toBe('success');
+    expect(performAccountExternalCheckinMock).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 26, accessToken: 'token' }),
+      expect.objectContaining({ id: 26, platform: 'sub2api' }),
+      { tier: 4 },
+    );
+  });
 });

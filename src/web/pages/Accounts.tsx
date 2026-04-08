@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { api } from '../api.js';
+import { api, type AisignTierOption, type CheckinActionResponse } from '../api.js';
 import CenteredModal from '../components/CenteredModal.js';
 import ResponsiveFilterPanel from '../components/ResponsiveFilterPanel.js';
 import ResponsiveFormGrid from '../components/ResponsiveFormGrid.js';
@@ -13,6 +13,7 @@ import DeleteConfirmModal from '../components/DeleteConfirmModal.js';
 import SiteBadgeLink from '../components/SiteBadgeLink.js';
 import AccountModelsModal from './accounts/AccountModelsModal.js';
 import AccountProbeModal from './accounts/AccountProbeModal.js';
+import AisignCheckinSheet from './accounts/AisignCheckinSheet.js';
 import BatchAccountProbeModal from './accounts/BatchAccountProbeModal.js';
 import {
   buildAddAccountPrereqHint,
@@ -91,6 +92,49 @@ function createTokenForm(credentialMode: 'session' | 'apikey' = 'session') {
 
 function createRebindForm(platformUserId = '') {
   return { accessToken: '', platformUserId, refreshToken: '', tokenExpiresAt: '' };
+}
+
+type AisignCheckinSheetState = {
+  open: boolean;
+  running: boolean;
+  account: any | null;
+  siteLabel: string | null;
+  tierOptions: AisignTierOption[];
+  selectedTierId: number | null;
+};
+
+function createAisignCheckinSheetState(): AisignCheckinSheetState {
+  return {
+    open: false,
+    running: false,
+    account: null,
+    siteLabel: null,
+    tierOptions: [],
+    selectedTierId: null,
+  };
+}
+
+function resolvePreferredAisignTierId(
+  tierOptions: AisignTierOption[],
+  defaultTierId?: number | null,
+): number | null {
+  if (defaultTierId && tierOptions.some((tier) => tier.id === defaultTierId)) {
+    return defaultTierId;
+  }
+  const preferred = tierOptions.find((tier) => tier.name.includes('挑战'));
+  if (preferred?.id) return preferred.id;
+  return tierOptions[0]?.id ?? null;
+}
+
+function resolveSingleCheckinSuccessMessage(result: any): string {
+  const message = typeof result?.message === 'string' ? result.message.trim() : '';
+  if (message.includes('今日已签到') || message.includes('今天已签到')) {
+    return '今日已签到';
+  }
+  if (message) return message;
+
+  const reward = String(result?.reward || '').trim();
+  return reward ? `签到成功，奖励 +${reward}` : '签到成功';
 }
 
 function resolveConnectionsSegment(search: string): ConnectionsSegment {
@@ -222,6 +266,7 @@ export default function Accounts() {
     manualModelsInput: '',
     addingManualModels: false,
   });
+  const [aisignCheckinSheet, setAisignCheckinSheet] = useState<AisignCheckinSheetState>(createAisignCheckinSheetState);
   const rowRefs = useRef<Map<number, HTMLTableRowElement>>(new Map());
   const highlightTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastRebindTargetRef = useRef<any | null>(null);
@@ -629,6 +674,56 @@ export default function Accounts() {
     setBatchProbeModalOpen(false);
   };
 
+  const openAisignCheckinSheet = (account: any, action: CheckinActionResponse) => {
+    const tierOptions = Array.isArray(action.tierOptions) ? action.tierOptions : [];
+    setAisignCheckinSheet({
+      open: true,
+      running: false,
+      account,
+      siteLabel: account?.site?.name || null,
+      tierOptions,
+      selectedTierId: resolvePreferredAisignTierId(tierOptions, action.defaultTierId),
+    });
+  };
+
+  const closeAisignCheckinSheet = () => {
+    setAisignCheckinSheet((current) => (current.running ? { ...current, open: false } : createAisignCheckinSheetState()));
+  };
+
+  const handleConfirmAisignCheckin = async () => {
+    const current = aisignCheckinSheet;
+    const accountId = current.account?.id;
+    const selectedTierId = current.selectedTierId;
+    if (!accountId || !selectedTierId || current.running) return;
+
+    const key = `checkin-${accountId}`;
+    setActionLoading((state) => ({ ...state, [key]: true }));
+    setAisignCheckinSheet((state) => (
+      state.account?.id === accountId
+        ? { ...state, running: true }
+        : state
+    ));
+
+    try {
+      const result = await api.triggerCheckin(accountId, { tier: selectedTierId });
+      toast.success(resolveSingleCheckinSuccessMessage(result));
+      setAisignCheckinSheet((state) => (
+        state.account?.id === accountId
+          ? createAisignCheckinSheetState()
+          : state
+      ));
+    } catch (e: any) {
+      toast.error(e.message || '签到失败');
+      setAisignCheckinSheet((state) => {
+        if (state.account?.id !== accountId) return state;
+        return state.open ? { ...state, running: false } : createAisignCheckinSheetState();
+      });
+    } finally {
+      setActionLoading((state) => ({ ...state, [key]: false }));
+      void load();
+    }
+  };
+
   const patchAccountDispatchPreferenceMode = (accountId: number, mode: AccountDispatchPreferenceMode) => {
     setAccounts((current) => current.map((account) => (
       account.id === accountId
@@ -880,10 +975,14 @@ export default function Accounts() {
     try {
       const action = isSub2ApiSessionAccount
         ? await api.getCheckinAction(account.id)
-        : { mode: 'auto' as const, url: null, message: '签到成功' };
+        : { success: true, mode: 'auto' as const, kind: 'unsupported' as const, url: null, message: '签到成功' };
+      if (action.mode === 'auto' && action.kind === 'aisign' && Array.isArray(action.tierOptions) && action.tierOptions.length > 0) {
+        openAisignCheckinSheet(account, action);
+        return;
+      }
       if (action.mode === 'auto') {
-        await api.triggerCheckin(account.id);
-        toast.success('签到完成');
+        const result = await api.triggerCheckin(account.id);
+        toast.success(resolveSingleCheckinSuccessMessage(result));
         return;
       }
       if (action.mode !== 'manual_jump' || !action.url) {
@@ -2149,6 +2248,7 @@ export default function Accounts() {
                                 onClick={() => handleAccountCheckin(a)}
                                 disabled={actionLoading[`checkin-${a.id}`]}
                                 className="btn btn-link btn-link-warning"
+                                data-testid={`account-checkin-${a.id}`}
                               >
                                 {actionLoading[`checkin-${a.id}`] ? <span className="spinner spinner-sm" /> : '签到'}
                               </button>
@@ -2474,7 +2574,12 @@ export default function Accounts() {
                               模型
                             </button>
                             {checkinPresentation.showButton && (
-                              <button onClick={() => handleAccountCheckin(a)} disabled={actionLoading[`checkin-${a.id}`]} className="btn btn-link btn-link-warning">
+                              <button
+                                onClick={() => handleAccountCheckin(a)}
+                                disabled={actionLoading[`checkin-${a.id}`]}
+                                className="btn btn-link btn-link-warning"
+                                data-testid={`account-checkin-${a.id}`}
+                              >
                                 {actionLoading[`checkin-${a.id}`] ? <span className="spinner spinner-sm" /> : '签到'}
                               </button>
                             )}
@@ -2558,6 +2663,19 @@ export default function Accounts() {
         segmentAccounts={visibleAccounts}
         allAccounts={batchProbeAccounts}
         onClose={closeBatchProbeModal}
+      />
+      <AisignCheckinSheet
+        open={aisignCheckinSheet.open}
+        accountLabel={aisignCheckinSheet.account ? resolveAccountDisplayName(aisignCheckinSheet.account) : '未命名连接'}
+        siteLabel={aisignCheckinSheet.siteLabel}
+        tierOptions={aisignCheckinSheet.tierOptions}
+        selectedTierId={aisignCheckinSheet.selectedTierId}
+        running={aisignCheckinSheet.running}
+        onSelectTier={(tierId) => setAisignCheckinSheet((state) => (
+          state.running ? state : { ...state, selectedTierId: tierId }
+        ))}
+        onConfirm={handleConfirmAisignCheckin}
+        onClose={closeAisignCheckinSheet}
       />
     </div>
   );

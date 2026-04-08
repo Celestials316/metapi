@@ -806,9 +806,21 @@ export type DownstreamApiKeyTrendResponse = {
 export type CheckinActionResponse = {
   success: boolean;
   mode: 'auto' | 'manual_jump' | 'none';
-  kind: 'token_bridge' | 'manual_oauth' | 'unsupported';
+  kind: 'token_bridge' | 'manual_oauth' | 'aisign' | 'unsupported';
   url?: string | null;
   message?: string;
+  requiresTierSelection?: boolean;
+  defaultTierId?: number | null;
+  tierOptions?: AisignTierOption[];
+};
+
+export type AisignTierOption = {
+  id: number;
+  name: string;
+  rewardMin: number | null;
+  rewardMax: number | null;
+  difficulty: number | null;
+  targetSeconds: number | null;
 };
 
 export const api = {
@@ -889,7 +901,10 @@ export const api = {
 
   // Check-in
   triggerCheckinAll: () => request('/api/checkin/trigger', { method: 'POST' }),
-  triggerCheckin: (id: number) => request(`/api/checkin/trigger/${id}`, { method: 'POST' }),
+  triggerCheckin: (id: number, data?: { tier?: number }) => request(`/api/checkin/trigger/${id}`, {
+    method: 'POST',
+    body: data ? JSON.stringify(data) : undefined,
+  }),
   getCheckinAction: (id: number) => request(`/api/checkin/action/${id}`) as Promise<CheckinActionResponse>,
   getCheckinLogs: (params?: string) => request(`/api/checkin/logs${params ? '?' + params : ''}`),
   updateCheckinSchedule: (cron: string) => request('/api/checkin/schedule', { method: 'PUT', body: JSON.stringify({ cron }) }),
