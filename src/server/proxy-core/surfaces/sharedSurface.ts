@@ -19,6 +19,7 @@ import { refreshOauthAccessTokenSingleflight } from '../../services/oauth/refres
 import { proxyChannelCoordinator } from '../../services/proxyChannelCoordinator.js';
 import { readRuntimeResponseText } from '../executors/types.js';
 import { selectProxyChannelForAttempt } from '../channelSelection.js';
+import { describeErrorWithCauses } from '../../services/errorMessageService.js';
 
 type SelectedChannel = Awaited<ReturnType<typeof tokenRouter.selectChannel>>;
 type SurfaceWarningScope = 'chat' | 'responses';
@@ -660,13 +661,15 @@ export function createSurfaceFailureToolkit(input: {
       requestedModel: string;
       modelName: string;
       errorMessage: string;
+      error?: unknown;
       isStream?: boolean | null;
       firstByteLatencyMs?: number | null;
       latencyMs: number;
       retryCount: number;
     }): Promise<SurfaceFailureOutcome> {
+      const errorMessage = describeErrorWithCauses(args.error, args.errorMessage || 'network failure');
       await tokenRouter.recordFailure(args.selected.channel.id, {
-        errorText: args.errorMessage,
+        errorText: errorMessage,
         modelName: args.modelName,
       }, args.selected.account.id);
       await log({
@@ -677,7 +680,7 @@ export function createSurfaceFailureToolkit(input: {
         isStream: args.isStream ?? null,
         firstByteLatencyMs: args.firstByteLatencyMs ?? null,
         latencyMs: args.latencyMs,
-        errorMessage: args.errorMessage,
+        errorMessage,
         retryCount: args.retryCount,
       });
 
@@ -686,7 +689,7 @@ export function createSurfaceFailureToolkit(input: {
 
       runBestEffort('report proxy all failed', () => reportProxyAllFailed({
         model: args.requestedModel,
-        reason: args.errorMessage || 'network failure',
+        reason: errorMessage || 'network failure',
       }));
 
       return {
@@ -694,7 +697,7 @@ export function createSurfaceFailureToolkit(input: {
         status: 502,
         payload: {
           error: {
-            message: `Upstream error: ${args.errorMessage || 'network failure'}`,
+            message: `Upstream error: ${errorMessage || 'network failure'}`,
             type: 'upstream_error',
           },
         },

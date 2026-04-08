@@ -40,6 +40,7 @@ import { invalidateSiteProxyCache, normalizeSiteProxyUrl, withExplicitProxyReque
 import { performFactoryReset } from '../../services/factoryResetService.js';
 import { normalizeLogCleanupRetentionDays } from '../../shared/logCleanupRetentionDays.js';
 import { stopProxyLogRetentionService } from '../../services/proxyLogRetentionService.js';
+import { extractNestedErrorMessages } from '../../services/errorMessageService.js';
 import {
   startModelAvailabilityProbeScheduler,
   stopModelAvailabilityProbeScheduler,
@@ -175,23 +176,6 @@ function toPositiveNumberOrFallback(value: unknown, fallback: number) {
   const n = Number(value);
   if (!Number.isFinite(n) || n < 0) return fallback;
   return n;
-}
-
-function extractNestedErrorMessages(error: unknown): string[] {
-  const messages: string[] = [];
-  const visited = new Set<unknown>();
-  let current: any = error;
-
-  while (current && !visited.has(current)) {
-    visited.add(current);
-    const message = typeof current?.message === 'string' ? current.message.trim() : '';
-    if (message) {
-      messages.push(message);
-    }
-    current = current?.cause;
-  }
-
-  return messages;
 }
 
 function describeSystemProxyTestFailure(error: unknown): string {

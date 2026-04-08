@@ -66,6 +66,7 @@ import {
 import { detectDownstreamClientContext } from '../downstreamClientContext.js';
 import { getProxyMaxChannelRetries } from '../../services/proxyChannelRetry.js';
 import { shouldAbortSameSiteEndpointFallback } from '../../services/proxyRetryPolicy.js';
+import { describeErrorWithCauses } from '../../services/errorMessageService.js';
 import {
   acquireSurfaceChannelLease,
   bindSurfaceStickyChannel,
@@ -1368,22 +1369,23 @@ export async function handleOpenAiResponsesSurfaceRequest(
             || err?.siteApiEndpointUpstreamFailure === true
             || (endpointFailureStatus !== null && endpointFailureStatus >= 500)
           );
+          const surfacedErrorMessage = describeErrorWithCauses(err, 'unknown error');
           if (isSiteApiEndpointFailure) {
             const failureOutcome = await failureToolkit.handleUpstreamFailure({
               selected,
-          requestedModel,
-          modelName,
-          status: endpointFailureStatus || 502,
-          errText: err?.message || 'unknown error',
-          rawErrText: err?.rawErrText || err?.message || 'unknown error',
-          isStream,
-          latencyMs: Date.now() - startTime,
-          retryCount,
-        });
+              requestedModel,
+              modelName,
+              status: endpointFailureStatus || 502,
+              errText: surfacedErrorMessage,
+              rawErrText: err?.rawErrText || surfacedErrorMessage,
+              isStream,
+              latencyMs: Date.now() - startTime,
+              retryCount,
+            });
             const terminalFailureOutcome = failureOutcome.action === 'retry'
               ? (canRetryChannelSelection(retryCount, forcedChannelId)
                 ? null
-                : finalizeRetryAsUpstreamFailure(endpointFailureStatus || 502, err?.message || 'unknown error'))
+                : finalizeRetryAsUpstreamFailure(endpointFailureStatus || 502, surfacedErrorMessage))
               : failureOutcome;
             if (!terminalFailureOutcome) {
               retryCount += 1;
@@ -1400,7 +1402,8 @@ export async function handleOpenAiResponsesSurfaceRequest(
 	          selected,
 	          requestedModel,
             modelName,
-            errorMessage: err?.message || 'network failure',
+            errorMessage: describeErrorWithCauses(err, 'network failure'),
+            error: err,
             isStream,
             latencyMs: Date.now() - startTime,
             retryCount,
@@ -1408,7 +1411,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
           const terminalFailureOutcome = failureOutcome.action === 'retry'
             ? (canRetryChannelSelection(retryCount, forcedChannelId)
               ? null
-              : finalizeRetryAsExecutionFailure(err?.message || 'network failure'))
+              : finalizeRetryAsExecutionFailure(describeErrorWithCauses(err, 'network failure')))
             : failureOutcome;
           if (!terminalFailureOutcome) {
             retryCount += 1;

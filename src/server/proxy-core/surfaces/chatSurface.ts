@@ -50,6 +50,7 @@ import { getRuntimeResponseReader, readRuntimeResponseText } from '../executors/
 import { detectDownstreamClientContext } from '../downstreamClientContext.js';
 import { getProxyMaxChannelRetries } from '../../services/proxyChannelRetry.js';
 import { shouldAbortSameSiteEndpointFallback } from '../../services/proxyRetryPolicy.js';
+import { describeErrorWithCauses } from '../../services/errorMessageService.js';
 import {
   acquireSurfaceChannelLease,
   bindSurfaceStickyChannel,
@@ -962,14 +963,15 @@ export async function handleChatSurfaceRequest(
         || err?.siteApiEndpointUpstreamFailure === true
         || (endpointFailureStatus !== null && endpointFailureStatus >= 500)
       );
+      const surfacedErrorMessage = describeErrorWithCauses(err, 'unknown error');
       if (isSiteApiEndpointFailure) {
         const failureOutcome = await failureToolkit.handleUpstreamFailure({
           selected,
           requestedModel,
           modelName,
           status: endpointFailureStatus || 502,
-          errText: err.message || 'unknown error',
-          rawErrText: err.rawErrText || err.message || 'unknown error',
+          errText: surfacedErrorMessage,
+          rawErrText: err.rawErrText || surfacedErrorMessage,
           isStream,
           latencyMs: Date.now() - startTime,
           retryCount,
@@ -977,7 +979,7 @@ export async function handleChatSurfaceRequest(
         const terminalFailureOutcome = failureOutcome.action === 'retry'
           ? (canRetryChannelSelection(retryCount, forcedChannelId)
             ? null
-            : finalizeRetryAsUpstreamFailure(endpointFailureStatus || 502, err.message || 'unknown error'))
+            : finalizeRetryAsUpstreamFailure(endpointFailureStatus || 502, surfacedErrorMessage))
           : failureOutcome;
         if (!terminalFailureOutcome) {
           retryCount += 1;
@@ -994,7 +996,8 @@ export async function handleChatSurfaceRequest(
         selected,
         requestedModel,
         modelName,
-        errorMessage: err?.message || 'network failure',
+        errorMessage: describeErrorWithCauses(err, 'network failure'),
+        error: err,
         isStream,
         latencyMs: Date.now() - startTime,
         retryCount,
@@ -1002,7 +1005,7 @@ export async function handleChatSurfaceRequest(
       const terminalFailureOutcome = failureOutcome.action === 'retry'
         ? (canRetryChannelSelection(retryCount, forcedChannelId)
           ? null
-          : finalizeRetryAsExecutionFailure(err?.message || 'network failure'))
+          : finalizeRetryAsExecutionFailure(describeErrorWithCauses(err, 'network failure')))
         : failureOutcome;
       if (!terminalFailureOutcome) {
         retryCount += 1;
@@ -1390,14 +1393,15 @@ export async function handleClaudeCountTokensSurfaceRequest(
         || error?.siteApiEndpointUpstreamFailure === true
         || (endpointFailureStatus !== null && endpointFailureStatus >= 500)
       );
+      const surfacedErrorMessage = describeErrorWithCauses(error, 'unknown error');
       if (isSiteApiEndpointFailure) {
         const failureOutcome = await failureToolkit.handleUpstreamFailure({
           selected,
           requestedModel,
           modelName,
           status: endpointFailureStatus || 502,
-          errText: error.message || 'unknown error',
-          rawErrText: error.rawErrText || error.message || 'unknown error',
+          errText: surfacedErrorMessage,
+          rawErrText: error.rawErrText || surfacedErrorMessage,
           isStream: false,
           latencyMs: Date.now() - startTime,
           retryCount,
@@ -1405,7 +1409,7 @@ export async function handleClaudeCountTokensSurfaceRequest(
         const terminalFailureOutcome = failureOutcome.action === 'retry'
           ? (canRetryChannelSelection(retryCount, forcedChannelId)
             ? null
-            : finalizeRetryAsUpstreamFailure(endpointFailureStatus || 502, error.message || 'unknown error'))
+            : finalizeRetryAsUpstreamFailure(endpointFailureStatus || 502, surfacedErrorMessage))
           : failureOutcome;
         if (!terminalFailureOutcome) {
           retryCount += 1;
@@ -1418,7 +1422,8 @@ export async function handleClaudeCountTokensSurfaceRequest(
         selected,
         requestedModel,
         modelName,
-        errorMessage: error?.message || 'network failure',
+        errorMessage: describeErrorWithCauses(error, 'network failure'),
+        error,
         isStream: false,
         latencyMs: Date.now() - startTime,
         retryCount,
@@ -1426,7 +1431,7 @@ export async function handleClaudeCountTokensSurfaceRequest(
       const terminalFailureOutcome = failureOutcome.action === 'retry'
         ? (canRetryChannelSelection(retryCount, forcedChannelId)
           ? null
-          : finalizeRetryAsExecutionFailure(error?.message || 'network failure'))
+          : finalizeRetryAsExecutionFailure(describeErrorWithCauses(error, 'network failure')))
         : failureOutcome;
       if (!terminalFailureOutcome) {
         retryCount += 1;

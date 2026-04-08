@@ -783,6 +783,59 @@ describe('selectSurfaceChannelForAttempt', () => {
     });
   });
 
+  it('expands nested execution error causes before logging and responding', async () => {
+    composeProxyLogMessageMock.mockReturnValue('normalized error');
+    formatUtcSqlDateTimeMock.mockReturnValue('2026-03-21 22:00:00');
+    insertProxyLogMock.mockResolvedValue(undefined);
+
+    const { createSurfaceFailureToolkit } = await import('./sharedSurface.js');
+    const toolkit = createSurfaceFailureToolkit({
+      warningScope: 'responses',
+      downstreamPath: '/v1/responses',
+      maxRetries: 0,
+      clientContext: null,
+      downstreamApiKeyId: null,
+    });
+
+    const networkError = new TypeError('fetch failed', {
+      cause: new Error('read ECONNRESET'),
+    });
+
+    const result = await toolkit.handleExecutionError({
+      selected: {
+        channel: { id: 11, routeId: 22 },
+        account: { id: 33, username: 'oauth-user' },
+        site: { name: 'Codex OAuth' },
+        actualModel: 'upstream-model',
+      },
+      requestedModel: 'gpt-5.2',
+      modelName: 'upstream-model',
+      errorMessage: 'fetch failed',
+      latencyMs: 650,
+      retryCount: 0,
+      error: networkError,
+    } as any);
+
+    expect(result).toEqual({
+      action: 'respond',
+      status: 502,
+      payload: {
+        error: {
+          message: 'Upstream error: fetch failed: read ECONNRESET',
+          type: 'upstream_error',
+        },
+      },
+    });
+    expect(recordFailureMock).toHaveBeenCalledWith(11, {
+      errorText: 'fetch failed: read ECONNRESET',
+      modelName: 'upstream-model',
+    }, 33);
+    expect(reportProxyAllFailedMock).toHaveBeenCalledWith({
+      model: 'gpt-5.2',
+      reason: 'fetch failed: read ECONNRESET',
+    });
+  });
+
   it('records stream failures with error text even without a runtime status code', async () => {
     composeProxyLogMessageMock.mockReturnValue('normalized error');
     formatUtcSqlDateTimeMock.mockReturnValue('2026-03-21 22:00:00');

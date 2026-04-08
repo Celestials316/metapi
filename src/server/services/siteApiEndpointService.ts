@@ -1,6 +1,7 @@
 import { asc, eq } from 'drizzle-orm';
 import { db, schema } from '../db/index.js';
 import { RETRYABLE_TIMEOUT_PATTERNS } from './proxyRetryPolicy.js';
+import { describeErrorWithCauses } from './errorMessageService.js';
 
 const RETRYABLE_STATUS_CODES = new Set([408, 429, 500, 502, 503, 504]);
 const NON_RETRYABLE_STATUS_CODES = new Set([400, 401, 403, 404, 422]);
@@ -101,6 +102,10 @@ function isEndpointCoolingDown(endpoint: SiteApiEndpointRow, nowIso: string): bo
 
 function extractFailureMessage(input: SiteApiEndpointFailureInput): string {
   const direct = typeof input.message === 'string' ? input.message.trim() : '';
+  if (input.error !== undefined) {
+    const described = describeErrorWithCauses(input.error, direct || 'endpoint failure');
+    if (described) return described;
+  }
   if (direct) return direct;
   const errorMessage = input.error instanceof Error ? input.error.message.trim() : '';
   return errorMessage;
