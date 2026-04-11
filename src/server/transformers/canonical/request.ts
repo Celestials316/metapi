@@ -306,7 +306,10 @@ export function canonicalRequestFromOpenAiBody(
     const role = normalizeRole(rawMessage.role);
 
     if (role === 'tool') {
-      const toolCallId = asTrimmedString(rawMessage.tool_call_id ?? rawMessage.id);
+      const toolCallId = asTrimmedString(rawMessage.tool_call_id ?? rawMessage.call_id ?? rawMessage.id);
+      if (!toolCallId) {
+        continue;
+      }
       const rawContent = rawMessage.content;
       const resultText = typeof rawContent === 'string'
         ? rawContent
@@ -315,7 +318,7 @@ export function canonicalRequestFromOpenAiBody(
         role: 'tool',
         parts: [{
           type: 'tool_result',
-          toolCallId: toolCallId || 'tool',
+          toolCallId,
           ...(resultText ? { resultText } : {}),
           ...(Array.isArray(rawContent)
             ? { resultContent: cloneJsonValue(rawContent) as Array<string | Record<string, unknown>> }
@@ -332,7 +335,7 @@ export function canonicalRequestFromOpenAiBody(
     for (const toolCall of toolCalls) {
       if (!isRecord(toolCall)) continue;
       const fn = isRecord(toolCall.function) ? toolCall.function : {};
-      const id = asTrimmedString(toolCall.id);
+      const id = asTrimmedString(toolCall.call_id ?? toolCall.id);
       const name = asTrimmedString(toolCall.name ?? fn.name);
       const argumentsJson = typeof fn.arguments === 'string'
         ? fn.arguments

@@ -349,6 +349,61 @@ describe('canonical request helpers', () => {
     ]);
   });
 
+  it('parses tool call ids from call_id-compatible fields without inventing placeholder ids', () => {
+    const request = canonicalRequestFromOpenAiBody({
+      body: {
+        model: 'gpt-5',
+        messages: [
+          {
+            role: 'assistant',
+            content: 'thinking',
+            tool_calls: [{
+              type: 'function',
+              call_id: 'call_from_call_id',
+              function: {
+                name: 'search_files',
+                arguments: '{"pattern":"call_id"}',
+              },
+            }],
+          },
+          {
+            role: 'tool',
+            call_id: 'call_from_tool_message',
+            content: 'done',
+          },
+          {
+            role: 'tool',
+            content: 'missing id should stay missing',
+          },
+        ],
+      },
+      surface: 'openai-chat',
+    });
+
+    expect(request.messages).toHaveLength(2);
+    expect(request.messages[0]).toMatchObject({
+      role: 'assistant',
+      parts: [
+        { type: 'text', text: 'thinking' },
+        {
+          type: 'tool_call',
+          id: 'call_from_call_id',
+          name: 'search_files',
+          argumentsJson: '{"pattern":"call_id"}',
+        },
+      ],
+    });
+    expect(request.messages[1]).toMatchObject({
+      role: 'tool',
+      parts: [{
+        type: 'tool_result',
+        toolCallId: 'call_from_tool_message',
+        resultText: 'done',
+      }],
+    });
+    expect(request.messages).toHaveLength(2);
+  });
+
   it('writes raw canonical tool types back into OpenAI-compatible bodies when the raw payload omits the discriminator', () => {
     const request = createCanonicalRequestEnvelope({
       requestedModel: 'gpt-5',
