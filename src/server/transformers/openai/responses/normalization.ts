@@ -67,6 +67,38 @@ function firstMeaningfulValue(...values: unknown[]): unknown {
   return undefined;
 }
 
+function hasMeaningfulResponsesMessageContent(value: unknown): boolean {
+  if (Array.isArray(value)) return value.length > 0;
+  if (typeof value === 'string') return value.trim().length > 0;
+  return value !== undefined && value !== null;
+}
+
+function resolveNormalizedResponsesMessageContent(
+  item: Record<string, unknown>,
+  role: string,
+): unknown {
+  const hasExplicitContent = Object.prototype.hasOwnProperty.call(item, 'content');
+
+  if (!hasExplicitContent) {
+    return normalizeResponsesMessageContent(firstMeaningfulValue(item.text), role);
+  }
+
+  const normalizedExplicitContent = normalizeResponsesMessageContent(item.content, role);
+  if (hasMeaningfulResponsesMessageContent(normalizedExplicitContent)) {
+    return normalizedExplicitContent;
+  }
+
+  const fallbackText = firstMeaningfulValue(item.text);
+  if (fallbackText !== undefined) {
+    const normalizedFallbackText = normalizeResponsesMessageContent(fallbackText, role);
+    if (hasMeaningfulResponsesMessageContent(normalizedFallbackText)) {
+      return normalizedFallbackText;
+    }
+  }
+
+  return normalizedExplicitContent;
+}
+
 function toTextBlockType(role: string): 'input_text' | 'output_text' {
   return role === 'assistant' ? 'output_text' : 'input_text';
 }
@@ -244,10 +276,7 @@ export function normalizeResponsesMessageItem(item: Record<string, unknown>): Re
   }
 
   const role = asTrimmedString(item.role).toLowerCase() || 'user';
-  const normalizedContent = normalizeResponsesMessageContent(
-    firstMeaningfulValue(item.content, item.text),
-    role,
-  );
+  const normalizedContent = resolveNormalizedResponsesMessageContent(item, role);
 
   if (type === 'message') {
     return withNormalizedResponsesInputStatus({

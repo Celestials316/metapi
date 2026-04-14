@@ -117,6 +117,23 @@ describe('responses conversion single source of truth', () => {
       }),
     ]);
   });
+
+  it('preserves explicit empty assistant content placeholders when no fallback text exists', () => {
+    expect(normalizeResponsesInputForCompatibility([
+      {
+        role: 'assistant',
+        content: '',
+        id: 'msg_empty_assistant',
+      },
+    ])).toEqual([
+      {
+        type: 'message',
+        role: 'assistant',
+        content: '',
+        id: 'msg_empty_assistant',
+      },
+    ]);
+  });
 });
 
 describe('sanitizeResponsesBodyForProxy', () => {
@@ -495,6 +512,66 @@ describe('sanitizeResponsesBodyForProxy', () => {
         type: 'function_call_output',
         call_id: 'call_missing',
         output: 'orphaned output',
+      },
+    ]);
+  });
+
+  it('preserves explicit empty assistant content placeholders while sanitizing responses input for proxying', () => {
+    const result = sanitizeResponsesBodyForProxy(
+      {
+        model: 'gpt-5',
+        input: [
+          {
+            type: 'reasoning',
+            id: 'rs_1',
+            encrypted_content: 'sig_1',
+            summary: [
+              {
+                type: 'summary_text',
+                text: 'plan quietly',
+              },
+            ],
+          },
+          {
+            role: 'assistant',
+            content: '',
+            id: 'msg_empty_assistant',
+          },
+          {
+            type: 'function_call',
+            call_id: 'call_1',
+            name: 'Glob',
+            arguments: '{"pattern":"README*"}',
+          },
+        ],
+      },
+      'gpt-5',
+      false,
+    );
+
+    expect(result.input).toEqual([
+      {
+        type: 'reasoning',
+        id: 'rs_1',
+        encrypted_content: 'sig_1',
+        summary: [
+          {
+            type: 'summary_text',
+            text: 'plan quietly',
+          },
+        ],
+      },
+      {
+        type: 'message',
+        role: 'assistant',
+        content: '',
+        id: 'msg_empty_assistant',
+      },
+      {
+        type: 'function_call',
+        call_id: 'call_1',
+        name: 'Glob',
+        arguments: '{"pattern":"README*"}',
       },
     ]);
   });
