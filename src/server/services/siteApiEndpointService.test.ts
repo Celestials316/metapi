@@ -176,9 +176,41 @@ describe('siteApiEndpointService', () => {
     });
   });
 
-  it('returns null when the site has configured api endpoints but none are currently eligible', async () => {
+  it('returns the lone enabled endpoint even while it is cooling down', async () => {
     const site = await db.insert(schema.sites).values({
-      name: 'exhausted-site',
+      name: 'single-cooling-site',
+      url: 'https://panel.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    await db.insert(schema.siteApiEndpoints).values({
+      siteId: site.id,
+      url: 'https://api-cooling.example.com',
+      enabled: true,
+      sortOrder: 0,
+      cooldownUntil: '2026-03-31T12:05:00.000Z',
+    }).run();
+
+    const selected = await selectSiteApiEndpointTarget(site, '2026-03-31T12:00:00.000Z');
+
+    expect(selected).toMatchObject({
+      kind: 'endpoint',
+      siteId: site.id,
+      endpointId: expect.any(Number),
+      baseUrl: 'https://api-cooling.example.com',
+      configuredEndpointCount: 1,
+      endpoint: expect.objectContaining({
+        url: 'https://api-cooling.example.com',
+        enabled: true,
+        cooldownUntil: '2026-03-31T12:05:00.000Z',
+      }),
+    });
+  });
+
+  it('returns the lone enabled endpoint when all other configured endpoints are disabled', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'single-effective-site',
       url: 'https://panel.example.com',
       platform: 'new-api',
       status: 'active',
@@ -197,6 +229,47 @@ describe('siteApiEndpointService', () => {
         enabled: true,
         sortOrder: 1,
         cooldownUntil: '2026-03-31T12:05:00.000Z',
+      },
+    ]).run();
+
+    const selected = await selectSiteApiEndpointTarget(site, '2026-03-31T12:00:00.000Z');
+
+    expect(selected).toMatchObject({
+      kind: 'endpoint',
+      siteId: site.id,
+      endpointId: expect.any(Number),
+      baseUrl: 'https://api-cooling.example.com',
+      configuredEndpointCount: 2,
+      endpoint: expect.objectContaining({
+        url: 'https://api-cooling.example.com',
+        enabled: true,
+        cooldownUntil: '2026-03-31T12:05:00.000Z',
+      }),
+    });
+  });
+
+  it('returns null when the site has multiple enabled api endpoints but none are currently eligible', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'exhausted-site',
+      url: 'https://panel.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    await db.insert(schema.siteApiEndpoints).values([
+      {
+        siteId: site.id,
+        url: 'https://api-primary.example.com',
+        enabled: true,
+        sortOrder: 0,
+        cooldownUntil: '2026-03-31T12:05:00.000Z',
+      },
+      {
+        siteId: site.id,
+        url: 'https://api-secondary.example.com',
+        enabled: true,
+        sortOrder: 1,
+        cooldownUntil: '2026-03-31T12:06:00.000Z',
       },
     ]).run();
 

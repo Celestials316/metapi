@@ -175,8 +175,8 @@ export async function selectSiteApiEndpointTarget(
     };
   }
 
-  const eligible = endpoints
-    .filter((endpoint) => (endpoint.enabled ?? true) && !isEndpointCoolingDown(endpoint, nowIso))
+  const enabledEndpoints = endpoints
+    .filter((endpoint) => endpoint.enabled ?? true)
     .sort((left, right) => {
       const sortOrder = (left.sortOrder ?? 0) - (right.sortOrder ?? 0);
       if (sortOrder !== 0) return sortOrder;
@@ -185,7 +185,10 @@ export async function selectSiteApiEndpointTarget(
       return (left.id ?? 0) - (right.id ?? 0);
     });
 
-  const selected = eligible[0];
+  const eligible = enabledEndpoints
+    .filter((endpoint) => !isEndpointCoolingDown(endpoint, nowIso));
+
+  const selected = eligible[0] || (enabledEndpoints.length === 1 ? enabledEndpoints[0] : null);
   if (!selected) return null;
 
   return {
