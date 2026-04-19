@@ -458,7 +458,7 @@ async function refreshRuntimeHealthForRow(row: AccountWithSiteRow): Promise<Acco
 
   try {
     await withTimeout(
-      () => refreshBalance(accountId),
+      () => refreshBalance(accountId, { skipAutoTopup: true }),
       ACCOUNT_HEALTH_REFRESH_TIMEOUT_MS,
       `站点健康检查超时（${Math.max(1, Math.round(ACCOUNT_HEALTH_REFRESH_TIMEOUT_MS / 1000))}s）`,
     );

@@ -17,11 +17,13 @@ import { extractRuntimeHealth, setAccountRuntimeHealth } from './accountHealthSe
 import { updateTodayIncomeSnapshot } from './todayIncomeRewardService.js';
 import type { BalanceInfo } from './platforms/base.js';
 import { withAccountProxyOverride, withSiteProxyRequestInit, withSiteRecordProxyRequestInit } from './siteProxy.js';
+import { formatUtcSqlDateTime } from './localTimeService.js';
 import {
   isManagedSub2ApiTokenDue,
   isSub2ApiPlatform,
 } from './sub2apiManagedAuth.js';
 import { refreshSub2ApiManagedSessionSingleflight } from './sub2apiRefreshSingleflight.js';
+import { analyzePrimarySiteUrl } from '../../shared/sitePrimaryUrl.js';
 
 function isSiteDisabled(status?: string | null): boolean {
   return (status || 'active') === 'disabled';
@@ -68,6 +70,121 @@ function isUnsupportedCheckinRuntimeHealth(health: ReturnType<typeof extractRunt
 const INCOME_LOG_TYPES = [1, 4] as const;
 const LOG_PAGE_SIZE = 100;
 const LOG_MAX_PAGES = 6;
+const AUTO_TOPUP_TARGET_SITE_URL = analyzePrimarySiteUrl('https://api.99dun.cc').persistedUrl;
+const AUTO_TOPUP_ENDPOINT = 'https://ye.99dun.cc/api/topup';
+const AUTO_TOPUP_TARGET_ACCOUNT = 'BloodVeil1@tg.user';
+const AUTO_TOPUP_BALANCE_THRESHOLD = 10;
+const AUTO_TOPUP_COOLDOWN_MS = 6 * 60 * 60 * 1000;
+const AUTO_TOPUP_REQUEST_TIMEOUT_MS = 10_000;
+const AUTO_TOPUP_INFLIGHT_KEYS = new Set<string>();
+
+type RefreshBalanceOptions = {
+  skipAutoTopup?: boolean;
+};
+
+type AutoTopupState = {
+  lastAttemptAt?: number;
+  lastSuccessAt?: number;
+  lastResult?: string;
+  targetAccount?: string;
+  targetSiteUrl?: string;
+  threshold?: number;
+  lastTriggerBalance?: number;
+};
+
+function parseExtraConfigRecord(extraConfig?: string | null): Record<string, unknown> {
+  if (!extraConfig) return {};
+  try {
+    const parsed = JSON.parse(extraConfig) as unknown;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+    return parsed as Record<string, unknown>;
+  } catch {
+    return {};
+  }
+}
+
+function normalizeTimestampMs(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0) return Math.trunc(value);
+  if (typeof value === 'string') {
+    const parsed = Number.parseInt(value.trim(), 10);
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  }
+  return undefined;
+}
+
+function normalizeOptionalString(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function parseAutoTopupState(extraConfig?: string | null): AutoTopupState {
+  const parsed = parseExtraConfigRecord(extraConfig);
+  const raw = parsed.autoTopup;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+  const record = raw as Record<string, unknown>;
+  return {
+    lastAttemptAt: normalizeTimestampMs(record.lastAttemptAt),
+    lastSuccessAt: normalizeTimestampMs(record.lastSuccessAt),
+    lastResult: normalizeOptionalString(record.lastResult),
+    targetAccount: normalizeOptionalString(record.targetAccount),
+    targetSiteUrl: normalizeOptionalString(record.targetSiteUrl),
+    threshold: typeof record.threshold === 'number' && Number.isFinite(record.threshold)
+      ? record.threshold
+      : undefined,
+    lastTriggerBalance: typeof record.lastTriggerBalance === 'number' && Number.isFinite(record.lastTriggerBalance)
+      ? Math.round(record.lastTriggerBalance * 1_000_000) / 1_000_000
+      : undefined,
+  };
+}
+
+function mergeAutoTopupState(extraConfig: string | null, patch: AutoTopupState): string {
+  const current = parseAutoTopupState(extraConfig);
+  return mergeAccountExtraConfig(extraConfig, {
+    autoTopup: {
+      ...current,
+      ...patch,
+    },
+  });
+}
+
+function normalizeSiteUrlForAutoTopup(siteUrl?: string | null): string {
+  return analyzePrimarySiteUrl(siteUrl || '').persistedUrl;
+}
+
+function shouldHandleAutoTopup(siteUrl?: string | null, balance?: number): boolean {
+  if (!(typeof balance === 'number' && Number.isFinite(balance) && balance < AUTO_TOPUP_BALANCE_THRESHOLD)) {
+    return false;
+  }
+  return normalizeSiteUrlForAutoTopup(siteUrl) === AUTO_TOPUP_TARGET_SITE_URL;
+}
+
+async function appendAutoTopupEvent(input: {
+  accountId: number;
+  title: string;
+  message: string;
+  level: 'info' | 'warning' | 'error';
+}) {
+  try {
+    const createdAt = formatUtcSqlDateTime(new Date());
+    await db.insert(schema.events).values({
+      type: 'balance',
+      title: input.title,
+      message: input.message,
+      level: input.level,
+      relatedId: input.accountId,
+      relatedType: 'account',
+      createdAt,
+    }).run();
+  } catch {}
+}
+
+function resolveAutoTopupFailureMessage(status: number, payload: any): string {
+  const payloadMessage = typeof payload?.message === 'string' ? payload.message.trim() : '';
+  if (payloadMessage) return payloadMessage;
+  if (status > 0) return `HTTP ${status}`;
+  return 'unknown error';
+}
 
 function supportsTodayIncomeLogFallback(platform?: string | null): boolean {
   const normalized = (platform || '').toLowerCase();
@@ -249,7 +366,148 @@ async function tryAutoRelogin(account: any, site: any): Promise<{ accessToken: s
   };
 }
 
-export async function refreshBalance(accountId: number) {
+async function maybeAutoTopupAfterBalanceRefresh(params: {
+  account: typeof schema.accounts.$inferSelect;
+  site: typeof schema.sites.$inferSelect;
+  balanceInfo: BalanceInfo;
+  extraConfig: string | null;
+}): Promise<BalanceInfo | null> {
+  const { account, site, balanceInfo } = params;
+  if (!shouldHandleAutoTopup(site.url, balanceInfo.balance)) return null;
+
+  const state = parseAutoTopupState(params.extraConfig);
+  const now = Date.now();
+  const inflightKey = `${AUTO_TOPUP_TARGET_SITE_URL}::${AUTO_TOPUP_TARGET_ACCOUNT}`;
+  if (AUTO_TOPUP_INFLIGHT_KEYS.has(inflightKey)) {
+    return null;
+  }
+
+  AUTO_TOPUP_INFLIGHT_KEYS.add(inflightKey);
+
+  try {
+    const siblingAccounts = await db.select()
+      .from(schema.accounts)
+      .where(eq(schema.accounts.siteId, account.siteId))
+      .all();
+    const latestAttemptAt = siblingAccounts.reduce((latest, row) => {
+      const rowState = parseAutoTopupState(row.extraConfig);
+      return Math.max(latest, rowState.lastAttemptAt || 0);
+    }, state.lastAttemptAt || 0);
+    if (latestAttemptAt > 0 && now - latestAttemptAt < AUTO_TOPUP_COOLDOWN_MS) {
+      return null;
+    }
+
+    const attemptedExtraConfig = mergeAutoTopupState(params.extraConfig, {
+      lastAttemptAt: now,
+      lastResult: 'attempting',
+      targetAccount: AUTO_TOPUP_TARGET_ACCOUNT,
+      targetSiteUrl: AUTO_TOPUP_TARGET_SITE_URL,
+      threshold: AUTO_TOPUP_BALANCE_THRESHOLD,
+      lastTriggerBalance: Math.round(balanceInfo.balance * 1_000_000) / 1_000_000,
+    });
+
+    await db.update(schema.accounts)
+      .set({
+        extraConfig: attemptedExtraConfig,
+        updatedAt: new Date().toISOString(),
+      })
+      .where(eq(schema.accounts.id, account.id))
+      .run();
+
+    const { fetch } = await import('undici');
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), AUTO_TOPUP_REQUEST_TIMEOUT_MS);
+
+    try {
+      const response = await fetch(AUTO_TOPUP_ENDPOINT, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ account: AUTO_TOPUP_TARGET_ACCOUNT }),
+        signal: controller.signal,
+      });
+      const payload: any = await response.json().catch(() => null);
+
+      if (!(response.ok && payload?.ok === true)) {
+        const failureMessage = resolveAutoTopupFailureMessage(response.status, payload);
+        const failedExtraConfig = mergeAutoTopupState(attemptedExtraConfig, {
+          lastResult: failureMessage,
+        });
+        await db.update(schema.accounts)
+          .set({
+            extraConfig: failedExtraConfig,
+            updatedAt: new Date().toISOString(),
+          })
+          .where(eq(schema.accounts.id, account.id))
+          .run();
+        await appendAutoTopupEvent({
+          accountId: account.id,
+          title: '自动充值失败',
+          message: `${account.username || `ID:${account.id}`} @ ${site.name}: ${failureMessage}`,
+          level: 'error',
+        });
+        return null;
+      }
+
+      const successMessage = typeof payload?.message === 'string' && payload.message.trim()
+        ? payload.message.trim()
+        : '自动充值成功';
+      const successExtraConfig = mergeAutoTopupState(attemptedExtraConfig, {
+        lastSuccessAt: now,
+        lastResult: successMessage,
+      });
+      await db.update(schema.accounts)
+        .set({
+          extraConfig: successExtraConfig,
+          updatedAt: new Date().toISOString(),
+        })
+        .where(eq(schema.accounts.id, account.id))
+        .run();
+      await appendAutoTopupEvent({
+        accountId: account.id,
+        title: '自动充值成功',
+        message: `${account.username || `ID:${account.id}`} @ ${site.name}: ${successMessage}`,
+        level: 'info',
+      });
+
+      try {
+        return await refreshBalance(account.id, { skipAutoTopup: true });
+      } catch (err: any) {
+        await appendAutoTopupEvent({
+          accountId: account.id,
+          title: '自动充值后余额刷新失败',
+          message: `${account.username || `ID:${account.id}`} @ ${site.name}: ${err?.message || 'unknown error'}`,
+          level: 'warning',
+        });
+        return null;
+      }
+    } catch (err: any) {
+      const failureMessage = err?.message || 'unknown error';
+      const failedExtraConfig = mergeAutoTopupState(attemptedExtraConfig, {
+        lastResult: failureMessage,
+      });
+      await db.update(schema.accounts)
+        .set({
+          extraConfig: failedExtraConfig,
+          updatedAt: new Date().toISOString(),
+        })
+        .where(eq(schema.accounts.id, account.id))
+        .run();
+      await appendAutoTopupEvent({
+        accountId: account.id,
+        title: '自动充值失败',
+        message: `${account.username || `ID:${account.id}`} @ ${site.name}: ${failureMessage}`,
+        level: 'error',
+      });
+      return null;
+    } finally {
+      clearTimeout(timeout);
+    }
+  } finally {
+    AUTO_TOPUP_INFLIGHT_KEYS.delete(inflightKey);
+  }
+}
+
+export async function refreshBalance(accountId: number, options: RefreshBalanceOptions = {}) {
   const rows = await db
     .select()
     .from(schema.accounts)
@@ -444,6 +702,18 @@ export async function refreshBalance(accountId: number) {
       ? (existingRuntimeHealth?.source || 'checkin')
       : 'balance',
   });
+
+  if (!options.skipAutoTopup) {
+    const refreshedAfterTopup = await maybeAutoTopupAfterBalanceRefresh({
+      account,
+      site,
+      balanceInfo,
+      extraConfig: typeof updates.extraConfig === 'string' ? updates.extraConfig : nextExtraConfig,
+    });
+    if (refreshedAfterTopup) {
+      return refreshedAfterTopup;
+    }
+  }
 
   return balanceInfo;
 }
