@@ -6,11 +6,21 @@ function asTrimmedString(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
 }
 
+function shouldApplyCodexResponsesCompatibility(input: {
+  sitePlatform?: string;
+  downstreamClientKind?: string;
+}): boolean {
+  return (
+    asTrimmedString(input.sitePlatform).toLowerCase() === 'codex'
+    || asTrimmedString(input.downstreamClientKind).toLowerCase() === 'codex'
+  );
+}
+
 function ensureCodexResponsesInstructions(
   body: Record<string, unknown>,
-  sitePlatform: string,
+  shouldApply: boolean,
 ): Record<string, unknown> {
-  if (sitePlatform !== 'codex') return body;
+  if (!shouldApply) return body;
   if (typeof body.instructions === 'string') return body;
   return {
     ...body,
@@ -20,9 +30,9 @@ function ensureCodexResponsesInstructions(
 
 function ensureCodexResponsesStoreFalse(
   body: Record<string, unknown>,
-  sitePlatform: string,
+  shouldApply: boolean,
 ): Record<string, unknown> {
-  if (sitePlatform !== 'codex') return body;
+  if (!shouldApply) return body;
   return {
     ...body,
     store: false,
@@ -31,9 +41,9 @@ function ensureCodexResponsesStoreFalse(
 
 function stripCodexUnsupportedResponsesFields(
   body: Record<string, unknown>,
-  sitePlatform: string,
+  shouldApply: boolean,
 ): Record<string, unknown> {
-  if (sitePlatform !== 'codex') return body;
+  if (!shouldApply) return body;
   const next = { ...body };
   delete next.max_output_tokens;
   delete next.max_completion_tokens;
@@ -56,9 +66,9 @@ function convertCodexSystemRoleToDeveloper(input: unknown): unknown {
 
 function applyCodexResponsesCompatibility(
   body: Record<string, unknown>,
-  sitePlatform: string,
+  shouldApply: boolean,
 ): Record<string, unknown> {
-  if (sitePlatform !== 'codex') return body;
+  if (!shouldApply) return body;
 
   const next: Record<string, unknown> = {
     ...body,
@@ -74,17 +84,21 @@ function applyCodexResponsesCompatibility(
 
 export function normalizeCodexResponsesBodyForProxy(
   body: Record<string, unknown>,
-  sitePlatform: string,
+  input: {
+    sitePlatform?: string;
+    downstreamClientKind?: string;
+  },
 ): Record<string, unknown> {
-  if (sitePlatform !== 'codex') return body;
+  const shouldApply = shouldApplyCodexResponsesCompatibility(input);
+  if (!shouldApply) return body;
   return ensureCodexResponsesStoreFalse(
     stripCodexUnsupportedResponsesFields(
       ensureCodexResponsesInstructions(
-        applyCodexResponsesCompatibility(body, sitePlatform),
-        sitePlatform,
+        applyCodexResponsesCompatibility(body, shouldApply),
+        shouldApply,
       ),
-      sitePlatform,
+      shouldApply,
     ),
-    sitePlatform,
+    shouldApply,
   );
 }

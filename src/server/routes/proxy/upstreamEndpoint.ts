@@ -5,6 +5,7 @@ import {
 } from '../../proxy-core/capabilities/conversationFileCapabilities.js';
 import type { UpstreamEndpoint } from '../../proxy-core/orchestration/upstreamRequest.js';
 import { resolveProviderProfile } from '../../proxy-core/providers/registry.js';
+import { prepareCodexCompatibleOpenAiResponsesRequest } from '../../proxy-core/providers/codexProviderProfile.js';
 import { config } from '../../config.js';
 import { fetchModelPricingCatalog } from '../../services/modelPricingService.js';
 import { applyPayloadRules } from '../../services/payloadRules.js';
@@ -694,6 +695,7 @@ export function buildUpstreamEndpointRequest(input: {
   forceNormalizeClaudeBody?: boolean;
   responsesOriginalBody?: Record<string, unknown>;
   downstreamHeaders?: Record<string, unknown>;
+  downstreamClientKind?: string;
   providerHeaders?: Record<string, string>;
   codexSessionCacheKey?: string | null;
   codexExplicitSessionId?: string | null;
@@ -711,6 +713,8 @@ export function buildUpstreamEndpointRequest(input: {
 } {
   const sitePlatform = normalizePlatformName(input.sitePlatform);
   const providerProfile = resolveProviderProfile(sitePlatform);
+  const isCodexCompatibleDownstreamClient = normalizePlatformName(input.downstreamClientKind) === 'codex';
+  const isCodexCompatibleRequest = sitePlatform === 'codex' || isCodexCompatibleDownstreamClient;
   const isClaudeUpstream = sitePlatform === 'claude';
   const isGeminiUpstream = sitePlatform === 'gemini';
   const isGeminiCliUpstream = sitePlatform === 'gemini-cli';
@@ -762,7 +766,7 @@ export function buildUpstreamEndpointRequest(input: {
   };
 
   const passthroughHeaders = extractSafePassthroughHeaders(input.downstreamHeaders);
-  const codexPassthroughHeaders = sitePlatform === 'codex'
+  const codexPassthroughHeaders = isCodexCompatibleRequest
     ? extractCodexPassthroughHeaders(input.downstreamHeaders)
     : {};
   const commonHeaders: Record<string, string> = {
@@ -946,11 +950,17 @@ export function buildUpstreamEndpointRequest(input: {
     }
     const body = normalizeCodexResponsesBodyForProxy(
       sanitizedResponsesBody,
-      sitePlatform,
+      {
+        sitePlatform,
+        downstreamClientKind: input.downstreamClientKind,
+      },
     );
     const configuredResponsesBody = normalizeCodexResponsesBodyForProxy(
       applyConfiguredPayloadRules(body),
-      sitePlatform,
+      {
+        sitePlatform,
+        downstreamClientKind: input.downstreamClientKind,
+      },
     );
 
     if (sitePlatform === 'codex') {
@@ -965,6 +975,28 @@ export function buildUpstreamEndpointRequest(input: {
         oauthProvider: input.oauthProvider,
         oauthProjectId: input.oauthProjectId,
         sitePlatform,
+        baseHeaders: {
+          ...commonHeaders,
+          ...responsesHeaders,
+        },
+        providerHeaders: input.providerHeaders,
+        codexSessionCacheKey: input.codexSessionCacheKey,
+        codexExplicitSessionId: input.codexExplicitSessionId,
+        responsesWebsocketTransport,
+        body: configuredResponsesBody,
+      });
+    }
+
+    if (isCodexCompatibleRequest) {
+      return prepareCodexCompatibleOpenAiResponsesRequest({
+        endpoint: 'responses',
+        modelName: input.modelName,
+        stream: input.stream,
+        tokenValue: input.tokenValue,
+        oauthProvider: input.oauthProvider,
+        oauthProjectId: input.oauthProjectId,
+        sitePlatform,
+        pathOverride: resolveEndpointPath('responses'),
         baseHeaders: {
           ...commonHeaders,
           ...responsesHeaders,

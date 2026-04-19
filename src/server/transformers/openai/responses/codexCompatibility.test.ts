@@ -16,7 +16,7 @@ describe('normalizeCodexResponsesBodyForProxy', () => {
       max_tokens: 128,
       temperature: 0.3,
       store: true,
-    }, 'codex');
+    }, { sitePlatform: 'codex' });
 
     expect(body).toEqual({
       input: [
@@ -38,8 +38,37 @@ describe('normalizeCodexResponsesBodyForProxy', () => {
       max_output_tokens: 512,
     };
 
-    const body = normalizeCodexResponsesBodyForProxy(source, 'openai');
+    const body = normalizeCodexResponsesBodyForProxy(source, { sitePlatform: 'openai' });
 
     expect(body).toBe(source);
+  });
+
+  it('normalizes openai-site responses bodies for downstream codex clients', () => {
+    const body = normalizeCodexResponsesBodyForProxy({
+      input: [
+        {
+          type: 'message',
+          role: 'system',
+          content: [{ type: 'input_text', text: 'be precise' }],
+        },
+      ],
+      max_output_tokens: 256,
+      store: true,
+    }, {
+      sitePlatform: 'openai',
+      downstreamClientKind: 'codex',
+    });
+
+    expect(body).toEqual({
+      input: [
+        {
+          type: 'message',
+          role: 'developer',
+          content: [{ type: 'input_text', text: 'be precise' }],
+        },
+      ],
+      instructions: '',
+      store: false,
+    });
   });
 });

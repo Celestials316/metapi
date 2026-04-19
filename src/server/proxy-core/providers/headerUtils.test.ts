@@ -74,6 +74,28 @@ describe('provider header utils', () => {
     expect(headers.Accept).toBe('application/json');
   });
 
+  it('falls back to base codex headers when provider headers are absent', async () => {
+    const { buildCodexRuntimeHeaders } = await import('./headerUtils.js');
+
+    const headers = buildCodexRuntimeHeaders({
+      baseHeaders: {
+        authorization: 'Bearer test',
+        originator: 'codex_exec',
+        'chatgpt-account-id': 'acct-base',
+      },
+      stream: true,
+      continuityKey: 'cache-key-2',
+      explicitSessionId: 'session-base',
+    });
+
+    expect(headers.Authorization).toBe('Bearer test');
+    expect(headers.Originator).toBe('codex_exec');
+    expect(headers['Chatgpt-Account-Id']).toBe('acct-base');
+    expect(headers.Session_id).toBe('session-base');
+    expect(headers.Conversation_id).toBe('session-base');
+    expect(headers.Accept).toBe('text/event-stream');
+  });
+
   it('builds claude runtime headers with merged betas and oauth bearer auth', async () => {
     const { buildClaudeRuntimeHeaders } = await import('./headerUtils.js');
 

@@ -832,6 +832,56 @@ describe('buildUpstreamEndpointRequest', () => {
     expect(request.body.service_tier).toBe('auto');
   });
 
+  it('applies codex compatibility and runtime headers for codex clients on openai-compatible sites', () => {
+    const request = buildUpstreamEndpointRequest({
+      endpoint: 'responses',
+      modelName: 'gpt-5.4',
+      stream: true,
+      tokenValue: 'proxy-token',
+      sitePlatform: 'openai',
+      siteUrl: 'https://api.stardreamai.com/v1',
+      openaiBody: {},
+      downstreamFormat: 'responses',
+      responsesOriginalBody: {
+        model: 'gpt-5.4',
+        input: [
+          {
+            type: 'message',
+            role: 'system',
+            content: [{ type: 'input_text', text: 'be precise' }],
+          },
+        ],
+        store: true,
+        max_output_tokens: 256,
+      },
+      downstreamHeaders: {
+        originator: 'codex_exec',
+      },
+      downstreamClientKind: 'codex',
+      codexSessionCacheKey: 'site56:account57:channel2335:session-abc',
+      codexExplicitSessionId: 'session-abc',
+    } as any);
+
+    expect(request.path).toBe('/v1/responses');
+    expect(request.headers.Authorization).toBe('Bearer proxy-token');
+    expect(request.headers.Originator).toBe('codex_exec');
+    expect(request.headers['OpenAI-Beta']).toBe('responses=experimental');
+    expect(request.headers['User-Agent']).toBe('codex_cli_rs/0.101.0 (Mac OS 26.0.1; arm64) Apple_Terminal/464');
+    expect(request.headers.Accept).toBe('text/event-stream');
+    expect(request.headers.Session_id).toBe('session-abc');
+    expect(request.headers.Conversation_id).toBe('session-abc');
+    expect(request.body.instructions).toBe('');
+    expect(request.body.store).toBe(false);
+    expect(request.body.max_output_tokens).toBeUndefined();
+    expect(request.body.input).toEqual([
+      {
+        type: 'message',
+        role: 'developer',
+        content: [{ type: 'input_text', text: 'be precise' }],
+      },
+    ]);
+  });
+
   it('reuses a stable codex session id when the same downstream continuity key is provided', () => {
     const firstRequest = buildUpstreamEndpointRequest({
       endpoint: 'responses',

@@ -443,6 +443,8 @@ export async function handleOpenAiResponsesSurfaceRequest(
       const modelName = selected.actualModel || requestedModel;
       const oauth = getOauthInfoFromAccount(selected.account);
       const isCodexSite = String(selected.site.platform || '').trim().toLowerCase() === 'codex';
+      const isCodexClient = clientContext.clientKind === 'codex';
+      const isCodexCompatibleRequest = isCodexSite || isCodexClient;
       const downstreamSessionId = (
         clientContext.sessionId
         || getResponsesSessionHeaderValue(requestHeaders)
@@ -563,7 +565,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
         })
       );
       const executeEndpointResultForSiteApiBaseUrl = async (siteApiBaseUrl: string) => {
-        const forceCodexUpstreamStream = isCodexSite && !isCompactRequest;
+        const forceCodexUpstreamStream = isCodexCompatibleRequest && !isCompactRequest;
         const buildEndpointRequest = (endpoint: 'chat' | 'messages' | 'responses') => {
           const upstreamStream = isStream || (forceCodexUpstreamStream && endpoint === 'responses');
           const responsesOriginalBody = (
@@ -593,7 +595,10 @@ export async function handleOpenAiResponsesSurfaceRequest(
             downstreamFormat: 'responses',
             responsesOriginalBody,
             downstreamHeaders: requestHeaders,
+            downstreamClientKind: clientContext.clientKind,
             providerHeaders: buildProviderHeaders(),
+            codexSessionCacheKey: trustedResponsesSessionStoreKey || undefined,
+            codexExplicitSessionId: downstreamSessionId || undefined,
           });
           const upstreamPath = (
             isCompactRequest && endpoint === 'responses'
@@ -622,7 +627,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
           endpointRequest: BuiltEndpointRequest,
           targetUrl?: string,
         ) => {
-          if (!isCodexSite || !endpointRequest.path.startsWith('/responses')) {
+          if (!isCodexCompatibleRequest || !endpointRequest.path.startsWith('/responses')) {
             return baseDispatchRequest(endpointRequest, targetUrl);
           }
           const sessionId = getResponsesSessionHeaderValue(endpointRequest.headers);

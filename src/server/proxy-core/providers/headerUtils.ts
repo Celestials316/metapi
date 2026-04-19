@@ -133,9 +133,11 @@ export function buildCodexRuntimeHeaders(input: {
     || ''
   );
   const originator = getInputHeader(input.providerHeaders, 'originator')
+    || getInputHeader(input.baseHeaders, 'originator')
     || input.originatorDefault
     || 'codex_cli_rs';
-  const accountId = getInputHeader(input.providerHeaders, 'chatgpt-account-id');
+  const accountId = getInputHeader(input.providerHeaders, 'chatgpt-account-id')
+    || getInputHeader(input.baseHeaders, 'chatgpt-account-id');
   const version = getInputHeader(input.baseHeaders, 'version')
     || input.versionDefault
     || CODEX_CLIENT_VERSION;
