@@ -6,11 +6,28 @@ function asTrimmedString(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
 }
 
+function mergeHeadersWithoutCaseConflicts(
+  baseHeaders: Record<string, string>,
+  overrideHeaders: Record<string, string>,
+): Record<string, string> {
+  const overriddenKeys = new Set(Object.keys(overrideHeaders).map((key) => key.toLowerCase()));
+  const next: Record<string, string> = {};
+  for (const [key, value] of Object.entries(baseHeaders)) {
+    if (overriddenKeys.has(key.toLowerCase())) continue;
+    next[key] = value;
+  }
+  return {
+    ...next,
+    ...overrideHeaders,
+  };
+}
+
 function prepareCodexRequest(input: PrepareProviderRequestInput & {
   pathOverride?: string;
   runtimeExecutorOverride?: ProviderRuntimeDescriptor['executor'];
   forceConfiguredUserAgent?: boolean;
   forceConfiguredBetaFeatures?: boolean;
+  preserveBaseUserAgent?: boolean;
   openAiBetaDefault?: string | null;
 }): PreparedProviderRequest {
   const isCodexOauth = asTrimmedString(input.oauthProvider).toLowerCase() === 'codex';
@@ -32,6 +49,7 @@ function prepareCodexRequest(input: PrepareProviderRequestInput & {
     explicitSessionId: asTrimmedString(input.codexExplicitSessionId) || null,
     continuityKey: asTrimmedString(input.codexSessionCacheKey) || null,
     userAgentOverride: configuredUserAgent || null,
+    preserveBaseUserAgent: input.preserveBaseUserAgent,
     codexBetaFeatures: getInputHeader(input.baseHeaders, 'x-codex-beta-features') || configuredBetaFeatures,
     codexTurnState: getInputHeader(input.baseHeaders, 'x-codex-turn-state'),
     codexTurnMetadata: getInputHeader(input.baseHeaders, 'x-codex-turn-metadata'),
@@ -63,14 +81,12 @@ export function prepareCodexCompatibleOpenAiResponsesRequest(
     ...input,
     runtimeExecutorOverride: 'default',
     forceConfiguredBetaFeatures: true,
+    preserveBaseUserAgent: false,
     openAiBetaDefault: 'responses=experimental',
   });
   return {
     ...prepared,
-    headers: {
-      ...input.baseHeaders,
-      ...prepared.headers,
-    },
+    headers: mergeHeadersWithoutCaseConflicts(input.baseHeaders, prepared.headers),
   };
 }
 

@@ -856,6 +856,8 @@ describe('buildUpstreamEndpointRequest', () => {
       },
       downstreamHeaders: {
         originator: 'codex_exec',
+        'user-agent': 'OpenAI/Python 2.31.0',
+        'x-stainless-lang': 'python',
       },
       downstreamClientKind: 'codex',
       codexSessionCacheKey: 'site56:account57:channel2335:session-abc',
@@ -867,7 +869,11 @@ describe('buildUpstreamEndpointRequest', () => {
     expect(request.headers.Originator).toBe('codex_exec');
     expect(request.headers['OpenAI-Beta']).toBe('responses=experimental');
     expect(request.headers['User-Agent']).toBe('codex_cli_rs/0.101.0 (Mac OS 26.0.1; arm64) Apple_Terminal/464');
+    expect(request.headers['user-agent']).toBeUndefined();
+    expect(request.headers.Originator).toBe('codex_exec');
+    expect(request.headers.originator).toBeUndefined();
     expect(request.headers.Accept).toBe('text/event-stream');
+    expect(request.headers.accept).toBeUndefined();
     expect(request.headers.Session_id).toBe('session-abc');
     expect(request.headers.Conversation_id).toBe('session-abc');
     expect(request.body.instructions).toBe('');

@@ -120,6 +120,7 @@ export function buildCodexRuntimeHeaders(input: {
   versionDefault?: string;
   userAgentDefault?: string;
   userAgentOverride?: string | null;
+  preserveBaseUserAgent?: boolean;
   originatorDefault?: string;
   codexBetaFeatures?: string | null;
   codexTurnState?: string | null;
@@ -141,8 +142,11 @@ export function buildCodexRuntimeHeaders(input: {
   const version = getInputHeader(input.baseHeaders, 'version')
     || input.versionDefault
     || CODEX_CLIENT_VERSION;
+  const clientUserAgent = input.preserveBaseUserAgent === false
+    ? null
+    : getInputHeader(input.baseHeaders, 'user-agent');
   const userAgent = input.userAgentOverride
-    || getInputHeader(input.baseHeaders, 'user-agent')
+    || clientUserAgent
     || input.userAgentDefault
     || CODEX_DEFAULT_USER_AGENT;
   const codexBetaFeatures = input.codexBetaFeatures || null;

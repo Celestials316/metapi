@@ -1784,9 +1784,11 @@ describe('chat proxy stream behavior', () => {
     expect(response.statusCode).toBe(200);
 
     const [_targetUrl, options] = fetchMock.mock.calls[0] as [string, any];
-    expect(options.headers['openai-beta']).toBe('responses-2025-03-11');
+    expect(options.headers['OpenAI-Beta']).toBe('responses-2025-03-11');
+    expect(options.headers['openai-beta']).toBeUndefined();
     expect(options.headers['x-stainless-lang']).toBe('typescript');
-    expect(options.headers.originator).toBe('codex_cli_rs');
+    expect(options.headers.Originator).toBe('codex_cli_rs');
+    expect(options.headers.originator).toBeUndefined();
 
     const forwardedBody = JSON.parse(options.body);
     expect(forwardedBody.metadata).toEqual({ session_id: 'abc123' });
@@ -2029,9 +2031,13 @@ describe('chat proxy stream behavior', () => {
     const [, thirdOptions] = fetchMock.mock.calls[2] as [string, any];
     const [, fourthOptions] = fetchMock.mock.calls[3] as [string, any];
 
-    expect(firstOptions.headers['openai-beta']).toBe('responses-2025-03-11');
+    expect(firstOptions.headers['OpenAI-Beta']).toBe('responses-2025-03-11');
+    expect(firstOptions.headers['openai-beta']).toBeUndefined();
+    expect(secondOptions.headers['OpenAI-Beta']).toBeUndefined();
     expect(secondOptions.headers['openai-beta']).toBe('responses-2025-03-11');
+    expect(thirdOptions.headers['OpenAI-Beta']).toBeUndefined();
     expect(thirdOptions.headers['openai-beta']).toBe('responses-2025-03-11');
+    expect(fourthOptions.headers['OpenAI-Beta']).toBeUndefined();
     expect(fourthOptions.headers['openai-beta']).toBeUndefined();
 
     const firstBody = JSON.parse(firstOptions.body);

@@ -96,6 +96,22 @@ describe('provider header utils', () => {
     expect(headers.Accept).toBe('text/event-stream');
   });
 
+  it('can ignore downstream user agents and fall back to the official codex user agent', async () => {
+    const { buildCodexRuntimeHeaders } = await import('./headerUtils.js');
+
+    const headers = buildCodexRuntimeHeaders({
+      baseHeaders: {
+        authorization: 'Bearer test',
+        'user-agent': 'OpenAI/Python 2.31.0',
+      },
+      stream: true,
+      preserveBaseUserAgent: false,
+    });
+
+    expect(headers['User-Agent']).toBe('codex_cli_rs/0.101.0 (Mac OS 26.0.1; arm64) Apple_Terminal/464');
+    expect(headers.Accept).toBe('text/event-stream');
+  });
+
   it('builds claude runtime headers with merged betas and oauth bearer auth', async () => {
     const { buildClaudeRuntimeHeaders } = await import('./headerUtils.js');
 
