@@ -8,6 +8,7 @@ import {
 import { getOauthInfoFromAccount } from './oauth/oauthAccount.js';
 import { buildOauthProviderHeaders } from './oauth/service.js';
 import { resolveChannelProxyUrl, withSiteRecordProxyRequestInit } from './siteProxy.js';
+import { resolveSiteApiBaseUrl } from './siteApiEndpointService.js';
 import { dispatchRuntimeRequest } from './runtimeDispatch.js';
 import {
   buildUpstreamEndpointRequest,
@@ -285,6 +286,16 @@ export async function probeAccountChat(input: {
       account,
       downstreamHeaders: {},
     });
+    const resolvedSiteApiBaseUrl = await resolveSiteApiBaseUrl(site);
+    if (!resolvedSiteApiBaseUrl) {
+      return {
+        success: false,
+        statusText: '测活失败',
+        errorMessage: '当前站点的 API 请求地址均不可用',
+        latencyMs: Date.now() - startedAt,
+        model: modelName,
+      };
+    }
     const openaiBody = buildProbeBody(modelName);
     const channelProxyUrl = resolveChannelProxyUrl(site, account.extraConfig);
     const abortController = new AbortController();
@@ -306,7 +317,7 @@ export async function probeAccountChat(input: {
         oauthProvider: oauth?.provider,
         oauthProjectId: oauth?.projectId,
         sitePlatform: site.platform,
-        siteUrl: site.url,
+        siteUrl: resolvedSiteApiBaseUrl,
         openaiBody,
         downstreamFormat: 'openai',
         downstreamHeaders: {},
@@ -327,7 +338,7 @@ export async function probeAccountChat(input: {
       targetUrl: string,
     ) => (
       dispatchRuntimeRequest({
-        siteUrl: site.url,
+        siteUrl: resolvedSiteApiBaseUrl,
         targetUrl,
         request,
         buildInit: (_requestUrl, requestForFetch) => withSiteRecordProxyRequestInit(
@@ -346,7 +357,7 @@ export async function probeAccountChat(input: {
     let result: Awaited<ReturnType<typeof executeEndpointFlow>>;
     try {
       result = await executeEndpointFlow({
-        siteUrl: site.url,
+        siteUrl: resolvedSiteApiBaseUrl,
         proxyUrl: channelProxyUrl,
         endpointCandidates,
         buildRequest,

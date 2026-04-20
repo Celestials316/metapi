@@ -9,6 +9,7 @@ const withSiteRecordProxyRequestInitMock = vi.fn();
 const resolveUpstreamEndpointCandidatesMock = vi.fn();
 const buildUpstreamEndpointRequestMock = vi.fn();
 const executeEndpointFlowMock = vi.fn();
+const resolveSiteApiBaseUrlMock = vi.fn();
 
 vi.mock('drizzle-orm', () => ({
   eq: (...args: unknown[]) => ({ args }),
@@ -63,6 +64,10 @@ vi.mock('../proxy-core/orchestration/endpointFlow.js', () => ({
   executeEndpointFlow: (...args: unknown[]) => executeEndpointFlowMock(...args),
 }));
 
+vi.mock('./siteApiEndpointService.js', () => ({
+  resolveSiteApiBaseUrl: (...args: unknown[]) => resolveSiteApiBaseUrlMock(...args),
+}));
+
 vi.mock('./runtimeDispatch.js', () => ({
   dispatchRuntimeRequest: vi.fn(),
 }));
@@ -82,13 +87,14 @@ describe('accountProbeService', () => {
       sites: {
         id: 1,
         name: 'Site A',
-        url: 'https://probe.example.com',
+        url: 'https://www.probe.example.com',
         platform: 'new-api',
       },
     });
     getPreferredAccountTokenMock.mockResolvedValue({ token: 'sk-managed-default' });
     getOauthInfoFromAccountMock.mockReturnValue(null);
     buildOauthProviderHeadersMock.mockReturnValue({});
+    resolveSiteApiBaseUrlMock.mockResolvedValue('https://api.probe.example.com/v1');
     resolveChannelProxyUrlMock.mockReturnValue(null);
     withSiteRecordProxyRequestInitMock.mockImplementation((_site: unknown, init: unknown) => init);
     resolveUpstreamEndpointCandidatesMock.mockResolvedValue(['chat']);
@@ -142,10 +148,15 @@ describe('accountProbeService', () => {
       replyText: '你好，我在线。',
       model: 'gpt-4.1',
     });
-    expect(buildUpstreamEndpointRequestMock).toHaveBeenCalledWith(expect.objectContaining({
-      tokenValue: 'sk-managed-default',
+    const firstRequest = buildUpstreamEndpointRequestMock.mock.calls[0]?.[0];
+    expect(firstRequest).toMatchObject({
       modelName: 'gpt-4.1',
-    }));
+      siteUrl: 'https://api.probe.example.com/v1',
+    });
+    const firstFlow = executeEndpointFlowMock.mock.calls[0]?.[0];
+    expect(firstFlow).toMatchObject({
+      siteUrl: 'https://api.probe.example.com/v1',
+    });
   });
 
   it('returns a friendly failure when the session connection has no usable managed token', async () => {
@@ -171,13 +182,13 @@ describe('accountProbeService', () => {
         siteId: 1,
         username: 'beta',
         accessToken: '',
-        apiToken: 'sk-direct-account',
+        apiToken: '***',
         extraConfig: JSON.stringify({ credentialMode: 'apikey' }),
       },
       sites: {
         id: 1,
         name: 'Site A',
-        url: 'https://probe.example.com',
+        url: 'https://www.probe.example.com',
         platform: 'new-api',
       },
     });
@@ -191,8 +202,9 @@ describe('accountProbeService', () => {
       replyText: '你好，我在线。',
     });
     expect(buildUpstreamEndpointRequestMock).toHaveBeenCalledWith(expect.objectContaining({
-      tokenValue: 'sk-direct-account',
+      tokenValue: '***',
       modelName: 'gpt-4.1-mini',
+      siteUrl: 'https://api.probe.example.com/v1',
     }));
   });
 

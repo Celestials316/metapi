@@ -5,6 +5,7 @@ const buildUpstreamEndpointRequestMock = vi.fn();
 const dispatchRuntimeRequestMock = vi.fn();
 const resolveChannelProxyUrlMock = vi.fn();
 const withSiteRecordProxyRequestInitMock = vi.fn();
+const resolveSiteApiBaseUrlMock = vi.fn();
 
 vi.mock('../routes/proxy/upstreamEndpoint.js', () => ({
   resolveUpstreamEndpointCandidates: (...args: unknown[]) => resolveUpstreamEndpointCandidatesMock(...args),
@@ -20,11 +21,15 @@ vi.mock('./siteProxy.js', () => ({
   withSiteRecordProxyRequestInit: (...args: unknown[]) => withSiteRecordProxyRequestInitMock(...args),
 }));
 
+vi.mock('./siteApiEndpointService.js', () => ({
+  resolveSiteApiBaseUrl: (...args: unknown[]) => resolveSiteApiBaseUrlMock(...args),
+}));
+
 describe('probeRuntimeModel', () => {
   const site = {
     id: 1,
     name: 'probe-site',
-    url: 'https://probe.example.com',
+    url: 'https://www.probe.example.com',
     platform: 'new-api',
     status: 'active',
   } as any;
@@ -46,6 +51,7 @@ describe('probeRuntimeModel', () => {
     dispatchRuntimeRequestMock.mockReset();
     resolveChannelProxyUrlMock.mockReset();
     withSiteRecordProxyRequestInitMock.mockReset();
+    resolveSiteApiBaseUrlMock.mockReset();
 
     buildUpstreamEndpointRequestMock.mockReturnValue({
       path: '/v1/chat/completions',
@@ -58,6 +64,7 @@ describe('probeRuntimeModel', () => {
       },
     });
     resolveChannelProxyUrlMock.mockReturnValue(null);
+    resolveSiteApiBaseUrlMock.mockResolvedValue('https://api.probe.example.com/v1');
     withSiteRecordProxyRequestInitMock.mockImplementation(async (_site: unknown, init: RequestInit) => init);
   });
 
@@ -112,5 +119,11 @@ describe('probeRuntimeModel', () => {
     expect(result.status).toBe('inconclusive');
     expect(result.latencyMs).not.toBeNull();
     expect(elapsedMs).toBeLessThan(200);
+    expect(buildUpstreamEndpointRequestMock).toHaveBeenCalledWith(expect.objectContaining({
+      siteUrl: 'https://api.probe.example.com/v1',
+    }));
+    expect(dispatchRuntimeRequestMock).toHaveBeenCalledWith(expect.objectContaining({
+      siteUrl: 'https://api.probe.example.com/v1',
+    }));
   });
 });

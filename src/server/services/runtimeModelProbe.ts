@@ -1,6 +1,7 @@
 import { getOauthInfoFromAccount } from './oauth/oauthAccount.js';
 import { buildOauthProviderHeaders } from './oauth/service.js';
 import { resolveChannelProxyUrl, withSiteRecordProxyRequestInit } from './siteProxy.js';
+import { resolveSiteApiBaseUrl } from './siteApiEndpointService.js';
 import { dispatchRuntimeRequest } from './runtimeDispatch.js';
 import {
   buildUpstreamEndpointRequest,
@@ -155,6 +156,14 @@ export async function probeRuntimeModel(input: {
       account: input.account,
       downstreamHeaders: {},
     });
+    const resolvedSiteApiBaseUrl = await resolveSiteApiBaseUrl(input.site);
+    if (!resolvedSiteApiBaseUrl) {
+      return {
+        status: 'inconclusive',
+        latencyMs: Date.now() - startedAt,
+        reason: '当前站点的 API 请求地址均不可用',
+      };
+    }
     const openaiBody = buildProbeBody(input.modelName);
     const channelProxyUrl = resolveChannelProxyUrl(input.site, input.account.extraConfig);
     const abortController = new AbortController();
@@ -176,7 +185,7 @@ export async function probeRuntimeModel(input: {
         oauthProvider: oauth?.provider,
         oauthProjectId: oauth?.projectId,
         sitePlatform: input.site.platform,
-        siteUrl: input.site.url,
+        siteUrl: resolvedSiteApiBaseUrl,
         openaiBody,
         downstreamFormat: 'openai',
         downstreamHeaders: {},
@@ -195,7 +204,7 @@ export async function probeRuntimeModel(input: {
       targetUrl: string,
     ) => (
       dispatchRuntimeRequest({
-        siteUrl: input.site.url,
+        siteUrl: resolvedSiteApiBaseUrl,
         targetUrl,
         request,
         buildInit: (_requestUrl, requestForFetch) => withSiteRecordProxyRequestInit(
@@ -214,7 +223,7 @@ export async function probeRuntimeModel(input: {
     let result: Awaited<ReturnType<typeof executeEndpointFlow>>;
     try {
       result = await executeEndpointFlow({
-        siteUrl: input.site.url,
+        siteUrl: resolvedSiteApiBaseUrl,
         proxyUrl: channelProxyUrl,
         endpointCandidates,
         buildRequest,
