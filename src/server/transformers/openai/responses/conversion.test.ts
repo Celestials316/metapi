@@ -1695,6 +1695,34 @@ describe('convertResponsesBodyToOpenAiBody', () => {
     }
   });
 
+  it('preserves explicit store=false across all compatibility retry bodies', () => {
+    const candidates = buildResponsesCompatibilityBodies({
+      model: 'gpt-5',
+      input: 'hello',
+      stream: true,
+      instructions: 'be helpful',
+      store: false,
+      tools: [{
+        type: 'function',
+        function: {
+          name: 'lookup_weather',
+          parameters: {
+            type: 'object',
+            properties: {
+              city: { type: 'string' },
+            },
+          },
+        },
+      }],
+      tool_choice: 'auto',
+    });
+
+    expect(candidates.length).toBeGreaterThan(0);
+    for (const candidate of candidates) {
+      expect(candidate.store).toBe(false);
+    }
+  });
+
   it('maps native tool choices and strict function tools into OpenAI-compatible fallback bodies', () => {
     const result = convertResponsesBodyToOpenAiBody(
       {

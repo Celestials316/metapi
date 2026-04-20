@@ -21,6 +21,7 @@ export function buildResponsesCompatibilityBodies(
 ): Record<string, unknown>[] {
   const candidates: Record<string, unknown>[] = [];
   const seen = new Set<string>();
+  const preserveExplicitStoreFalse = body.store === false;
   try {
     const originalKey = JSON.stringify(body);
     if (originalKey) seen.add(originalKey);
@@ -81,6 +82,7 @@ export function buildResponsesCompatibilityBodies(
       if (body[key] === undefined) continue;
       richCandidate[key] = cloneJsonValue(body[key]);
     }
+    if (preserveExplicitStoreFalse) richCandidate.store = false;
     push(richCandidate);
   }
   push(buildStrictResponsesBody(body));
@@ -232,6 +234,7 @@ function buildStrictResponsesBody(
     stream: body.stream === true,
     ...(body.tools !== undefined ? { tools: cloneJsonValue(body.tools) } : {}),
     ...(body.tool_choice !== undefined ? { tool_choice: cloneJsonValue(body.tool_choice) } : {}),
+    ...(body.store === false ? { store: false } : {}),
     ...(explicitInstructions !== null
       ? { instructions: explicitInstructions }
       : {}),
