@@ -121,6 +121,8 @@ export function buildCodexRuntimeHeaders(input: {
   userAgentDefault?: string;
   userAgentOverride?: string | null;
   preserveBaseUserAgent?: boolean;
+  preserveBaseOriginator?: boolean;
+  preserveBaseVersion?: boolean;
   originatorDefault?: string;
   codexBetaFeatures?: string | null;
   codexTurnState?: string | null;
@@ -134,12 +136,12 @@ export function buildCodexRuntimeHeaders(input: {
     || ''
   );
   const originator = getInputHeader(input.providerHeaders, 'originator')
-    || getInputHeader(input.baseHeaders, 'originator')
+    || (input.preserveBaseOriginator === false ? null : getInputHeader(input.baseHeaders, 'originator'))
     || input.originatorDefault
     || 'codex_cli_rs';
   const accountId = getInputHeader(input.providerHeaders, 'chatgpt-account-id')
     || getInputHeader(input.baseHeaders, 'chatgpt-account-id');
-  const version = getInputHeader(input.baseHeaders, 'version')
+  const version = (input.preserveBaseVersion === false ? null : getInputHeader(input.baseHeaders, 'version'))
     || input.versionDefault
     || CODEX_CLIENT_VERSION;
   const clientUserAgent = input.preserveBaseUserAgent === false

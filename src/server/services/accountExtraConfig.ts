@@ -1,5 +1,8 @@
+import { and, eq, isNull } from 'drizzle-orm';
 import { config } from '../config.js';
 import type { SubscriptionPlanSummary, SubscriptionSummary } from './platforms/base.js';
+
+type DbIndexModule = typeof import('../db/index.js');
 
 type AutoReloginConfig = {
   username?: unknown;
@@ -56,7 +59,7 @@ function isOauthProviderCarrier(value: unknown): value is OauthProviderCarrier {
   return isRecord(value) && ('extraConfig' in value || 'oauthProvider' in value);
 }
 
-function parseExtraConfig(extraConfig?: ExtraConfigInput): AccountExtraConfig {
+export function parseExtraConfig(extraConfig?: ExtraConfigInput): AccountExtraConfig {
   if (!extraConfig) return {};
   if (isRecord(extraConfig)) return extraConfig as AccountExtraConfig;
   if (typeof extraConfig !== 'string') return {};
@@ -354,6 +357,70 @@ export function mergeAccountExtraConfig(
     ...patch,
   };
   return JSON.stringify(merged);
+}
+
+type AccountExtraConfigSnapshot = {
+  id: number;
+  extraConfig: string | null;
+  updatedAt: string | null;
+};
+
+type MergeAccountExtraConfigMutation<T> = {
+  patch: Record<string, unknown>;
+  result: T;
+};
+
+let dbIndexModulePromise: Promise<DbIndexModule> | null = null;
+
+async function loadDbIndexModule(): Promise<DbIndexModule> {
+  dbIndexModulePromise ??= import('../db/index.js');
+  return await dbIndexModulePromise;
+}
+
+function buildAccountExtraConfigSnapshotWhere(snapshot: AccountExtraConfigSnapshot, schema: DbIndexModule['schema']) {
+  return and(
+    eq(schema.accounts.id, snapshot.id),
+    snapshot.updatedAt == null ? isNull(schema.accounts.updatedAt) : eq(schema.accounts.updatedAt, snapshot.updatedAt),
+    snapshot.extraConfig == null ? isNull(schema.accounts.extraConfig) : eq(schema.accounts.extraConfig, snapshot.extraConfig),
+  );
+}
+
+async function loadAccountExtraConfigSnapshot(accountId: number): Promise<AccountExtraConfigSnapshot | null> {
+  const { db, schema } = await loadDbIndexModule();
+  return await db.select({
+    id: schema.accounts.id,
+    extraConfig: schema.accounts.extraConfig,
+    updatedAt: schema.accounts.updatedAt,
+  }).from(schema.accounts)
+    .where(eq(schema.accounts.id, accountId))
+    .get();
+}
+
+export async function mergeAccountExtraConfigWithRetry<T>(
+  accountId: number,
+  buildMutation: (current: AccountExtraConfig, snapshot: AccountExtraConfigSnapshot) => Promise<MergeAccountExtraConfigMutation<T> | null> | MergeAccountExtraConfigMutation<T> | null,
+  maxAttempts = 8,
+): Promise<T | null> {
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const snapshot = await loadAccountExtraConfigSnapshot(accountId);
+    if (!snapshot) return null;
+    const current = parseExtraConfig(snapshot.extraConfig);
+    const mutation = await buildMutation(current, snapshot);
+    if (!mutation) return null;
+    const nextExtraConfig = mergeAccountExtraConfig(snapshot.extraConfig, mutation.patch);
+    const { db, schema } = await loadDbIndexModule();
+    const result = await db.update(schema.accounts)
+      .set({
+        extraConfig: nextExtraConfig,
+        updatedAt: new Date().toISOString(),
+      })
+      .where(buildAccountExtraConfigSnapshotWhere(snapshot, schema))
+      .run();
+    if ((result as { changes?: number } | undefined)?.changes === 1) {
+      return mutation.result;
+    }
+  }
+  throw new Error(`mergeAccountExtraConfigWithRetry failed after ${maxAttempts} attempts for account ${accountId}`);
 }
 
 export function getAutoReloginConfig(extraConfig?: ExtraConfigInput): {

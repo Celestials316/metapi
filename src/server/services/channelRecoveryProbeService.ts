@@ -4,6 +4,7 @@ import { isUsableAccountToken } from './accountTokenService.js';
 import { getOauthInfoFromAccount } from './oauth/oauthAccount.js';
 import { proxyChannelCoordinator } from './proxyChannelCoordinator.js';
 import { probeRuntimeModel } from './runtimeModelProbe.js';
+import { recordProxyOpsRecoverySignal } from './proxyOpsSignals.js';
 import { tokenRouter } from './tokenRouter.js';
 import { isExactTokenRouteModelPattern } from '../../shared/tokenRoutePatterns.js';
 
@@ -216,6 +217,14 @@ async function runRecoveryProbeCandidate(candidate: RecoveryProbeCandidate, nowM
       tokenValue: candidate.tokenValue,
       timeoutMs: CHANNEL_RECOVERY_PROBE_TIMEOUT_MS,
     });
+    await recordProxyOpsRecoverySignal(candidate.account.id, {
+      channelId: candidate.channelId,
+      modelName: candidate.modelName,
+      source: candidate.source,
+      status: result.status,
+      latencyMs: result.latencyMs,
+      reason: result.reason,
+    });
     if (result.status === 'supported') {
       await tokenRouter.recordProbeSuccess(
         candidate.channelId,
@@ -226,6 +235,14 @@ async function runRecoveryProbeCandidate(candidate: RecoveryProbeCandidate, nowM
     }
   } catch (error) {
     console.warn(`[channel-recovery-probe] channel ${candidate.channelId} probe failed`, error);
+    await recordProxyOpsRecoverySignal(candidate.account.id, {
+      channelId: candidate.channelId,
+      modelName: candidate.modelName,
+      source: candidate.source,
+      status: 'failed',
+      latencyMs: null,
+      reason: error instanceof Error ? error.message : 'channel recovery probe failed',
+    });
   } finally {
     recoveryProbeInFlightKeys.delete(key);
   }

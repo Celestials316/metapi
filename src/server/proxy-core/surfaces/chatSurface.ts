@@ -11,6 +11,7 @@ import {
   resolveUpstreamEndpointCandidates,
 } from '../../services/upstreamEndpointRuntime.js';
 import {
+  ensureUpstreamEndpointRuntimeStateLoaded,
   getUpstreamEndpointRuntimeStateSnapshot,
   recordUpstreamEndpointFailure,
   recordUpstreamEndpointSuccess,
@@ -385,6 +386,16 @@ export async function handleChatSurfaceRequest(
             siteUrl: siteApiBaseUrl,
             buildRequest: (endpoint) => buildEndpointRequest(endpoint),
             dispatchRequest,
+            onRecoveredSuccess: ({ failedRequest, failedResponse, failedRawErrText }) => failureToolkit.log({
+              selected,
+              modelRequested: requestedModel,
+              status: 'retried',
+              httpStatus: failedResponse.status,
+              latencyMs: Date.now() - startTime,
+              errorMessage: failedRawErrText || 'unknown error',
+              retryCount,
+              upstreamPath: failedRequest.path,
+            }),
           });
           if (recovered?.upstream?.ok) {
             return recovered;
@@ -406,6 +417,7 @@ export async function handleChatSurfaceRequest(
           ctx.rawErrText || ctx.errText,
         ),
         onAttemptFailure: async (ctx) => {
+          await ensureUpstreamEndpointRuntimeStateLoaded(endpointRuntimeContext.siteId);
           const memoryWrite = recordUpstreamEndpointFailure({
             ...endpointRuntimeContext,
             endpoint: ctx.request.endpoint,
@@ -431,6 +443,7 @@ export async function handleChatSurfaceRequest(
           });
         },
         onAttemptSuccess: async (ctx) => {
+          await ensureUpstreamEndpointRuntimeStateLoaded(endpointRuntimeContext.siteId);
           const memoryWrite = recordUpstreamEndpointSuccess({
             ...endpointRuntimeContext,
             endpoint: ctx.request.endpoint,
@@ -1297,6 +1310,16 @@ export async function handleClaudeCountTokensSurfaceRequest(
             buildRequest: () => buildRequest(),
             dispatchRequest,
             captureFailureBody: false,
+            onRecoveredSuccess: ({ failedRequest, failedResponse, failedRawErrText }) => failureToolkit.log({
+              selected,
+              modelRequested: requestedModel,
+              status: 'retried',
+              httpStatus: failedResponse.status,
+              latencyMs: Date.now() - startTime,
+              errorMessage: failedRawErrText || 'unknown error',
+              retryCount,
+              upstreamPath: failedRequest.path,
+            }),
           });
           if (recovered?.upstream?.ok) {
             upstreamRequest = buildRequest();

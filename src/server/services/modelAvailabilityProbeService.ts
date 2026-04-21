@@ -4,6 +4,7 @@ import { db, schema } from '../db/index.js';
 import { startBackgroundTask } from './backgroundTaskService.js';
 import { isUsableAccountToken, ACCOUNT_TOKEN_VALUE_STATUS_READY } from './accountTokenService.js';
 import { probeRuntimeModel } from './runtimeModelProbe.js';
+import { recordProxyOpsModelProbeSummary } from './proxyOpsSignals.js';
 import * as routeRefreshWorkflow from './routeRefreshWorkflow.js';
 
 type ProbeStatus = 'supported' | 'unsupported' | 'inconclusive' | 'skipped';
@@ -346,7 +347,7 @@ export async function executeModelAvailabilityProbe(input: {
         }
       }
 
-      results.push({
+      const accountResult: ModelAvailabilityProbeAccountResult = {
         accountId,
         siteId: context.site.id,
         status: failed ? 'failed' : 'success',
@@ -359,6 +360,18 @@ export async function executeModelAvailabilityProbe(input: {
         message: failed
           ? 'model availability probe finished with partial failures'
           : 'model availability probe finished',
+      };
+      results.push(accountResult);
+      await recordProxyOpsModelProbeSummary(accountId, {
+        lastProbeAt: new Date().toISOString(),
+        scanned: accountResult.scanned,
+        supported: accountResult.supported,
+        unsupported: accountResult.unsupported,
+        inconclusive: accountResult.inconclusive,
+        skipped: accountResult.skipped,
+        updatedRows: accountResult.updatedRows,
+        status: accountResult.status,
+        message: accountResult.message,
       });
     } finally {
       releaseProbeAccountLease(accountId);

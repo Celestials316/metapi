@@ -29,6 +29,9 @@ import {
   getProxyDebugTraceDetail,
   listProxyDebugTraces,
 } from '../../services/proxyDebugTraceStore.js';
+import { classifyProxyFailure } from '../../services/proxyFailureTaxonomy.js';
+import { getProxyOpsSnapshot } from '../../services/proxyOpsSnapshotService.js';
+import { runChannelRecoveryProbeSweep } from '../../services/channelRecoveryProbeService.js';
 import { parseProxyLogMessageMeta } from '../proxy/logPathMeta.js';
 import { requiresManagedAccountTokens } from '../../services/accountExtraConfig.js';
 import { ACCOUNT_TOKEN_VALUE_STATUS_READY } from '../../services/accountTokenService.js';
@@ -148,6 +151,17 @@ function normalizeProxyLogSiteId(raw?: string): number | null {
   return parsed;
 }
 
+function normalizeProxyLogNumericId(raw?: string): number | null {
+  const parsed = Number.parseInt(raw || '', 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) return null;
+  return parsed;
+}
+
+function normalizeProxyLogFailureClass(raw?: string): string | null {
+  const text = (raw || '').trim().toLowerCase();
+  return text || null;
+}
+
 function normalizeProxyLogClientFilter(raw?: string): ProxyLogClientFilter {
   const text = (raw || '').trim();
   if (!text) return null;
@@ -221,11 +235,106 @@ function buildProxyLogClientCondition(client: ProxyLogClientFilter) {
   return eq(schema.proxyLogs.clientFamily, client.value);
 }
 
+function buildProxyLogFailureClassCondition(className?: string | null) {
+  const normalized = (className || '').trim().toLowerCase();
+  if (!normalized) return null;
+  if (normalized === 'challenge_cloudflare') {
+    return sql<boolean>`(
+      lower(coalesce(${schema.proxyLogs.errorMessage}, '')) like '%cloudflare%'
+      or lower(coalesce(${schema.proxyLogs.errorMessage}, '')) like '%cf-ray%'
+      or lower(coalesce(${schema.proxyLogs.errorMessage}, '')) like '%attention required%'
+      or lower(coalesce(${schema.proxyLogs.errorMessage}, '')) like '%cdn-cgi/challenge%'
+    )`;
+  }
+  if (normalized === 'challenge_turnstile') {
+    return sql<boolean>`(
+      lower(coalesce(${schema.proxyLogs.errorMessage}, '')) like '%turnstile%'
+      or lower(coalesce(${schema.proxyLogs.errorMessage}, '')) like '%captcha%'
+      or lower(coalesce(${schema.proxyLogs.errorMessage}, '')) like '%verify you are human%'
+    )`;
+  }
+  if (normalized === 'challenge_shield') {
+    return sql<boolean>`(
+      (${schema.proxyLogs.httpStatus} in (400, 403, 503))
+      and (
+        lower(coalesce(${schema.proxyLogs.errorMessage}, '')) like '%shield%'
+        or lower(coalesce(${schema.proxyLogs.errorMessage}, '')) like '%blocked by waf%'
+        or lower(coalesce(${schema.proxyLogs.errorMessage}, '')) like '%request was blocked%'
+        or lower(coalesce(${schema.proxyLogs.errorMessage}, '')) like '%<html%'
+      )
+    )`;
+  }
+  if (normalized === 'rate_limit') {
+    return sql<boolean>`(
+      ${schema.proxyLogs.httpStatus} = 429
+      or lower(coalesce(${schema.proxyLogs.errorMessage}, '')) like '%rate limit%'
+      or lower(coalesce(${schema.proxyLogs.errorMessage}, '')) like '%too many requests%'
+    )`;
+  }
+  if (normalized === 'quota_exceeded') {
+    return sql<boolean>`(
+      lower(coalesce(${schema.proxyLogs.errorMessage}, '')) like '%quota exceeded%'
+      or lower(coalesce(${schema.proxyLogs.errorMessage}, '')) like '%insufficient quota%'
+      or lower(coalesce(${schema.proxyLogs.errorMessage}, '')) like '%余额不足%'
+      or lower(coalesce(${schema.proxyLogs.errorMessage}, '')) like '%配额不足%'
+    )`;
+  }
+  if (normalized === 'auth_invalid' || normalized === 'auth_expired') {
+    return sql<boolean>`(
+      ${schema.proxyLogs.httpStatus} in (401, 403)
+      or lower(coalesce(${schema.proxyLogs.errorMessage}, '')) like '%token expired%'
+      or lower(coalesce(${schema.proxyLogs.errorMessage}, '')) like '%invalid token%'
+      or lower(coalesce(${schema.proxyLogs.errorMessage}, '')) like '%unauthorized%'
+    )`;
+  }
+  if (normalized === 'timeout') {
+    return sql<boolean>`(
+      lower(coalesce(${schema.proxyLogs.errorMessage}, '')) like '%timeout%'
+      or lower(coalesce(${schema.proxyLogs.errorMessage}, '')) like '%timed out%'
+    )`;
+  }
+  if (normalized === 'network') {
+    return sql<boolean>`(
+      lower(coalesce(${schema.proxyLogs.errorMessage}, '')) like '%network error%'
+      or lower(coalesce(${schema.proxyLogs.errorMessage}, '')) like '%econnreset%'
+      or lower(coalesce(${schema.proxyLogs.errorMessage}, '')) like '%socket hang up%'
+      or lower(coalesce(${schema.proxyLogs.errorMessage}, '')) like '%connection refused%'
+    )`;
+  }
+  if (normalized === 'model_unsupported') {
+    return sql<boolean>`(
+      lower(coalesce(${schema.proxyLogs.errorMessage}, '')) like '%unsupported model%'
+      or lower(coalesce(${schema.proxyLogs.errorMessage}, '')) like '%does not exist%'
+      or lower(coalesce(${schema.proxyLogs.errorMessage}, '')) like '%不支持所选模型%'
+    )`;
+  }
+  if (normalized === 'request_shape') {
+    return sql<boolean>`(
+      ${schema.proxyLogs.httpStatus} in (400, 404, 422)
+      and (
+        lower(coalesce(${schema.proxyLogs.errorMessage}, '')) like '%invalid request body%'
+        or lower(coalesce(${schema.proxyLogs.errorMessage}, '')) like '%unprocessable%'
+        or lower(coalesce(${schema.proxyLogs.errorMessage}, '')) like '%schema validation%'
+      )
+    )`;
+  }
+  if (normalized === 'upstream_5xx') {
+    return sql<boolean>`${schema.proxyLogs.httpStatus} >= 500`;
+  }
+  if (normalized === 'covered_failure') {
+    return eq(schema.proxyLogs.status, 'retried');
+  }
+  return null;
+}
+
 function buildProxyLogWhereClause(params: {
   status?: ProxyLogStatusFilter;
   search?: string;
   client?: ProxyLogClientFilter;
   siteId?: number | null;
+  accountId?: number | null;
+  channelId?: number | null;
+  failureClass?: string | null;
   fromUtc?: string | null;
   toUtc?: string | null;
 }) {
@@ -234,6 +343,9 @@ function buildProxyLogWhereClause(params: {
     params.search ? buildProxyLogSearchCondition(params.search) : null,
     params.client ? buildProxyLogClientCondition(params.client) : null,
     params.siteId ? eq(schema.sites.id, params.siteId) : null,
+    params.accountId ? eq(schema.proxyLogs.accountId, params.accountId) : null,
+    params.channelId ? eq(schema.proxyLogs.channelId, params.channelId) : null,
+    params.failureClass ? buildProxyLogFailureClassCondition(params.failureClass) : null,
     params.fromUtc ? gte(schema.proxyLogs.createdAt, params.fromUtc) : null,
     params.toUtc ? lt(schema.proxyLogs.createdAt, params.toUtc) : null,
   ].filter((condition): condition is NonNullable<typeof condition> => condition !== null);
@@ -258,6 +370,23 @@ function normalizeClientConfidence(value: unknown): string | null {
     return normalized;
   }
   return null;
+}
+
+function matchesProxyLogFailureClassFilter(
+  proxyLog: Record<string, unknown>,
+  failureClass?: string | null,
+): boolean {
+  const normalized = (failureClass || '').trim().toLowerCase();
+  if (!normalized) return true;
+  if (normalized === 'covered_failure') {
+    return String(proxyLog.status || '').trim().toLowerCase() === 'retried';
+  }
+  const httpStatus = Number(proxyLog.httpStatus);
+  const classified = classifyProxyFailure({
+    status: Number.isFinite(httpStatus) ? httpStatus : undefined,
+    errorMessage: normalizeNullableText(proxyLog.errorMessage) || undefined,
+  });
+  return classified.className === normalized;
 }
 
 function displayProxyLogClientFamily(value: string | null): string | null {
@@ -495,6 +624,10 @@ function mapProxyLogRow(
 ) {
   const clientMeta = resolveProxyLogClientMeta(row.proxy_logs);
   const legacyMeta = parseProxyLogMessageMeta(typeof row.proxy_logs.errorMessage === 'string' ? row.proxy_logs.errorMessage : '');
+  const failure = classifyProxyFailure({
+    status: typeof row.proxy_logs.httpStatus === 'number' ? row.proxy_logs.httpStatus : null,
+    errorMessage: row.proxy_logs.errorMessage,
+  });
   return {
     ...row.proxy_logs,
     isStream: row.proxy_logs.isStream == null ? null : Boolean(row.proxy_logs.isStream),
@@ -509,6 +642,11 @@ function mapProxyLogRow(
     clientAppName: clientMeta.clientAppName,
     clientConfidence: clientMeta.clientConfidence,
     usageSource: normalizeProxyLogUsageSource(legacyMeta.usageSource),
+    failureClass: row.proxy_logs.status === 'success' ? null : failure.className,
+    failureTitle: row.proxy_logs.status === 'success' ? null : failure.title,
+    sessionId: legacyMeta.sessionId,
+    downstreamPath: legacyMeta.downstreamPath,
+    upstreamPath: legacyMeta.upstreamPath,
     username: row.accounts?.username || null,
     siteId: row.sites?.id || null,
     siteName: row.sites?.name || null,
@@ -695,6 +833,20 @@ export async function statsRoutes(app: FastifyInstance) {
   });
 
   // Proxy logs
+  app.get<{ Querystring: { accountId?: string; limit?: string } }>('/api/stats/proxy-ops', async (request) => {
+    const accountId = normalizeProxyLogNumericId(request.query.accountId);
+    const limit = Number.isFinite(Number(request.query.limit)) ? Math.max(1, Math.min(200, Number(request.query.limit))) : 100;
+    return getProxyOpsSnapshot({ accountId, limit });
+  });
+
+  app.post('/api/stats/proxy-ops/recovery-sweep', async () => {
+    await runChannelRecoveryProbeSweep();
+    return {
+      success: true,
+      triggeredAt: new Date().toISOString(),
+    };
+  });
+
   app.get<{ Querystring: {
     limit?: string;
     offset?: string;
@@ -702,6 +854,9 @@ export async function statsRoutes(app: FastifyInstance) {
     search?: string;
     client?: string;
     siteId?: string;
+    accountId?: string;
+    channelId?: string;
+    failureClass?: string;
     from?: string;
     to?: string;
   } }>('/api/stats/proxy-logs', async (request) => {
@@ -711,11 +866,83 @@ export async function statsRoutes(app: FastifyInstance) {
     const search = normalizeProxyLogSearch(request.query.search);
     const client = normalizeProxyLogClientFilter(request.query.client);
     const siteId = normalizeProxyLogSiteId(request.query.siteId);
+    const accountId = normalizeProxyLogNumericId(request.query.accountId);
+    const channelId = normalizeProxyLogNumericId(request.query.channelId);
+    const failureClass = normalizeProxyLogFailureClass(request.query.failureClass);
     const fromUtc = normalizeProxyLogTimeBoundary(request.query.from);
     const toUtc = normalizeProxyLogTimeBoundary(request.query.to);
-    const listWhere = buildProxyLogWhereClause({ status, search, client, siteId, fromUtc, toUtc });
-    const summaryWhere = buildProxyLogWhereClause({ search, client, siteId, fromUtc, toUtc });
-    const clientOptionsWhere = buildProxyLogWhereClause({ status, search, siteId, fromUtc, toUtc });
+    const listWhere = buildProxyLogWhereClause({ status, search, client, siteId, accountId, channelId, fromUtc, toUtc });
+    const summaryWhere = buildProxyLogWhereClause({ search, client, siteId, accountId, channelId, fromUtc, toUtc });
+    const clientOptionsWhere = buildProxyLogWhereClause({ status, search, siteId, accountId, channelId, fromUtc, toUtc });
+
+    if (failureClass) {
+      const filteredRows = await withProxyLogSelectFields(({ fields }) => {
+        let query = db.select({
+          proxy_logs: fields,
+          accounts: schema.accounts,
+          sites: schema.sites,
+          downstream_api_keys: {
+            id: schema.downstreamApiKeys.id,
+            name: schema.downstreamApiKeys.name,
+            groupName: schema.downstreamApiKeys.groupName,
+            tags: schema.downstreamApiKeys.tags,
+          },
+        }).from(schema.proxyLogs)
+          .leftJoin(schema.accounts, eq(schema.proxyLogs.accountId, schema.accounts.id))
+          .leftJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
+          .leftJoin(schema.downstreamApiKeys, eq(schema.proxyLogs.downstreamApiKeyId, schema.downstreamApiKeys.id));
+
+        if (listWhere) {
+          query = query.where(listWhere) as typeof query;
+        }
+
+        return query
+          .orderBy(desc(schema.proxyLogs.createdAt))
+          .all();
+      }, { includeBillingDetails: false }) as Array<{
+        proxy_logs: Record<string, unknown> & { billingDetails?: string | null };
+        accounts: { username?: string | null } | null;
+        sites: { id?: number | null; name?: string | null; url?: string | null } | null;
+        downstream_api_keys: { id?: number | null; name?: string | null; groupName?: string | null; tags?: string | null } | null;
+      }>;
+
+      const matchingRows = filteredRows.filter((row) => matchesProxyLogFailureClassFilter(row.proxy_logs, failureClass));
+      const pagedRows = matchingRows.slice(offset, offset + limit);
+      const summary = matchingRows.reduce((acc, row) => {
+        const statusText = String(row.proxy_logs.status || '').trim().toLowerCase();
+        if (statusText === 'success') acc.successCount += 1;
+        else acc.failedCount += 1;
+        acc.totalCount += 1;
+        acc.totalCost += Number(row.proxy_logs.estimatedCost || 0);
+        acc.totalTokensAll += Number(row.proxy_logs.totalTokens || 0);
+        return acc;
+      }, {
+        totalCount: 0,
+        successCount: 0,
+        failedCount: 0,
+        totalCost: 0,
+        totalTokensAll: 0,
+      });
+
+      return {
+        items: pagedRows.map((row) => mapProxyLogRow(row)),
+        total: matchingRows.length,
+        page: Math.floor(offset / limit) + 1,
+        pageSize: limit,
+        clientOptions: buildProxyLogClientOptions(matchingRows.map((row) => ({
+          clientFamily: row.proxy_logs.clientFamily as string | null | undefined,
+          clientAppId: row.proxy_logs.clientAppId as string | null | undefined,
+          clientAppName: row.proxy_logs.clientAppName as string | null | undefined,
+        }))),
+        summary: {
+          totalCount: summary.totalCount,
+          successCount: summary.successCount,
+          failedCount: summary.failedCount,
+          totalCost: toRoundedMicroNumber(summary.totalCost),
+          totalTokensAll: summary.totalTokensAll,
+        },
+      };
+    }
 
     const listRows = await withProxyLogSelectFields(({ fields }) => {
       let query = db.select({

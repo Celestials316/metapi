@@ -6,6 +6,8 @@ import {
   hasProxyLogDownstreamApiKeyIdColumn,
   hasProxyLogStreamTimingColumns,
 } from '../db/index.js';
+import { classifyProxyFailure } from './proxyFailureTaxonomy.js';
+import { recordProxyOpsProtectionSignal } from './proxyOpsSignals.js';
 
 export type ProxyLogInsertInput = {
   routeId?: number | null;
@@ -256,6 +258,31 @@ export function isMissingProxyLogStreamTimingColumnsError(error: unknown): boole
     );
 }
 
+async function maybeRecordProtectionSignal(input: ProxyLogInsertInput): Promise<void> {
+  const accountId = Number(input.accountId);
+  const status = String(input.status || '').trim().toLowerCase();
+  if (!Number.isFinite(accountId) || accountId <= 0) return;
+  if (!status || status === 'success') return;
+
+  const classification = classifyProxyFailure({
+    status: input.httpStatus,
+    errorMessage: input.errorMessage,
+  });
+  if (!classification.challenge) return;
+
+  try {
+    await recordProxyOpsProtectionSignal(accountId, {
+      className: classification.className,
+      title: classification.title,
+      summary: classification.summary,
+      status: input.httpStatus ?? null,
+      recordedAt: input.createdAt ?? new Date().toISOString(),
+    });
+  } catch {
+    // Proxy Ops 信号写入失败不能影响主日志落库
+  }
+}
+
 export async function insertProxyLog(input: ProxyLogInsertInput): Promise<void> {
   const baseValues = {
     routeId: input.routeId ?? null,
@@ -321,6 +348,7 @@ export async function insertProxyLog(input: ProxyLogInsertInput): Promise<void> 
 
     try {
       await db.insert(schema.proxyLogs).values(values).run();
+      await maybeRecordProtectionSignal(input);
       return;
     } catch (error) {
       if (allowBillingDetails && isMissingBillingDetailsColumnError(error)) {

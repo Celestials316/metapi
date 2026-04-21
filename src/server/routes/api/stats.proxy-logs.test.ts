@@ -101,6 +101,7 @@ describe('stats proxy logs routes', () => {
         completionTokens: 2,
         totalTokens: 10,
         estimatedCost: 0.2,
+        errorMessage: '[session:sess-api-1] [downstream:/v1/responses] [upstream:/responses] upstream returned 401',
         createdAt: timestamps[1],
         billingDetails: JSON.stringify({ id: 'failed-gpt' }),
       },
@@ -173,6 +174,9 @@ describe('stats proxy logs routes', () => {
     expect(body.items[0]?.clientConfidence).toBe(null);
     expect(body.items[0]?.isStream).toBe(false);
     expect(body.items[0]?.firstByteLatencyMs).toBe(12);
+    expect(body.items[0]?.sessionId).toBe('sess-api-1');
+    expect(body.items[0]?.downstreamPath).toBe('/v1/responses');
+    expect(body.items[0]?.upstreamPath).toBe('/responses');
     expect(body.items[0]).not.toHaveProperty('billingDetails');
     expect(body.clientOptions).toEqual([
       { value: 'family:codex', label: '协议 · Codex' },
@@ -184,6 +188,92 @@ describe('stats proxy logs routes', () => {
       totalCost: 0.6,
       totalTokensAll: 49,
     });
+  });
+
+  it('filters proxy logs by accountId, channelId, and taxonomy-aligned failureClass', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'failure-filter-site',
+      url: 'https://failure-filter.example.com',
+      platform: 'codex',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'failure-user',
+      accessToken: 'failure-token',
+      status: 'active',
+    }).returning().get();
+
+    const timestamps = [
+      formatUtcSqlDateTime(new Date('2026-04-21T08:00:00.000Z')),
+      formatUtcSqlDateTime(new Date('2026-04-21T08:01:00.000Z')),
+      formatUtcSqlDateTime(new Date('2026-04-21T08:02:00.000Z')),
+    ];
+
+    await db.insert(schema.proxyLogs).values([
+      {
+        accountId: account.id,
+        channelId: 11,
+        modelRequested: 'gpt-5',
+        modelActual: 'gpt-5',
+        status: 'failed',
+        httpStatus: 401,
+        errorMessage: 'token expired, please refresh account oauth token',
+        createdAt: timestamps[0],
+      },
+      {
+        accountId: account.id,
+        channelId: 11,
+        modelRequested: 'gpt-4.1',
+        modelActual: 'gpt-4.1',
+        status: 'failed',
+        httpStatus: 401,
+        errorMessage: 'invalid access token supplied',
+        createdAt: timestamps[1],
+      },
+      {
+        accountId: account.id,
+        channelId: 12,
+        modelRequested: 'gpt-4o',
+        modelActual: 'gpt-4o',
+        status: 'failed',
+        httpStatus: 400,
+        errorMessage: 'invalid request body: unknown parameter top_k',
+        createdAt: timestamps[2],
+      },
+    ]).run();
+
+    const expiredResponse = await app.inject({
+      method: 'GET',
+      url: `/api/stats/proxy-logs?accountId=${account.id}&channelId=11&failureClass=auth_expired`,
+    });
+
+    expect(expiredResponse.statusCode).toBe(200);
+    const expiredBody = expiredResponse.json() as {
+      items: Array<Record<string, unknown>>;
+      total: number;
+      summary: { totalCount: number; failedCount: number };
+    };
+    expect(expiredBody.total).toBe(1);
+    expect(expiredBody.items).toHaveLength(1);
+    expect(expiredBody.items[0]?.modelRequested).toBe('gpt-5');
+    expect(expiredBody.summary).toMatchObject({
+      totalCount: 1,
+      failedCount: 1,
+    });
+
+    const shapeResponse = await app.inject({
+      method: 'GET',
+      url: `/api/stats/proxy-logs?accountId=${account.id}&channelId=12&failureClass=request_shape`,
+    });
+
+    expect(shapeResponse.statusCode).toBe(200);
+    const shapeBody = shapeResponse.json() as {
+      items: Array<Record<string, unknown>>;
+      total: number;
+    };
+    expect(shapeBody.total).toBe(1);
+    expect(shapeBody.items[0]?.modelRequested).toBe('gpt-4o');
   });
 
   it('returns a single proxy log detail with parsed billing details', async () => {

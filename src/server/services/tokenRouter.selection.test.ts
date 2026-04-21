@@ -155,6 +155,51 @@ describe('TokenRouter selection scoring', () => {
     }).returning().get();
   }
 
+  it('skips accounts that are in oauth refresh backoff', async () => {
+    const route = await createRoute('gpt-5.4');
+    const site = await createSite('oauth-refresh-blocked-site');
+    const blockedAccount = await createAccount(site.id, 'oauth-refresh-blocked-user', {
+      extraConfig: JSON.stringify({
+        credentialMode: 'session',
+        oauth: {
+          provider: 'codex',
+          refreshToken: 'blocked-refresh-token',
+          tokenExpiresAt: Date.now() + (60 * 60 * 1000),
+        },
+        oauthRefreshRuntime: {
+          status: 'backoff',
+          consecutiveFailures: 2,
+          backoffUntil: new Date(Date.now() + (5 * 60 * 1000)).toISOString(),
+          lastError: 'refresh retry exhausted',
+        },
+      }),
+    });
+    const healthyAccount = await createAccount(site.id, 'oauth-refresh-healthy-user');
+
+    await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: blockedAccount.id,
+      tokenId: null,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).run();
+    await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: healthyAccount.id,
+      tokenId: null,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).run();
+
+    invalidateTokenRouterCache();
+    const router = new TokenRouter();
+    const selected = await router.selectChannel('gpt-5.4');
+
+    expect(selected?.account.id).toBe(healthyAccount.id);
+  });
+
   it('reuses a preferred channel only while it remains healthy', async () => {
     config.routingWeights = {
       baseWeightFactor: 1,
@@ -404,6 +449,188 @@ describe('TokenRouter selection scoring', () => {
     expect(second?.channel.id).toBe(channel.id);
     expect(first?.account.id).toBe(accountA.id);
     expect(second?.account.id).toBe(accountB.id);
+  });
+
+  it('skips oauth route unit members that are in refresh backoff', async () => {
+    const route = await createRoute('gpt-5.4');
+    const site = await db.insert(schema.sites).values({
+      name: 'oauth-pool-backoff-site',
+      url: 'https://oauth-pool-backoff.example.com',
+      platform: 'codex',
+      status: 'active',
+    }).returning().get();
+    const accountA = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'pool-backoff-a@example.com',
+      accessToken: 'oauth-access-a',
+      apiToken: null,
+      status: 'active',
+      oauthProvider: 'codex',
+      oauthAccountKey: 'pool-backoff-a',
+      extraConfig: JSON.stringify({
+        credentialMode: 'session',
+        oauth: {
+          provider: 'codex',
+          accountId: 'pool-backoff-a',
+          accountKey: 'pool-backoff-a',
+          email: 'pool-backoff-a@example.com',
+          refreshToken: 'refresh-a',
+          tokenExpiresAt: Date.now() + (60 * 60 * 1000),
+        },
+        oauthRefreshRuntime: {
+          status: 'backoff',
+          consecutiveFailures: 2,
+          backoffUntil: new Date(Date.now() + (5 * 60 * 1000)).toISOString(),
+          lastError: 'refresh retry exhausted',
+        },
+      }),
+    }).returning().get();
+    const accountB = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'pool-backoff-b@example.com',
+      accessToken: 'oauth-access-b',
+      apiToken: null,
+      status: 'active',
+      oauthProvider: 'codex',
+      oauthAccountKey: 'pool-backoff-b',
+      extraConfig: JSON.stringify({
+        credentialMode: 'session',
+        oauth: {
+          provider: 'codex',
+          accountId: 'pool-backoff-b',
+          accountKey: 'pool-backoff-b',
+          email: 'pool-backoff-b@example.com',
+        },
+      }),
+    }).returning().get();
+    const unit = await db.insert(schema.oauthRouteUnits).values({
+      siteId: site.id,
+      provider: 'codex',
+      name: 'Codex Pool Backoff',
+      strategy: 'round_robin',
+      enabled: true,
+    }).returning().get();
+    await db.insert(schema.oauthRouteUnitMembers).values([
+      {
+        unitId: unit.id,
+        accountId: accountA.id,
+        sortOrder: 0,
+      },
+      {
+        unitId: unit.id,
+        accountId: accountB.id,
+        sortOrder: 1,
+      },
+    ]).run();
+    const channel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: accountA.id,
+      oauthRouteUnitId: unit.id,
+      tokenId: null,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+      manualOverride: false,
+    }).returning().get();
+
+    invalidateTokenRouterCache();
+    const router = new TokenRouter();
+    const selected = await router.selectChannel('gpt-5.4');
+
+    expect(selected?.channel.id).toBe(channel.id);
+    expect(selected?.account.id).toBe(accountB.id);
+  });
+
+  it('invalidates sibling route caches when an oauth route unit member fails', async () => {
+    const routeA = await createRoute('gpt-5.4');
+    const routeB = await createRoute('gpt-4.1');
+    const site = await db.insert(schema.sites).values({
+      name: 'oauth-pool-shared-cache-site',
+      url: 'https://oauth-pool-shared-cache.example.com',
+      platform: 'codex',
+      status: 'active',
+    }).returning().get();
+    const accountA = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'pool-shared-a@example.com',
+      accessToken: 'oauth-shared-a',
+      apiToken: null,
+      status: 'active',
+      oauthProvider: 'codex',
+      oauthAccountKey: 'pool-shared-a',
+      extraConfig: JSON.stringify({
+        credentialMode: 'session',
+        oauth: {
+          provider: 'codex',
+          accountId: 'pool-shared-a',
+          accountKey: 'pool-shared-a',
+          email: 'pool-shared-a@example.com',
+        },
+      }),
+    }).returning().get();
+    const accountB = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'pool-shared-b@example.com',
+      accessToken: 'oauth-shared-b',
+      apiToken: null,
+      status: 'active',
+      oauthProvider: 'codex',
+      oauthAccountKey: 'pool-shared-b',
+      extraConfig: JSON.stringify({
+        credentialMode: 'session',
+        oauth: {
+          provider: 'codex',
+          accountId: 'pool-shared-b',
+          accountKey: 'pool-shared-b',
+          email: 'pool-shared-b@example.com',
+        },
+      }),
+    }).returning().get();
+    const unit = await db.insert(schema.oauthRouteUnits).values({
+      siteId: site.id,
+      provider: 'codex',
+      name: 'Codex Pool Shared Cache',
+      strategy: 'round_robin',
+      enabled: true,
+    }).returning().get();
+    await db.insert(schema.oauthRouteUnitMembers).values([
+      { unitId: unit.id, accountId: accountA.id, sortOrder: 0 },
+      { unitId: unit.id, accountId: accountB.id, sortOrder: 1 },
+    ]).run();
+    const channelA = await db.insert(schema.routeChannels).values({
+      routeId: routeA.id,
+      accountId: accountA.id,
+      oauthRouteUnitId: unit.id,
+      tokenId: null,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+      manualOverride: false,
+    }).returning().get();
+    await db.insert(schema.routeChannels).values({
+      routeId: routeB.id,
+      accountId: accountA.id,
+      oauthRouteUnitId: unit.id,
+      tokenId: null,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+      manualOverride: false,
+    }).run();
+
+    invalidateTokenRouterCache();
+    const router = new TokenRouter();
+    const initialRouteB = await router.selectChannel('gpt-4.1');
+    expect(initialRouteB?.account.id).toBe(accountA.id);
+
+    await router.recordFailure(channelA.id, {
+      status: 429,
+      errorText: 'rate_limit',
+      modelName: 'gpt-5.4',
+    }, accountA.id);
+
+    const afterFailureRouteB = await router.selectChannel('gpt-4.1');
+    expect(afterFailureRouteB?.account.id).toBe(accountB.id);
   });
 
   it('sticks to one oauth route unit member until that member becomes unavailable', async () => {

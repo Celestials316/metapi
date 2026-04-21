@@ -1,6 +1,7 @@
 import { eq } from 'drizzle-orm';
 import { db, schema } from '../../db/index.js';
 import { getOauthInfoFromAccount } from './oauthAccount.js';
+import { getOauthRefreshBackoffReason } from './refreshGovernance.js';
 import { refreshOauthAccessTokenSingleflight } from './refreshSingleflight.js';
 
 const OAUTH_REFRESH_SCHEDULER_INTERVAL_MS = 60_000;
@@ -40,6 +41,9 @@ function shouldRefreshOauthAccount(input: {
 
   const oauth = getOauthInfoFromAccount(input.account);
   if (!oauth?.refreshToken) return false;
+  if (getOauthRefreshBackoffReason(input.account.extraConfig, input.nowMs)) {
+    return false;
+  }
   if (!(typeof oauth.tokenExpiresAt === 'number' && Number.isFinite(oauth.tokenExpiresAt) && oauth.tokenExpiresAt > 0)) {
     return false;
   }

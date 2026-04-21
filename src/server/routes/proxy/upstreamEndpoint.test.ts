@@ -773,9 +773,9 @@ describe('buildUpstreamEndpointRequest', () => {
       },
     } as any);
 
-    expect(request.headers.Version).toBe('0.202.0');
+    expect(request.headers.Version).toBe('0.101.0');
     expect(request.headers.Session_id).toBe('session-from-client');
-    expect(request.headers['User-Agent']).toBe('OpenClaw/1.0');
+    expect(request.headers['User-Agent']).toBe('codex_cli_rs/0.101.0 (Mac OS 26.0.1; arm64) Apple_Terminal/464');
     expect(request.headers['x-responsesapi-include-timing-metrics']).toBe('1');
     expect(request.headers.origin).toBeUndefined();
     expect(request.headers.referer).toBeUndefined();
@@ -828,8 +828,9 @@ describe('buildUpstreamEndpointRequest', () => {
     expect(request.body.max_completion_tokens).toBeUndefined();
     expect(request.body.temperature).toBe(0.2);
     expect(request.body.top_p).toBe(0.9);
-    expect(request.body.user).toBe('drop-me');
-    expect(request.body.service_tier).toBe('auto');
+    expect(request.body.user).toBeUndefined();
+    expect(request.body.service_tier).toBeUndefined();
+    expect(request.body.metadata).toBeUndefined();
   });
 
   it('applies codex compatibility and runtime headers for codex clients on openai-compatible sites', () => {
@@ -866,11 +867,11 @@ describe('buildUpstreamEndpointRequest', () => {
 
     expect(request.path).toBe('/v1/responses');
     expect(request.headers.Authorization).toBe('Bearer proxy-token');
-    expect(request.headers.Originator).toBe('codex_exec');
+    expect(request.headers.Originator).toBe('codex_cli_rs');
     expect(request.headers['OpenAI-Beta']).toBe('responses=experimental');
     expect(request.headers['User-Agent']).toBe('codex_cli_rs/0.101.0 (Mac OS 26.0.1; arm64) Apple_Terminal/464');
     expect(request.headers['user-agent']).toBeUndefined();
-    expect(request.headers.Originator).toBe('codex_exec');
+    expect(request.headers.Originator).toBe('codex_cli_rs');
     expect(request.headers.originator).toBeUndefined();
     expect(request.headers.Accept).toBe('text/event-stream');
     expect(request.headers.accept).toBeUndefined();

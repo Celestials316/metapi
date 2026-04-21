@@ -1,10 +1,9 @@
-import { eq } from 'drizzle-orm';
-import { db, schema } from '../db/index.js';
 import {
   getCredentialModeFromExtraConfig,
   hasOauthProvider,
-  mergeAccountExtraConfig,
+  mergeAccountExtraConfigWithRetry,
 } from './accountExtraConfig.js';
+import { recordProxyOpsRefreshSignal } from './proxyOpsSignals.js';
 
 export type RuntimeHealthState = 'healthy' | 'unhealthy' | 'degraded' | 'unknown' | 'disabled';
 
@@ -182,12 +181,6 @@ function buildRuntimeHealthPatch(input: {
   };
 }
 
-function applyRuntimeHealthToExtraConfig(extraConfig: string | null | undefined, health: RuntimeHealthInfo): string {
-  return mergeAccountExtraConfig(extraConfig, {
-    runtimeHealth: health,
-  });
-}
-
 export async function setAccountRuntimeHealth(
   accountId: number,
   input: {
@@ -198,22 +191,25 @@ export async function setAccountRuntimeHealth(
   },
 ): Promise<RuntimeHealthInfo | null> {
   try {
-    const query = db.select().from(schema.accounts).where(eq(schema.accounts.id, accountId)) as any;
-    const account = typeof query?.get === 'function' ? await query.get() : null;
-    if (!account) return null;
-
     const health = buildRuntimeHealthPatch(input);
-    const nextExtraConfig = applyRuntimeHealthToExtraConfig(account.extraConfig, health);
+    const persistedHealth = await mergeAccountExtraConfigWithRetry(accountId, async () => ({
+      patch: {
+        runtimeHealth: health,
+      },
+      result: health,
+    }));
+    if (!persistedHealth) return null;
 
-    await db.update(schema.accounts)
-      .set({
-        extraConfig: nextExtraConfig,
-        updatedAt: new Date().toISOString(),
-      })
-      .where(eq(schema.accounts.id, accountId))
-      .run();
+    const refreshSource = (persistedHealth.source || '').trim().toLowerCase();
+    if (refreshSource === 'oauth-refresh') {
+      await recordProxyOpsRefreshSignal(accountId, {
+        lastRefreshAt: persistedHealth.checkedAt || new Date().toISOString(),
+        status: persistedHealth.state === 'healthy' ? 'success' : 'failed',
+        message: persistedHealth.reason,
+      });
+    }
 
-    return health;
+    return persistedHealth;
   } catch {
     return null;
   }

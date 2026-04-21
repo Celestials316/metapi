@@ -398,6 +398,16 @@ function normalizeRouteSiteId(raw: string | null): number | null {
   return parsed;
 }
 
+function normalizeRouteNumericId(raw: string | null): number | null {
+  const parsed = Number.parseInt(raw || '', 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) return null;
+  return parsed;
+}
+
+function normalizeRouteFailureClass(raw: string | null): string {
+  return String(raw || '').trim().toLowerCase();
+}
+
 function normalizeRouteDateTimeInput(raw: string | null): string {
   const text = (raw || '').trim();
   if (!text) return '';
@@ -415,6 +425,9 @@ function readProxyLogsRouteState(search: string) {
     search: normalizeRouteSearch(params.get('q')),
     client: normalizeRouteClient(params.get('client')),
     siteId: normalizeRouteSiteId(params.get('siteId')),
+    accountId: normalizeRouteNumericId(params.get('accountId')),
+    channelId: normalizeRouteNumericId(params.get('channelId')),
+    failureClass: normalizeRouteFailureClass(params.get('failureClass')),
     from: normalizeRouteDateTimeInput(params.get('from')),
     to: normalizeRouteDateTimeInput(params.get('to')),
   };
@@ -427,6 +440,9 @@ function buildProxyLogsRouteSearch(input: {
   search: string;
   client: string;
   siteId: number | null;
+  accountId: number | null;
+  channelId: number | null;
+  failureClass: string;
   from: string;
   to: string;
 }) {
@@ -437,6 +453,9 @@ function buildProxyLogsRouteSearch(input: {
   if (input.search.trim()) params.set('q', input.search.trim());
   if (input.client.trim()) params.set('client', input.client.trim());
   if (input.siteId) params.set('siteId', String(input.siteId));
+  if (input.accountId) params.set('accountId', String(input.accountId));
+  if (input.channelId) params.set('channelId', String(input.channelId));
+  if (input.failureClass.trim()) params.set('failureClass', input.failureClass.trim());
   if (input.from.trim()) params.set('from', input.from.trim());
   if (input.to.trim()) params.set('to', input.to.trim());
   const next = params.toString();
@@ -718,12 +737,30 @@ export default function ProxyLogs() {
       search: searchInput,
       client: clientFilter,
       siteId: siteFilter,
+      accountId: initialRouteState.accountId,
+      channelId: initialRouteState.channelId,
+      failureClass: initialRouteState.failureClass,
       from: fromInput,
       to: toInput,
     });
     if (nextSearch === location.search) return;
     navigate({ pathname: location.pathname, search: nextSearch }, { replace: true });
-  }, [clientFilter, fromInput, location.pathname, location.search, navigate, page, pageSize, searchInput, siteFilter, statusFilter, toInput]);
+  }, [
+    clientFilter,
+    fromInput,
+    initialRouteState.accountId,
+    initialRouteState.channelId,
+    initialRouteState.failureClass,
+    location.pathname,
+    location.search,
+    navigate,
+    page,
+    pageSize,
+    searchInput,
+    siteFilter,
+    statusFilter,
+    toInput,
+  ]);
 
   useEffect(() => {
     let cancelled = false;
@@ -841,6 +878,9 @@ export default function ProxyLogs() {
         search: deferredSearchInput,
         ...(clientFilter ? { client: clientFilter } : {}),
         ...(siteFilter ? { siteId: siteFilter } : {}),
+        ...(initialRouteState.accountId ? { accountId: initialRouteState.accountId } : {}),
+        ...(initialRouteState.channelId ? { channelId: initialRouteState.channelId } : {}),
+        ...(initialRouteState.failureClass ? { failureClass: initialRouteState.failureClass } : {}),
         ...(fromApiBoundary ? { from: fromApiBoundary } : {}),
         ...(toApiBoundaryValue ? { to: toApiBoundaryValue } : {}),
       };
@@ -856,7 +896,21 @@ export default function ProxyLogs() {
     } finally {
       if (seq === loadSeq.current) setLoading(false);
     }
-  }, [clientFilter, currentOffset, deferredSearchInput, fromApiBoundary, hasInvalidTimeRange, pageSize, siteFilter, statusFilter, toApiBoundaryValue, toast]);
+  }, [
+    clientFilter,
+    currentOffset,
+    deferredSearchInput,
+    fromApiBoundary,
+    hasInvalidTimeRange,
+    initialRouteState.accountId,
+    initialRouteState.channelId,
+    initialRouteState.failureClass,
+    pageSize,
+    siteFilter,
+    statusFilter,
+    toApiBoundaryValue,
+    toast,
+  ]);
 
   useEffect(() => {
     void load();
@@ -872,6 +926,76 @@ export default function ProxyLogs() {
     if (page <= totalPages) return;
     setPage(totalPages);
   }, [page, totalPages]);
+
+  const navigateWithRouteState = useCallback((overrides: Partial<ReturnType<typeof readProxyLogsRouteState>>) => {
+    const hasOverride = <K extends keyof ReturnType<typeof readProxyLogsRouteState>>(key: K) => Object.prototype.hasOwnProperty.call(overrides, key);
+    const nextSearch = buildProxyLogsRouteSearch({
+      page: hasOverride('page') ? overrides.page ?? 1 : page,
+      pageSize: hasOverride('pageSize') ? overrides.pageSize ?? DEFAULT_PAGE_SIZE : pageSize,
+      status: hasOverride('status') ? (overrides.status ?? 'all') : statusFilter,
+      search: hasOverride('search') ? (overrides.search ?? '') : searchInput,
+      client: hasOverride('client') ? (overrides.client ?? '') : clientFilter,
+      siteId: hasOverride('siteId') ? (overrides.siteId ?? null) : siteFilter,
+      accountId: hasOverride('accountId') ? (overrides.accountId ?? null) : initialRouteState.accountId,
+      channelId: hasOverride('channelId') ? (overrides.channelId ?? null) : initialRouteState.channelId,
+      failureClass: hasOverride('failureClass') ? (overrides.failureClass ?? '') : initialRouteState.failureClass,
+      from: hasOverride('from') ? (overrides.from ?? '') : fromInput,
+      to: hasOverride('to') ? (overrides.to ?? '') : toInput,
+    });
+    navigate({ pathname: location.pathname, search: nextSearch }, { replace: true });
+  }, [
+    clientFilter,
+    fromInput,
+    initialRouteState.accountId,
+    initialRouteState.channelId,
+    initialRouteState.failureClass,
+    location.pathname,
+    navigate,
+    page,
+    pageSize,
+    searchInput,
+    siteFilter,
+    statusFilter,
+    toInput,
+  ]);
+
+  const handleClearRouteScope = useCallback(() => {
+    navigateWithRouteState({
+      page: 1,
+      accountId: null,
+      channelId: null,
+      failureClass: '',
+    });
+  }, [navigateWithRouteState]);
+
+  const handleResetAllFilters = useCallback(() => {
+    setStatusFilter('all');
+    setClientFilter('');
+    setSiteFilter(null);
+    setFromInput('');
+    setToInput('');
+    setSearchInput('');
+    setPage(1);
+    navigate({ pathname: location.pathname, search: '' }, { replace: true });
+  }, [location.pathname, navigate]);
+
+  const routeScopeChips = useMemo(() => {
+    const chips: Array<{ key: string; label: string }> = [];
+    if (initialRouteState.accountId) {
+      chips.push({ key: 'account', label: `账号 #${initialRouteState.accountId}` });
+    }
+    if (initialRouteState.channelId) {
+      chips.push({ key: 'channel', label: `通道 #${initialRouteState.channelId}` });
+    }
+    if (initialRouteState.failureClass) {
+      chips.push({ key: 'failureClass', label: `失败类 ${initialRouteState.failureClass}` });
+    }
+    return chips;
+  }, [
+    initialRouteState.accountId,
+    initialRouteState.channelId,
+    initialRouteState.failureClass,
+  ]);
 
   useEffect(() => {
     if (debugTracePage <= debugTraceTotalPages) return;
@@ -1386,15 +1510,7 @@ export default function ProxyLogs() {
       <button
         type="button"
         className="btn btn-ghost proxy-logs-filter-reset"
-        onClick={() => {
-          setStatusFilter('all');
-          setClientFilter('');
-          setSiteFilter(null);
-          setFromInput('');
-          setToInput('');
-          setSearchInput('');
-          setPage(1);
-        }}
+        onClick={handleResetAllFilters}
       >
         清空筛选
       </button>
@@ -1594,6 +1710,35 @@ export default function ProxyLogs() {
           </div>
         )}
       />
+
+      {routeScopeChips.length > 0 ? (
+        <div
+          className="card"
+          style={{ marginBottom: 12, padding: 12, display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}
+          data-testid="proxy-logs-route-scope"
+        >
+          <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>当前范围</span>
+          {routeScopeChips.map((chip) => (
+            <span
+              key={chip.key}
+              className="badge badge-warning"
+              data-testid={`proxy-logs-scope-chip-${chip.key}`}
+              style={{ fontSize: 11 }}
+            >
+              {chip.label}
+            </span>
+          ))}
+          <button
+            type="button"
+            className="btn btn-ghost"
+            style={{ border: '1px solid var(--color-border)', padding: '6px 12px', marginLeft: 'auto' }}
+            data-testid="proxy-logs-clear-scope"
+            onClick={handleClearRouteScope}
+          >
+            清除范围
+          </button>
+        </div>
+      ) : null}
 
       <div className="card" style={{ marginBottom: 12, padding: 14, display: 'flex', flexDirection: 'column', gap: 12 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12, flexWrap: 'wrap' }}>
@@ -1954,6 +2099,20 @@ export default function ProxyLogs() {
                       </span>
                     ) : null}
                   </div>
+                  {(detailLog.sessionId || pathMeta.sessionId || detailLog.downstreamPath || pathMeta.downstreamPath || detailLog.upstreamPath || pathMeta.upstreamPath) ? (
+                    <div style={{ display: 'grid', gap: 4 }}>
+                      {(detailLog.sessionId || pathMeta.sessionId) ? (
+                        <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
+                          Session {detailLog.sessionId || pathMeta.sessionId}
+                        </div>
+                      ) : null}
+                      {(detailLog.downstreamPath || pathMeta.downstreamPath || detailLog.upstreamPath || pathMeta.upstreamPath) ? (
+                        <div style={{ fontSize: 11, color: 'var(--color-text-muted)', wordBreak: 'break-all' }}>
+                          {(detailLog.downstreamPath || pathMeta.downstreamPath || '--')} → {(detailLog.upstreamPath || pathMeta.upstreamPath || '--')}
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : null}
                   <div className="mobile-summary-grid">
                     <div className="mobile-summary-metric">
                       <div className="mobile-summary-metric-label">用时</div>
@@ -1980,6 +2139,11 @@ export default function ProxyLogs() {
                       {firstByteLabel ? <MobileField label="首字" value={firstByteLabel.replace(/^首字\s*/, '')} /> : null}
                       <MobileField label="重试" value={log.retryCount > 0 ? log.retryCount : 0} />
                       <MobileField label="用量来源" value={formatProxyLogUsageSource(detailLog.usageSource ?? pathMeta.usageSource) || '--'} />
+                      {detailLog.failureTitle ? <MobileField label="失败类型" value={detailLog.failureTitle} /> : null}
+                      {detailLog.httpStatus ? <MobileField label="HTTP" value={`HTTP ${detailLog.httpStatus}`} /> : null}
+                      <MobileField label="Session" value={detailLog.sessionId || pathMeta.sessionId || '--'} />
+                      <MobileField label="下游路径" value={detailLog.downstreamPath || pathMeta.downstreamPath || '--'} />
+                      <MobileField label="上游路径" value={detailLog.upstreamPath || pathMeta.upstreamPath || '--'} />
                       {detailState?.loading && <div style={{ color: 'var(--color-text-muted)' }}>加载详情中...</div>}
                       {detailState?.error && <div style={{ color: 'var(--color-danger)' }}>{detailState.error}</div>}
                       {billingDetailSummary && <div style={{ color: 'var(--color-text-muted)' }}>{billingDetailSummary}</div>}
@@ -2083,6 +2247,20 @@ export default function ProxyLogs() {
                               ) : null}
                             </div>
                           ) : null}
+                          {(detailLog.sessionId || pathMeta.sessionId || detailLog.downstreamPath || pathMeta.downstreamPath || detailLog.upstreamPath || pathMeta.upstreamPath) ? (
+                            <div style={{ display: 'grid', gap: 4 }}>
+                              {(detailLog.sessionId || pathMeta.sessionId) ? (
+                                <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
+                                  Session {detailLog.sessionId || pathMeta.sessionId}
+                                </div>
+                              ) : null}
+                              {(detailLog.downstreamPath || pathMeta.downstreamPath || detailLog.upstreamPath || pathMeta.upstreamPath) ? (
+                                <div style={{ fontSize: 11, color: 'var(--color-text-muted)', wordBreak: 'break-all' }}>
+                                  {(detailLog.downstreamPath || pathMeta.downstreamPath || '--')} → {(detailLog.upstreamPath || pathMeta.upstreamPath || '--')}
+                                </div>
+                              ) : null}
+                            </div>
+                          ) : null}
                         </div>
                       </td>
                       <td style={{ fontSize: 12, color: 'var(--color-text-secondary)' }}>
@@ -2092,13 +2270,21 @@ export default function ProxyLogs() {
                         {renderProxyLogClientCell(detailLog)}
                       </td>
                       <td>
-                        <span className={`badge ${log.status === 'success' ? 'badge-success' : 'badge-error'}`} style={{ fontSize: 11, fontWeight: 600 }}>
-                          <span style={{
-                            width: 6, height: 6, borderRadius: '50%',
-                            background: log.status === 'success' ? 'var(--color-success)' : 'var(--color-danger)',
-                          }} />
-                          {log.status === 'success' ? '成功' : '失败'}
-                        </span>
+                        <div style={{ display: 'grid', gap: 4 }}>
+                          <span className={`badge ${log.status === 'success' ? 'badge-success' : 'badge-error'}`} style={{ fontSize: 11, fontWeight: 600, width: 'fit-content' }}>
+                            <span style={{
+                              width: 6, height: 6, borderRadius: '50%',
+                              background: log.status === 'success' ? 'var(--color-success)' : 'var(--color-danger)',
+                            }} />
+                            {log.status === 'success' ? '成功' : '失败'}
+                          </span>
+                          {detailLog.failureTitle ? (
+                            <div style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
+                              {detailLog.failureTitle}
+                              {detailLog.httpStatus ? ` · HTTP ${detailLog.httpStatus}` : ''}
+                            </div>
+                          ) : null}
+                        </div>
                       </td>
                       <td style={{ textAlign: 'center' }}>
                         <span style={{
@@ -2174,6 +2360,9 @@ export default function ProxyLogs() {
                                     <div style={{ color: 'var(--color-text-muted)' }}>
                                       用量来源：{formatProxyLogUsageSource(detailLog.usageSource ?? pathMeta.usageSource) || '未知'}
                                     </div>
+                                    <div style={{ color: 'var(--color-text-muted)' }}>
+                                      Session：{detailLog.sessionId || pathMeta.sessionId || '未记录'}
+                                    </div>
                                     <div style={{ display: 'flex', gap: 6, alignItems: 'flex-start' }}>
                                       <span style={{ color: 'var(--color-text-muted)', flexShrink: 0 }}>客户端</span>
                                       <div style={{ minWidth: 0 }}>
@@ -2223,13 +2412,13 @@ export default function ProxyLogs() {
 
                                 <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
                                   <span style={{ fontWeight: 600, color: 'var(--color-primary)', flexShrink: 0 }}>下游请求路径</span>
-                                  {detail && pathMeta.downstreamPath ? (
+                                  {(detailLog.downstreamPath || pathMeta.downstreamPath) ? (
                                     <code style={{
                                       fontFamily: 'var(--font-mono)', fontSize: 12,
                                       background: 'var(--color-bg-card)', padding: '1px 8px', borderRadius: 4,
                                       border: '1px solid var(--color-border-light)',
                                     }}>
-                                      {pathMeta.downstreamPath}
+                                      {detailLog.downstreamPath || pathMeta.downstreamPath}
                                     </code>
                                   ) : (
                                     <span style={{ color: 'var(--color-text-muted)' }}>未记录</span>
@@ -2238,13 +2427,13 @@ export default function ProxyLogs() {
 
                                 <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
                                   <span style={{ fontWeight: 600, color: 'var(--color-primary)', flexShrink: 0 }}>上游请求路径</span>
-                                  {detail && pathMeta.upstreamPath ? (
+                                  {(detailLog.upstreamPath || pathMeta.upstreamPath) ? (
                                     <code style={{
                                       fontFamily: 'var(--font-mono)', fontSize: 12,
                                       background: 'var(--color-bg-card)', padding: '1px 8px', borderRadius: 4,
                                       border: '1px solid var(--color-border-light)',
                                     }}>
-                                      {pathMeta.upstreamPath}
+                                      {detailLog.upstreamPath || pathMeta.upstreamPath}
                                     </code>
                                   ) : (
                                     <span style={{ color: 'var(--color-text-muted)' }}>未记录</span>

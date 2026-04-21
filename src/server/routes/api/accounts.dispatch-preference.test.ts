@@ -15,6 +15,7 @@ describe('accounts dispatch preference route', () => {
   let resetProxyChannelCoordinatorState: typeof import('../../services/proxyChannelCoordinator.js').resetProxyChannelCoordinatorState;
   let recordAccountDispatchSelectionBlocked: typeof import('../../services/accountDispatchRuntimeMemory.js').recordAccountDispatchSelectionBlocked;
   let getAccountDispatchRuntimeSnapshot: typeof import('../../services/accountDispatchRuntimeMemory.js').getAccountDispatchRuntimeSnapshot;
+  let ensureAccountDispatchRuntimeStateLoaded: typeof import('../../services/accountDispatchRuntimeMemory.js').ensureAccountDispatchRuntimeStateLoaded;
   let resetAccountDispatchRuntimeMemory: typeof import('../../services/accountDispatchRuntimeMemory.js').resetAccountDispatchRuntimeMemory;
 
   beforeAll(async () => {
@@ -32,6 +33,7 @@ describe('accounts dispatch preference route', () => {
     resetProxyChannelCoordinatorState = proxyChannelCoordinatorModule.resetProxyChannelCoordinatorState;
     recordAccountDispatchSelectionBlocked = runtimeMemoryModule.recordAccountDispatchSelectionBlocked;
     getAccountDispatchRuntimeSnapshot = runtimeMemoryModule.getAccountDispatchRuntimeSnapshot;
+    ensureAccountDispatchRuntimeStateLoaded = runtimeMemoryModule.ensureAccountDispatchRuntimeStateLoaded;
     resetAccountDispatchRuntimeMemory = runtimeMemoryModule.resetAccountDispatchRuntimeMemory;
 
     app = Fastify();
@@ -40,6 +42,7 @@ describe('accounts dispatch preference route', () => {
 
   beforeEach(async () => {
     await db.delete(schema.accountDispatchPreferences).run();
+    await db.delete(schema.settings).run();
     await db.delete(schema.routeChannels).run();
     await db.delete(schema.oauthRouteUnitMembers).run();
     await db.delete(schema.oauthRouteUnits).run();
@@ -197,7 +200,8 @@ describe('accounts dispatch preference route', () => {
     });
     proxyChannelCoordinator.bindStickyChannel(stickyKeyA, targetChannel.id, targetAccount);
     proxyChannelCoordinator.bindStickyChannel(stickyKeyB, fallbackChannel.id, fallbackAccount);
-    recordAccountDispatchSelectionBlocked(route.id, 'gpt-5.4', targetAccount.id, 50_000);
+    const nowMs = Date.now();
+    recordAccountDispatchSelectionBlocked(route.id, 'gpt-5.4', targetAccount.id, nowMs);
 
     const updateResponse = await app.inject({
       method: 'PUT',
@@ -210,7 +214,11 @@ describe('accounts dispatch preference route', () => {
     expect(updateResponse.statusCode).toBe(200);
     expect(proxyChannelCoordinator.getStickyChannelId(stickyKeyA)).toBeNull();
     expect(proxyChannelCoordinator.getStickyChannelId(stickyKeyB)).toBeNull();
-    expect(getAccountDispatchRuntimeSnapshot(route.id, 'gpt-5.4', targetAccount.id, 50_001).status).toBe('healthy');
+    expect(getAccountDispatchRuntimeSnapshot(route.id, 'gpt-5.4', targetAccount.id, nowMs + 1).status).toBe('healthy');
+
+    resetAccountDispatchRuntimeMemory();
+    await ensureAccountDispatchRuntimeStateLoaded();
+    expect(getAccountDispatchRuntimeSnapshot(route.id, 'gpt-5.4', targetAccount.id, nowMs + 1).status).toBe('healthy');
   });
 
   it('clears sticky bindings for oauth route-unit channels when a member account preference changes', async () => {

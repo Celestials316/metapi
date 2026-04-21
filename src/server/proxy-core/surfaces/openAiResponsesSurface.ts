@@ -18,6 +18,7 @@ import {
   type UpstreamEndpoint,
 } from '../../services/upstreamEndpointRuntime.js';
 import {
+  ensureUpstreamEndpointRuntimeStateLoaded,
   getUpstreamEndpointRuntimeStateSnapshot,
   recordUpstreamEndpointFailure,
   recordUpstreamEndpointSuccess,
@@ -103,12 +104,15 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object';
 }
 
-function getResponsesSessionHeaderValue(headers: Record<string, unknown>): string {
-  for (const [rawKey, rawValue] of Object.entries(headers)) {
-    const normalizedKey = rawKey.trim().toLowerCase();
-    if (normalizedKey === 'session_id' || normalizedKey === 'session-id') {
+function getResponsesHeaderValueByKeys(headers: Record<string, unknown>, keys: string[]): string {
+  for (const targetKey of keys) {
+    const normalizedTargetKey = targetKey.trim().toLowerCase();
+    for (const [rawKey, rawValue] of Object.entries(headers)) {
+      const normalizedKey = rawKey.trim().toLowerCase();
+      if (normalizedKey !== normalizedTargetKey) continue;
       if (typeof rawValue === 'string') {
-        return rawValue.trim();
+        const trimmed = rawValue.trim();
+        if (trimmed) return trimmed;
       }
       if (Array.isArray(rawValue)) {
         const match = rawValue.find((value) => typeof value === 'string' && value.trim().length > 0);
@@ -119,6 +123,15 @@ function getResponsesSessionHeaderValue(headers: Record<string, unknown>): strin
     }
   }
   return '';
+}
+
+function getResponsesSessionHeaderValue(headers: Record<string, unknown>): string {
+  return getResponsesHeaderValueByKeys(headers, [
+    'session_id',
+    'session-id',
+    'conversation_id',
+    'conversation-id',
+  ]);
 }
 
 function isNativeResponsesUpstreamPath(path: string): boolean {
@@ -648,13 +661,23 @@ export async function handleOpenAiResponsesSurfaceRequest(
             response: ctx.response,
             rawErrText: ctx.rawErrText || '',
           })) {
-            const recovered = await trySurfaceOauthRefreshRecovery({
-              ctx,
+          const recovered = await trySurfaceOauthRefreshRecovery({
+            ctx,
+            selected,
+            siteUrl: siteApiBaseUrl,
+            buildRequest: (endpoint) => buildEndpointRequest(endpoint),
+            dispatchRequest,
+            onRecoveredSuccess: ({ failedRequest, failedResponse, failedRawErrText }) => failureToolkit.log({
               selected,
-              siteUrl: siteApiBaseUrl,
-              buildRequest: (endpoint) => buildEndpointRequest(endpoint),
-              dispatchRequest,
-            });
+              modelRequested: requestedModel,
+              status: 'retried',
+              httpStatus: failedResponse.status,
+              latencyMs: Date.now() - startTime,
+              errorMessage: failedRawErrText || 'unknown error',
+              retryCount,
+              upstreamPath: failedRequest.path,
+            }),
+          });
             if (recovered?.upstream?.ok) {
               return recovered;
             }
@@ -733,12 +756,12 @@ export async function handleOpenAiResponsesSurfaceRequest(
           onAttemptFailure: async (ctx) => {
             const memoryWrite = isCompactRequest
               ? null
-              : recordUpstreamEndpointFailure({
+              : (await ensureUpstreamEndpointRuntimeStateLoaded(endpointRuntimeContext.siteId), recordUpstreamEndpointFailure({
                 ...endpointRuntimeContext,
                 endpoint: ctx.request.endpoint,
                 status: ctx.response.status,
                 errorText: ctx.rawErrText,
-              });
+              }));
             await safeInsertSurfaceProxyDebugAttempt(debugTrace, {
               attemptIndex: debugAttemptBase + ctx.endpointIndex,
               endpoint: ctx.request.endpoint,
@@ -760,10 +783,10 @@ export async function handleOpenAiResponsesSurfaceRequest(
           onAttemptSuccess: async (ctx) => {
             const memoryWrite = isCompactRequest
               ? null
-              : recordUpstreamEndpointSuccess({
+              : (await ensureUpstreamEndpointRuntimeStateLoaded(endpointRuntimeContext.siteId), recordUpstreamEndpointSuccess({
                 ...endpointRuntimeContext,
                 endpoint: ctx.request.endpoint,
-              });
+              }));
             const responseBody = await captureSurfaceProxyDebugSuccessResponseBody(debugTrace, ctx);
             await safeInsertSurfaceProxyDebugAttempt(debugTrace, {
               attemptIndex: debugAttemptBase + ctx.endpointIndex,

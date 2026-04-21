@@ -5,7 +5,10 @@ import {
   type AccountDispatchPreferenceRecord,
   setAccountDispatchPreferenceMode,
 } from './accountDispatchPreferenceService.js';
-import { clearAccountDispatchRuntimeStatesForAccount } from './accountDispatchRuntimeMemory.js';
+import {
+  clearAccountDispatchRuntimeStatesForAccount,
+  flushAccountDispatchRuntimePersistence,
+} from './accountDispatchRuntimeMemory.js';
 import { proxyChannelCoordinator } from './proxyChannelCoordinator.js';
 
 async function listAffectedRouteIdsForAccount(accountId: number): Promise<number[]> {
@@ -93,7 +96,8 @@ export async function updateAccountDispatchPreferenceMode(
   if (affectedChannelIds.length > 0) {
     proxyChannelCoordinator.clearStickyChannelsByChannelIds(affectedChannelIds);
   }
-  clearAccountDispatchRuntimeStatesForAccount(normalizedAccountId);
+  await clearAccountDispatchRuntimeStatesForAccount(normalizedAccountId);
+  await flushAccountDispatchRuntimePersistence();
 
   return record;
 }

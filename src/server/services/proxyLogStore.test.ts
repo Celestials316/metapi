@@ -8,6 +8,8 @@ const {
   dbInsertMock,
   dbInsertValuesMock,
   dbInsertRunMock,
+  classifyProxyFailureMock,
+  recordProxyOpsProtectionSignalMock,
   proxyLogsSchema,
 } = vi.hoisted(() => ({
   hasProxyLogBillingDetailsColumnMock: vi.fn(),
@@ -17,6 +19,8 @@ const {
   dbInsertMock: vi.fn(),
   dbInsertValuesMock: vi.fn(),
   dbInsertRunMock: vi.fn(),
+  classifyProxyFailureMock: vi.fn(),
+  recordProxyOpsProtectionSignalMock: vi.fn(),
   proxyLogsSchema: {
     id: 'id',
     routeId: 'route_id',
@@ -57,6 +61,14 @@ vi.mock('../db/index.js', () => ({
   hasProxyLogStreamTimingColumns: (...args: unknown[]) => hasProxyLogStreamTimingColumnsMock(...args),
 }));
 
+vi.mock('./proxyFailureTaxonomy.js', () => ({
+  classifyProxyFailure: (...args: unknown[]) => classifyProxyFailureMock(...args),
+}));
+
+vi.mock('./proxyOpsSignals.js', () => ({
+  recordProxyOpsProtectionSignal: (...args: unknown[]) => recordProxyOpsProtectionSignalMock(...args),
+}));
+
 import { insertProxyLog, parseProxyLogBillingDetails, withProxyLogSelectFields } from './proxyLogStore.js';
 
 describe('proxyLogStore', () => {
@@ -68,10 +80,20 @@ describe('proxyLogStore', () => {
     dbInsertMock.mockReset();
     dbInsertValuesMock.mockReset();
     dbInsertRunMock.mockReset();
+    classifyProxyFailureMock.mockReset();
+    recordProxyOpsProtectionSignalMock.mockReset();
     hasProxyLogBillingDetailsColumnMock.mockResolvedValue(false);
     hasProxyLogClientColumnsMock.mockResolvedValue(false);
     hasProxyLogDownstreamApiKeyIdColumnMock.mockResolvedValue(false);
     hasProxyLogStreamTimingColumnsMock.mockResolvedValue(false);
+    classifyProxyFailureMock.mockReturnValue({
+      className: 'other',
+      title: '其他错误',
+      retryable: false,
+      challenge: false,
+      summary: '其他错误',
+    });
+    recordProxyOpsProtectionSignalMock.mockResolvedValue(undefined);
 
     dbInsertMock.mockReturnValue({
       values: (...args: unknown[]) => dbInsertValuesMock(...args),
@@ -243,6 +265,31 @@ describe('proxyLogStore', () => {
     expect(dbInsertValuesMock.mock.calls[1][0].clientAppId).toBeUndefined();
     expect(dbInsertValuesMock.mock.calls[1][0].clientAppName).toBeUndefined();
     expect(dbInsertValuesMock.mock.calls[1][0].clientConfidence).toBeUndefined();
+  });
+
+  it('records protection signals for challenge-style failed proxy logs', async () => {
+    classifyProxyFailureMock.mockReturnValue({
+      className: 'challenge_shield',
+      title: 'Cloudflare / Turnstile 挑战',
+      retryable: true,
+      challenge: true,
+      summary: '上游返回挑战/WAF 页面',
+    });
+
+    await insertProxyLog({
+      accountId: 42,
+      status: 'retried',
+      httpStatus: 403,
+      errorMessage: 'Your request was blocked by upstream WAF',
+      modelRequested: 'gpt-5',
+    });
+
+    expect(recordProxyOpsProtectionSignalMock).toHaveBeenCalledWith(42, expect.objectContaining({
+      className: 'challenge_shield',
+      title: 'Cloudflare / Turnstile 挑战',
+      summary: '上游返回挑战/WAF 页面',
+      status: 403,
+    }));
   });
 
   it('retries proxy log inserts without stream timing fields when those columns are missing', async () => {

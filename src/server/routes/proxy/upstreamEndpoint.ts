@@ -12,6 +12,7 @@ import { applyPayloadRules } from '../../services/payloadRules.js';
 import {
   applyUpstreamEndpointRuntimePreference,
   buildEndpointCapabilityProfile,
+  ensureUpstreamEndpointRuntimeStateLoaded,
 } from '../../services/upstreamEndpointRuntimeMemory.js';
 import type { DownstreamFormat } from '../../transformers/shared/normalized.js';
 import {
@@ -526,6 +527,7 @@ export async function resolveUpstreamEndpointCandidates(
     wantsContinuationAwareResponses?: boolean;
   },
 ): Promise<UpstreamEndpoint[]> {
+  await ensureUpstreamEndpointRuntimeStateLoaded(context.site.id);
   const sitePlatform = normalizePlatformName(context.site.platform);
   const capabilityProfile = buildEndpointCapabilityProfile({
     modelName,

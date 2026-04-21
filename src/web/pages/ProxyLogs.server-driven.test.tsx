@@ -65,7 +65,13 @@ function buildListResponse(overrides?: Partial<{
         totalTokens: 15,
         retryCount: 0,
         estimatedCost: 1.23,
-        errorMessage: 'downstream: /v1/chat upstream: /api/chat',
+        errorMessage: '[session:sess-live-101] [downstream:/v1/chat] [upstream:/api/chat] upstream returned 401',
+        failureTitle: 'OAuth 令牌失效',
+        failureClass: 'auth_invalid',
+        httpStatus: 401,
+        sessionId: 'sess-live-101',
+        downstreamPath: '/v1/chat',
+        upstreamPath: '/api/chat',
         username: 'tester',
         siteName: 'main-site',
         siteUrl: 'https://main-site.example.com',
@@ -155,7 +161,13 @@ describe('ProxyLogs server-driven page', () => {
       totalTokens: 15,
       retryCount: 0,
       estimatedCost: 1.23,
-      errorMessage: 'downstream: /v1/chat upstream: /api/chat',
+      errorMessage: '[session:sess-live-101] [downstream:/v1/chat] [upstream:/api/chat] upstream returned 401',
+      failureTitle: 'OAuth 令牌失效',
+      failureClass: 'auth_invalid',
+      httpStatus: 401,
+      sessionId: 'sess-live-101',
+      downstreamPath: '/v1/chat',
+      upstreamPath: '/api/chat',
       username: 'tester',
       siteName: 'main-site',
       siteUrl: 'https://main-site.example.com',
@@ -270,6 +282,71 @@ describe('ProxyLogs server-driven page', () => {
       expect(text).toContain('下游 Key: 移动端灰度');
       expect(text).toContain('流式');
       expect(text).toContain('首字');
+    } finally {
+      await act(async () => {
+        root?.unmount();
+      });
+    }
+  });
+
+  it('shows route scope chips, can clear scope, and renders persistent session/path clues', async () => {
+    let root!: WebTestRenderer;
+
+    try {
+      await act(async () => {
+        root = create(
+          <MemoryRouter initialEntries={['/logs?status=failed&accountId=7&channelId=11&failureClass=auth_invalid']}>
+            <ToastProvider>
+              <ProxyLogs />
+            </ToastProvider>
+          </MemoryRouter>,
+        );
+      });
+      await flushMicrotasks();
+
+      expect(apiMock.getProxyLogs).toHaveBeenCalledWith({
+        limit: 50,
+        offset: 0,
+        status: 'failed',
+        search: '',
+        accountId: 7,
+        channelId: 11,
+        failureClass: 'auth_invalid',
+      });
+
+      const text = collectText(root.root);
+      expect(text).toContain('当前范围');
+      expect(text).toContain('账号 #7');
+      expect(text).toContain('通道 #11');
+      expect(text).toContain('失败类 auth_invalid');
+      expect(text).toContain('Session sess-live-101');
+      expect(text).toContain('/v1/chat → /api/chat');
+
+      const row = root.root.find((node) => node.props['data-testid'] === 'proxy-log-row-101');
+      await act(async () => {
+        row.props.onClick();
+      });
+      await flushMicrotasks();
+
+      const expandedText = collectText(root.root);
+      expect(expandedText).toContain('OAuth 令牌失效');
+      expect(expandedText).toContain('Session：sess-live-101');
+      expect(expandedText).toContain('/v1/chat');
+      expect(expandedText).toContain('/api/chat');
+
+      const clearScopeButton = root.root.find((node) => node.props['data-testid'] === 'proxy-logs-clear-scope');
+      await act(async () => {
+        clearScopeButton.props.onClick();
+      });
+      await flushMicrotasks();
+
+      expect(apiMock.getProxyLogs).toHaveBeenLastCalledWith({
+        limit: 50,
+        offset: 0,
+        status: 'failed',
+        search: '',
+      });
+      expect(collectText(root.root)).not.toContain('当前范围');
     } finally {
       await act(async () => {
         root?.unmount();

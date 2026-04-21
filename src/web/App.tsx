@@ -26,6 +26,7 @@ const Tokens = lazy(() => import('./pages/Tokens.js'));
 const CheckinLog = lazy(() => import('./pages/CheckinLog.js'));
 const TokenRoutes = lazy(() => import('./pages/TokenRoutes.js'));
 const ProxyLogs = lazy(() => import('./pages/ProxyLogs.js'));
+const ProxyOps = lazy(() => import('./pages/ProxyOps.js'));
 const Settings = lazy(() => import('./pages/Settings.js'));
 const DownstreamKeys = lazy(() => import('./pages/DownstreamKeys.js'));
 const ImportExport = lazy(() => import('./pages/ImportExport.js'));
@@ -416,6 +417,7 @@ export const sidebarGroups = [
       { to: '/checkin', label: '签到记录', icon: <svg className="sidebar-item-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" /></svg> },
       { to: '/routes', label: '路由', icon: <svg className="sidebar-item-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" /></svg> },
       { to: '/logs', label: '使用日志', icon: <svg className="sidebar-item-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" /></svg> },
+      { to: '/proxy-ops', label: 'Proxy Ops', icon: <svg className="sidebar-item-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M4 7h16M7 12h10M9 17h6" /></svg> },
       { to: '/monitor', label: '可用性监控', icon: <svg className="sidebar-item-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M3 5a2 2 0 012-2h14a2 2 0 012 2v11a2 2 0 01-2 2h-5l-2.5 3-2.5-3H5a2 2 0 01-2-2V5z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.75} d="M7 10h3l1.5-2.5L14 13l1.5-3H17" /></svg> },
     ],
   },
@@ -868,6 +870,7 @@ function AppShell() {
                 <Route path="/checkin" element={<CheckinLog />} />
                 <Route path="/routes" element={<TokenRoutes />} />
                 <Route path="/logs" element={<ProxyLogs />} />
+                <Route path="/proxy-ops" element={<ProxyOps />} />
                 <Route path="/monitor" element={<Monitors />} />
                 <Route path="/settings" element={<Settings />} />
                 <Route path="/downstream-keys" element={<DownstreamKeys />} />

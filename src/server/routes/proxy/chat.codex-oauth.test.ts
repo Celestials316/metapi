@@ -15,10 +15,14 @@ const resolveProxyUsageWithSelfLogFallbackMock = vi.fn(async ({ usage }: any) =>
   recoveredFromSelfLog: false,
 }));
 const refreshOauthAccessTokenSingleflightMock = vi.fn();
+const insertedProxyLogs: Record<string, unknown>[] = [];
 const dbInsertMock = vi.fn((_arg?: any) => ({
-  values: () => ({
-    run: () => undefined,
-  }),
+  values: (values: Record<string, unknown>) => {
+    insertedProxyLogs.push(values);
+    return {
+      run: () => undefined,
+    };
+  },
 }));
 
 vi.mock('undici', async () => {
@@ -142,6 +146,7 @@ describe('chat proxy codex oauth compatibility', () => {
     resolveProxyUsageWithSelfLogFallbackMock.mockClear();
     refreshOauthAccessTokenSingleflightMock.mockReset();
     dbInsertMock.mockClear();
+    insertedProxyLogs.length = 0;
 
     selectChannelMock.mockReturnValue({
       channel: { id: 11, routeId: 22 },
@@ -391,6 +396,17 @@ describe('chat proxy codex oauth compatibility', () => {
     expect(firstOptions.headers.Authorization).toBe('Bearer expired-access-token');
     expect(secondOptions.headers.Authorization).toBe('Bearer fresh-access-token');
     expect(response.json()?.choices?.[0]?.message?.content).toBe('ok after refresh');
+    expect(insertedProxyLogs).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        status: 'retried',
+        httpStatus: 401,
+        errorMessage: expect.stringContaining('expired token'),
+      }),
+      expect.objectContaining({
+        status: 'success',
+        httpStatus: 200,
+      }),
+    ]));
   });
 
   it('retries oauth chat requests after a 403 auth failure', async () => {

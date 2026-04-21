@@ -48,6 +48,10 @@ function stripCodexUnsupportedResponsesFields(
   delete next.max_output_tokens;
   delete next.max_completion_tokens;
   delete next.max_tokens;
+  delete next.metadata;
+  delete next.user;
+  delete next.service_tier;
+  delete next.prompt_cache_retention;
   return next;
 }
 

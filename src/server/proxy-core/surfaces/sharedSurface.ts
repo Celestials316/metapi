@@ -286,6 +286,14 @@ export async function trySurfaceOauthRefreshRecovery<TRequest extends BuiltEndpo
     targetUrl: string,
   ) => Promise<Awaited<ReturnType<typeof dispatchRuntimeRequest>>>;
   captureFailureBody?: boolean;
+  onRecoveredSuccess?: (input: {
+    failedRequest: TRequest;
+    failedResponse: Awaited<ReturnType<typeof dispatchRuntimeRequest>>;
+    failedRawErrText: string;
+    recoveredRequest: TRequest;
+    recoveredResponse: Awaited<ReturnType<typeof dispatchRuntimeRequest>>;
+    recoveredTargetUrl: string;
+  }) => Promise<void> | void;
 }): Promise<{
   upstream: Awaited<ReturnType<typeof dispatchRuntimeRequest>>;
   upstreamPath: string;
@@ -293,6 +301,9 @@ export async function trySurfaceOauthRefreshRecovery<TRequest extends BuiltEndpo
   targetUrl?: string;
 } | null> {
   try {
+    const failedRequest = input.ctx.request;
+    const failedResponse = input.ctx.response;
+    const failedRawErrText = input.ctx.rawErrText;
     const refreshed = await refreshOauthAccessTokenSingleflight(input.selected.account.id);
     input.selected.tokenValue = refreshed.accessToken;
     input.selected.account = {
@@ -305,6 +316,20 @@ export async function trySurfaceOauthRefreshRecovery<TRequest extends BuiltEndpo
     const refreshedTargetUrl = buildUpstreamUrl(input.siteUrl, refreshedRequest.path);
     const refreshedResponse = await input.dispatchRequest(refreshedRequest, refreshedTargetUrl);
     if (refreshedResponse.ok) {
+      if (input.onRecoveredSuccess) {
+        try {
+          await input.onRecoveredSuccess({
+            failedRequest,
+            failedResponse,
+            failedRawErrText,
+            recoveredRequest: refreshedRequest,
+            recoveredResponse: refreshedResponse,
+            recoveredTargetUrl: refreshedTargetUrl,
+          });
+        } catch (error) {
+          console.warn('[proxy/shared] failed to record oauth refresh covered failure', error);
+        }
+      }
       return {
         upstream: refreshedResponse,
         upstreamPath: refreshedRequest.path,

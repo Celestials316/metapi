@@ -1791,7 +1791,7 @@ describe('chat proxy stream behavior', () => {
     expect(options.headers.originator).toBeUndefined();
 
     const forwardedBody = JSON.parse(options.body);
-    expect(forwardedBody.metadata).toEqual({ session_id: 'abc123' });
+    expect(forwardedBody.metadata).toBeUndefined();
     expect(forwardedBody.reasoning).toEqual({ effort: 'high' });
     expect(forwardedBody.include).toEqual(['reasoning.encrypted_content']);
   });
@@ -2044,7 +2044,7 @@ describe('chat proxy stream behavior', () => {
     const secondBody = JSON.parse(secondOptions.body);
     const thirdBody = JSON.parse(thirdOptions.body);
     const fourthBody = JSON.parse(fourthOptions.body);
-    expect(firstBody.user).toBe('user-123');
+    expect(firstBody.user).toBeUndefined();
     expect(secondBody.user).toBeUndefined();
     expect(thirdBody.user).toBeUndefined();
     expect(secondBody.include).toEqual(['reasoning.encrypted_content']);

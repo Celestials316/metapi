@@ -14,6 +14,9 @@ describe('normalizeCodexResponsesBodyForProxy', () => {
       max_output_tokens: 512,
       max_completion_tokens: 256,
       max_tokens: 128,
+      metadata: { trace: 'drop-me' },
+      user: 'drop-me',
+      service_tier: 'auto',
       temperature: 0.3,
       store: true,
     }, { sitePlatform: 'codex' });
@@ -29,6 +32,28 @@ describe('normalizeCodexResponsesBodyForProxy', () => {
       instructions: '',
       store: false,
       temperature: 0.3,
+    });
+  });
+
+  it('keeps supported continuity fields while stripping codex-incompatible wrappers', () => {
+    const body = normalizeCodexResponsesBodyForProxy({
+      previous_response_id: 'resp_prev_1',
+      include: ['reasoning.encrypted_content', 'mcp_approval_request.details'],
+      parallel_tool_calls: false,
+      prompt_cache_retention: { scope: 'workspace' },
+      metadata: { trace: 'drop-me' },
+      user: 'drop-me',
+      service_tier: 'auto',
+      input: 'hello',
+    }, { sitePlatform: 'codex' });
+
+    expect(body).toEqual({
+      previous_response_id: 'resp_prev_1',
+      include: ['reasoning.encrypted_content', 'mcp_approval_request.details'],
+      parallel_tool_calls: false,
+      instructions: '',
+      store: false,
+      input: 'hello',
     });
   });
 

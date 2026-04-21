@@ -21,6 +21,7 @@ import {
   resolveUpstreamEndpointCandidates,
 } from '../../services/upstreamEndpointRuntime.js';
 import {
+  ensureUpstreamEndpointRuntimeStateLoaded,
   getUpstreamEndpointRuntimeStateSnapshot,
   recordUpstreamEndpointFailure,
   recordUpstreamEndpointSuccess,
@@ -1283,6 +1284,7 @@ export async function geminiProxyRoute(app: FastifyInstance) {
             ctx.rawErrText || ctx.errText,
           ),
           onAttemptFailure: async (ctx) => {
+            await ensureUpstreamEndpointRuntimeStateLoaded(endpointRuntimeContext.siteId);
             const memoryWrite = recordUpstreamEndpointFailure({
               ...endpointRuntimeContext,
               endpoint: ctx.request.endpoint,
@@ -1308,6 +1310,7 @@ export async function geminiProxyRoute(app: FastifyInstance) {
             });
           },
           onAttemptSuccess: async (ctx) => {
+            await ensureUpstreamEndpointRuntimeStateLoaded(endpointRuntimeContext.siteId);
             const memoryWrite = recordUpstreamEndpointSuccess({
               ...endpointRuntimeContext,
               endpoint: ctx.request.endpoint,

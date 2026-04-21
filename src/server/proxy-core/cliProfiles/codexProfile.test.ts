@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { detectCodexOfficialClientApp } from './codexProfile.js';
+import { detectCodexOfficialClientApp, isCodexRequest } from './codexProfile.js';
 
 describe('detectCodexOfficialClientApp', () => {
   it('returns null for missing or empty headers', () => {
@@ -53,5 +53,29 @@ describe('detectCodexOfficialClientApp', () => {
     expect(detectCodexOfficialClientApp({
       'user-agent': 'OpenClaw/1.0',
     })).toBe(null);
+  });
+});
+
+describe('isCodexRequest', () => {
+  it('does not treat generic openai sdk headers as codex by openai-beta alone', () => {
+    expect(isCodexRequest({
+      downstreamPath: '/v1/responses',
+      headers: {
+        'openai-beta': 'responses-2025-03-11',
+        'user-agent': 'OpenAI/Python 1.68.2',
+        'x-stainless-lang': 'python',
+      },
+    })).toBe(false);
+  });
+
+  it('accepts continuity-only codex requests when conversation id is present with codex transport markers', () => {
+    expect(isCodexRequest({
+      downstreamPath: '/v1/responses',
+      headers: {
+        'openai-beta': 'responses-2025-03-11',
+        'x-stainless-lang': 'typescript',
+        conversation_id: 'conv-only-1',
+      },
+    })).toBe(true);
   });
 });

@@ -114,6 +114,19 @@ function hasHeaderPrefix(headers: Record<string, unknown> | undefined, prefix: s
   });
 }
 
+function isExplicitTruthyHeader(headers: Record<string, unknown> | undefined, targetKey: string): boolean {
+  return getHeaderValues(headers, targetKey).some((value) => {
+    const normalized = value.trim().toLowerCase();
+    return normalized === '1' || normalized === 'true' || normalized === 'yes';
+  });
+}
+
+function looksLikeGenericOpenAiSdk(headers: Record<string, unknown> | undefined): boolean {
+  if (!headers) return false;
+  if (hasHeaderPrefix(headers, 'x-stainless-')) return true;
+  return getHeaderValues(headers, 'user-agent').some((value) => value.trim().toLowerCase().startsWith('openai/'));
+}
+
 function matchesHeaderPrefixes(value: string | string[] | null, prefixes: readonly string[]): boolean {
   const values = Array.isArray(value)
     ? value.map((item) => item.trim().toLowerCase()).filter(Boolean)
@@ -161,6 +174,14 @@ export function getCodexSessionId(headers?: Record<string, unknown>): string | n
   return getHeaderValue(headers, 'session_id') || getHeaderValue(headers, 'session-id');
 }
 
+export function getCodexConversationId(headers?: Record<string, unknown>): string | null {
+  return getHeaderValue(headers, 'conversation_id') || getHeaderValue(headers, 'conversation-id');
+}
+
+function getCodexContinuityId(headers?: Record<string, unknown>): string | null {
+  return getCodexSessionId(headers) || getCodexConversationId(headers);
+}
+
 export function isCodexRequest(input: DetectCliProfileInput): boolean {
   if (!isCodexPath(input.downstreamPath)) return false;
   const headers = input.headers;
@@ -169,10 +190,12 @@ export function isCodexRequest(input: DetectCliProfileInput): boolean {
   const originator = getHeaderValues(headers, 'originator');
   if (matchesHeaderPrefixes(originator, CODEX_OFFICIAL_CLIENT_ORIGINATOR_PREFIXES)) return true;
   if (matchesHeaderPrefixes(getHeaderValues(headers, 'user-agent'), CODEX_OFFICIAL_CLIENT_USER_AGENT_PREFIXES)) return true;
-  if (getHeaderValue(headers, 'openai-beta')) return true;
-  if (hasHeaderPrefix(headers, 'x-stainless-')) return true;
-  if (getCodexSessionId(headers)) return true;
+  if (isExplicitTruthyHeader(headers, 'x-metapi-responses-websocket-transport')) return true;
   if (getHeaderValue(headers, 'x-codex-turn-state')) return true;
+  const hasOpenAiBeta = !!getHeaderValue(headers, 'openai-beta');
+  const hasTransportMarkers = hasOpenAiBeta || hasHeaderPrefix(headers, 'x-stainless-');
+  if (hasTransportMarkers && getCodexContinuityId(headers)) return true;
+  if (hasOpenAiBeta && !looksLikeGenericOpenAiSdk(headers)) return true;
   return false;
 }
 
@@ -188,11 +211,11 @@ export const codexCliProfile: CliProfileDefinition = {
   detect(input) {
     if (!isCodexRequest(input)) return null;
 
-    const sessionId = getCodexSessionId(input.headers) || undefined;
+    const continuityId = getCodexContinuityId(input.headers) || undefined;
     const clientApp = detectCodexOfficialClientApp(input.headers);
     return {
       id: 'codex',
-      ...(sessionId ? { sessionId, traceHint: sessionId } : {}),
+      ...(continuityId ? { sessionId: continuityId, traceHint: continuityId } : {}),
       ...(clientApp
         ? {
           clientAppId: clientApp.clientAppId,

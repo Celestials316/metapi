@@ -27,6 +27,9 @@ const trackedClientSockets = new Set<WebSocket>();
 let siteApiEndpointRows: Array<Record<string, unknown>> = [];
 const dbInsertMock = vi.fn((_arg?: any) => ({
   values: () => ({
+    onConflictDoUpdate: () => ({
+      run: () => undefined,
+    }),
     run: () => undefined,
   }),
 }));
@@ -101,6 +104,7 @@ vi.mock('../../services/oauth/quota.js', () => ({
 }));
 
 vi.mock('../../db/index.js', () => ({
+  runtimeDbDialect: 'sqlite',
   db: {
     insert: (arg: any) => dbInsertMock(arg),
     select: () => ({
@@ -125,6 +129,9 @@ vi.mock('../../db/index.js', () => ({
   hasProxyLogDownstreamApiKeyIdColumn: async () => false,
   hasProxyLogStreamTimingColumns: async () => false,
   schema: {
+    settings: {
+      key: {},
+    },
     proxyLogs: {},
     siteApiEndpoints: {
       id: {},
@@ -1910,6 +1917,7 @@ describe('responses websocket transport', () => {
         instructions: 'be helpful',
         input: [],
         stream: true,
+        include: ['reasoning.encrypted_content'],
         store: false,
       }),
     });

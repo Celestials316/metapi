@@ -19,6 +19,7 @@ import {
   type AccountDispatchPreferenceRecord,
 } from './accountDispatchPreferenceService.js';
 import {
+  ensureAccountDispatchRuntimeStateLoaded,
   getAccountDispatchRuntimeSnapshot,
   recordAccountDispatchFailure,
   recordAccountDispatchProbeSuccess,
@@ -28,6 +29,7 @@ import {
 import { type DownstreamRoutingPolicy, EMPTY_DOWNSTREAM_ROUTING_POLICY } from './downstreamPolicyTypes.js';
 import { isUsableAccountToken } from './accountTokenService.js';
 import { getOauthInfoFromAccount } from './oauth/oauthAccount.js';
+import { getOauthRefreshBackoffReason } from './oauth/refreshGovernance.js';
 import { parseCodexQuotaResetHint } from './oauth/quota.js';
 import {
   getOauthRouteUnitStrategyLabel,
@@ -1292,6 +1294,23 @@ function invalidateRouteScopedCache(routeId: number): void {
   clearStableFirstCachesForRoute(routeId);
 }
 
+async function invalidateOauthRouteUnitScopedCaches(routeUnitId: number): Promise<void> {
+  if (!Number.isFinite(routeUnitId) || routeUnitId <= 0) return;
+  const routeRows = await db.select({
+    routeId: schema.routeChannels.routeId,
+  }).from(schema.routeChannels)
+    .where(eq(schema.routeChannels.oauthRouteUnitId, routeUnitId))
+    .all();
+  const routeIds: number[] = Array.from(new Set<number>(
+    routeRows
+      .map((row) => Number(row.routeId))
+      .filter((routeId): routeId is number => Number.isFinite(routeId) && routeId > 0),
+  ));
+  for (const routeId of routeIds) {
+    invalidateRouteScopedCache(routeId);
+  }
+}
+
 export function invalidateTokenRouterCache(): void {
   routeCacheSnapshot = {
     loadedAt: 0,
@@ -1891,6 +1910,7 @@ export class TokenRouter {
   async selectChannel(requestedModel: string, downstreamPolicy: DownstreamRoutingPolicy = DEFAULT_DOWNSTREAM_POLICY): Promise<SelectedChannel | null> {
     if (!isModelAllowedByDownstreamPolicy(requestedModel, downstreamPolicy)) return null;
     await ensureSiteRuntimeHealthStateLoaded();
+    await ensureAccountDispatchRuntimeStateLoaded();
 
     const match = await this.findRoute(requestedModel, downstreamPolicy);
     if (!match) return null;
@@ -1903,6 +1923,7 @@ export class TokenRouter {
   ): Promise<SelectedChannel | null> {
     if (!isModelAllowedByDownstreamPolicy(requestedModel, downstreamPolicy)) return null;
     await ensureSiteRuntimeHealthStateLoaded();
+    await ensureAccountDispatchRuntimeStateLoaded();
 
     const match = await this.findRoute(requestedModel, downstreamPolicy);
     if (!match) return null;
@@ -1930,6 +1951,7 @@ export class TokenRouter {
   ): Promise<SelectedChannel | null> {
     if (!isModelAllowedByDownstreamPolicy(requestedModel, downstreamPolicy)) return null;
     await ensureSiteRuntimeHealthStateLoaded();
+    await ensureAccountDispatchRuntimeStateLoaded();
 
     const match = await this.findRoute(requestedModel, downstreamPolicy);
     if (!match) return null;
@@ -1946,6 +1968,7 @@ export class TokenRouter {
     const normalizedPreferredChannelId = Math.trunc(preferredChannelId || 0);
     if (normalizedPreferredChannelId <= 0) return null;
     await ensureSiteRuntimeHealthStateLoaded();
+    await ensureAccountDispatchRuntimeStateLoaded();
 
     const match = await this.findRoute(requestedModel, downstreamPolicy);
     if (!match) return null;
@@ -1964,6 +1987,7 @@ export class TokenRouter {
     downstreamPolicy: DownstreamRoutingPolicy = DEFAULT_DOWNSTREAM_POLICY,
   ): Promise<RouteDecisionExplanation> {
     await ensureSiteRuntimeHealthStateLoaded();
+    await ensureAccountDispatchRuntimeStateLoaded();
     const match = await this.findRoute(requestedModel, downstreamPolicy);
     return this.explainSelectionFromMatch(match, requestedModel, { excludeChannelIds, downstreamPolicy });
   }
@@ -1975,12 +1999,14 @@ export class TokenRouter {
     downstreamPolicy: DownstreamRoutingPolicy = DEFAULT_DOWNSTREAM_POLICY,
   ): Promise<RouteDecisionExplanation> {
     await ensureSiteRuntimeHealthStateLoaded();
+    await ensureAccountDispatchRuntimeStateLoaded();
     const match = await this.findRouteById(routeId, downstreamPolicy);
     return this.explainSelectionFromMatch(match, requestedModel, { excludeChannelIds, downstreamPolicy });
   }
 
   async explainSelectionRouteWide(routeId: number, downstreamPolicy: DownstreamRoutingPolicy = DEFAULT_DOWNSTREAM_POLICY): Promise<RouteDecisionExplanation> {
     await ensureSiteRuntimeHealthStateLoaded();
+    await ensureAccountDispatchRuntimeStateLoaded();
     const match = await this.findRouteById(routeId, downstreamPolicy);
     const fallbackRequestedModel = match?.route.modelPattern || `route:${routeId}`;
     return this.explainSelectionFromMatch(match, fallbackRequestedModel, {
@@ -2514,6 +2540,7 @@ export class TokenRouter {
     actualAccountId?: number,
   ) {
     await ensureSiteRuntimeHealthStateLoaded();
+    await ensureAccountDispatchRuntimeStateLoaded();
     const row = await db.select()
       .from(schema.routeChannels)
       .innerJoin(schema.accounts, eq(schema.routeChannels.accountId, schema.accounts.id))
@@ -2568,7 +2595,7 @@ export class TokenRouter {
       } else {
         recordSiteRuntimeSuccess(account.siteId, latencyMs, modelName);
       }
-      invalidateRouteScopedCache(ch.routeId);
+      await invalidateOauthRouteUnitScopedCaches(ch.oauthRouteUnitId);
     } else {
       recordSiteRuntimeSuccess(account.siteId, latencyMs, modelName);
       const targetAccountId = Number.isFinite(actualAccountId) && (actualAccountId ?? 0) > 0
@@ -2610,6 +2637,7 @@ export class TokenRouter {
     actualAccountId?: number,
   ) {
     await ensureSiteRuntimeHealthStateLoaded();
+    await ensureAccountDispatchRuntimeStateLoaded();
     const row = await db.select()
       .from(schema.routeChannels)
       .innerJoin(schema.accounts, eq(schema.routeChannels.accountId, schema.accounts.id))
@@ -2668,7 +2696,7 @@ export class TokenRouter {
         channel.consecutiveFailCount = 0;
         channel.cooldownLevel = 0;
       });
-      invalidateRouteScopedCache(ch.routeId);
+      await invalidateOauthRouteUnitScopedCaches(ch.oauthRouteUnitId);
       return;
     }
 
@@ -2755,6 +2783,7 @@ export class TokenRouter {
     if (normalizedChannelIds.length === 0) return 0;
 
     await ensureSiteRuntimeHealthStateLoaded();
+    await ensureAccountDispatchRuntimeStateLoaded();
     const runtimeHealthRows = await db.select({
       siteId: schema.accounts.siteId,
       sourceModel: schema.routeChannels.sourceModel,
@@ -2790,6 +2819,7 @@ export class TokenRouter {
     actualAccountId?: number,
   ) {
     await ensureSiteRuntimeHealthStateLoaded();
+    await ensureAccountDispatchRuntimeStateLoaded();
     const row = await db.select()
       .from(schema.routeChannels)
       .innerJoin(schema.accounts, eq(schema.routeChannels.accountId, schema.accounts.id))
@@ -2872,7 +2902,7 @@ export class TokenRouter {
             nowMs,
           });
         }
-        invalidateRouteScopedCache(route.id);
+        await invalidateOauthRouteUnitScopedCaches(ch.oauthRouteUnitId);
         return;
       }
     }
@@ -3535,6 +3565,11 @@ export class TokenRouter {
       reasonParts.push(`站点状态=${memberCandidate.site.status || 'disabled'}`);
     }
 
+    const refreshBackoffReason = getOauthRefreshBackoffReason(memberCandidate.account.extraConfig, Date.parse(nowIso));
+    if (refreshBackoffReason) {
+      reasonParts.push('OAuth 刷新冷却中');
+    }
+
     const downstreamExclusionReason = this.resolveDownstreamExclusionReason(
       this.buildRouteUnitMemberDispatchCandidate(outerCandidate, memberCandidate),
       options.downstreamPolicy,
@@ -3792,6 +3827,11 @@ export class TokenRouter {
 
     if (isSiteDisabled(candidate.site.status)) {
       reasonParts.push(`站点状态=${candidate.site.status || 'disabled'}`);
+    }
+
+    const refreshBackoffReason = getOauthRefreshBackoffReason(candidate.account.extraConfig, Date.parse(nowIso));
+    if (refreshBackoffReason) {
+      reasonParts.push('OAuth 刷新冷却中');
     }
 
     const downstreamExclusionReason = this.resolveDownstreamExclusionReason(candidate, options.downstreamPolicy);

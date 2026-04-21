@@ -17,13 +17,13 @@ describe('extractClaudeCodeSessionId', () => {
 });
 
 describe('isCodexResponsesSurface', () => {
-  it('detects Codex responses surface from originator, stainless, and turn-state headers', () => {
+  it('detects Codex responses surface from originator, explicit websocket transport, and turn-state headers', () => {
     expect(isCodexResponsesSurface({
       originator: 'codex_cli_rs',
     })).toBe(true);
 
     expect(isCodexResponsesSurface({
-      'x-stainless-lang': 'typescript',
+      'x-metapi-responses-websocket-transport': '1',
     })).toBe(true);
 
     expect(isCodexResponsesSurface({
@@ -66,11 +66,22 @@ describe('detectDownstreamClientContext', () => {
     });
   });
 
-  it('keeps Codex requests without Session_id as client-only context', () => {
+  it('keeps non-Codex generic SDK requests without continuity ids as generic context', () => {
     expect(detectDownstreamClientContext({
       downstreamPath: '/v1/responses/compact',
       headers: {
         'x-stainless-lang': 'typescript',
+      },
+    })).toEqual({
+      clientKind: 'generic',
+    });
+  });
+
+  it('keeps Codex-compatible responses requests without continuity ids as client-only context', () => {
+    expect(detectDownstreamClientContext({
+      downstreamPath: '/v1/responses/compact',
+      headers: {
+        'openai-beta': 'responses-2025-03-11',
       },
     })).toEqual({
       clientKind: 'codex',

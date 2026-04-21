@@ -520,6 +520,12 @@ export type ProxyLogListItem = {
   clientAppName?: string | null;
   clientConfidence?: ProxyLogClientConfidence;
   usageSource?: ProxyLogUsageSource;
+  failureClass?: string | null;
+  failureTitle?: string | null;
+  sessionId?: string | null;
+  downstreamPath?: string | null;
+  upstreamPath?: string | null;
+  httpStatus?: number | null;
   promptTokens?: number | null;
   completionTokens?: number | null;
   estimatedCost?: number | null;
@@ -547,8 +553,102 @@ export type ProxyLogsQuery = {
   search?: string;
   client?: string;
   siteId?: number;
+  accountId?: number;
+  channelId?: number;
+  failureClass?: string;
   from?: string;
   to?: string;
+};
+
+export type ProxyOpsRecoverySignal = {
+  channelId: number;
+  modelName: string;
+  source: 'cooldown' | 'active';
+  status: 'supported' | 'unsupported' | 'inconclusive' | 'skipped' | 'failed';
+  latencyMs: number | null;
+  reason: string;
+  recordedAt: string;
+};
+
+export type ProxyOpsProtectionSignal = {
+  className: string;
+  title: string;
+  summary: string;
+  status: number | null;
+  recordedAt: string;
+};
+
+export type ProxyOpsModelProbeSummary = {
+  lastProbeAt: string;
+  scanned: number;
+  supported: number;
+  unsupported: number;
+  inconclusive: number;
+  skipped: number;
+  updatedRows: number;
+  status: 'success' | 'failed' | 'skipped';
+  message: string;
+};
+
+export type ProxyOpsAccountSnapshot = {
+  accountId: number;
+  username: string | null;
+  siteId: number;
+  siteName: string | null;
+  siteUrl: string | null;
+  accountStatus: string | null;
+  channelHealth: {
+    total: number;
+    cooling: number;
+    degraded: number;
+  };
+  proxy24h: {
+    total: number;
+    success: number;
+    failed: number;
+    retried: number;
+    successRate: number;
+  };
+  failureBuckets: Array<{
+    className: string;
+    title: string;
+    count: number;
+  }>;
+  latestFailure: {
+    className: string;
+    title: string;
+    summary: string;
+    recordedAt: string;
+    httpStatus: number | null;
+  } | null;
+  modelProbe?: ProxyOpsModelProbeSummary | null;
+  refresh?: {
+    lastRefreshAt: string;
+    status: 'success' | 'failed';
+    message: string;
+  } | null;
+  recoverySignals: ProxyOpsRecoverySignal[];
+  protectionSignals: ProxyOpsProtectionSignal[];
+  opsScore: number;
+};
+
+export type ProxyOpsSnapshot = {
+  generatedAt: string;
+  overview: {
+    totalAccounts: number;
+    degradedAccounts: number;
+    challengeAffectedAccounts: number;
+    coveredFailures24h: number;
+    totalRequests24h: number;
+    successRequests24h: number;
+    successRate24h: number;
+  };
+  failureBuckets24h: Array<{
+    className: string;
+    title: string;
+    count: number;
+  }>;
+  accounts: ProxyOpsAccountSnapshot[];
 };
 
 export type ProxyLogClientOption = {
@@ -964,6 +1064,8 @@ export const api = {
 
   // Stats
   getDashboard: () => request('/api/stats/dashboard'),
+  getProxyOps: (params?: { accountId?: number; limit?: number }) => request(`/api/stats/proxy-ops${buildQueryString(params)}`) as Promise<ProxyOpsSnapshot>,
+  triggerProxyOpsRecoverySweep: () => request('/api/stats/proxy-ops/recovery-sweep', { method: 'POST' }) as Promise<{ success: true; triggeredAt: string }>,
   getProxyLogs: (params?: ProxyLogsQuery) => request(`/api/stats/proxy-logs${buildQueryString(params)}`) as Promise<ProxyLogsResponse>,
   getProxyLogDetail: (id: number) => request(`/api/stats/proxy-logs/${id}`) as Promise<ProxyLogDetail>,
   getProxyDebugTraces: (params?: { limit?: number }) => request(`/api/stats/proxy-debug/traces${buildQueryString(params)}`) as Promise<ProxyDebugTracesResponse>,

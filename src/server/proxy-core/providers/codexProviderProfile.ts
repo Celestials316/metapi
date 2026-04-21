@@ -33,9 +33,9 @@ function prepareCodexRequest(input: PrepareProviderRequestInput & {
   const isCodexOauth = asTrimmedString(input.oauthProvider).toLowerCase() === 'codex';
   const websocketTransport = input.responsesWebsocketTransport === true;
   const configuredUserAgent = (
-    isCodexOauth || input.forceConfiguredUserAgent === true
-      ? asTrimmedString(config.codexHeaderDefaults.userAgent)
-      : ''
+    input.preserveBaseUserAgent === true
+      ? ''
+      : asTrimmedString(config.codexHeaderDefaults.userAgent)
   );
   const configuredBetaFeatures = (
     (isCodexOauth && websocketTransport) || input.forceConfiguredBetaFeatures === true
@@ -49,14 +49,16 @@ function prepareCodexRequest(input: PrepareProviderRequestInput & {
     explicitSessionId: asTrimmedString(input.codexExplicitSessionId) || null,
     continuityKey: asTrimmedString(input.codexSessionCacheKey) || null,
     userAgentOverride: configuredUserAgent || null,
-    preserveBaseUserAgent: input.preserveBaseUserAgent,
+    preserveBaseUserAgent: input.preserveBaseUserAgent === true,
+    preserveBaseOriginator: false,
+    preserveBaseVersion: false,
     codexBetaFeatures: getInputHeader(input.baseHeaders, 'x-codex-beta-features') || configuredBetaFeatures,
     codexTurnState: getInputHeader(input.baseHeaders, 'x-codex-turn-state'),
     codexTurnMetadata: getInputHeader(input.baseHeaders, 'x-codex-turn-metadata'),
     timingMetrics: getInputHeader(input.baseHeaders, 'x-responsesapi-include-timing-metrics'),
     openAiBeta: getInputHeader(input.baseHeaders, 'openai-beta')
       || input.openAiBetaDefault
-      || (websocketTransport ? asTrimmedString(config.codexResponsesWebsocketBeta) : null),
+      || 'responses=experimental',
   });
 
   return {

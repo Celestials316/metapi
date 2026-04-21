@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { eq } from 'drizzle-orm';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -16,6 +17,7 @@ function buildOauthExtraConfig(input: {
   provider: string;
   refreshToken?: string;
   tokenExpiresAt?: number;
+  oauthRefreshRuntime?: Record<string, unknown>;
 }): string {
   return JSON.stringify({
     credentialMode: 'session',
@@ -26,6 +28,7 @@ function buildOauthExtraConfig(input: {
       ...(input.refreshToken ? { refreshToken: input.refreshToken } : {}),
       ...(input.tokenExpiresAt ? { tokenExpiresAt: input.tokenExpiresAt } : {}),
     },
+    ...(input.oauthRefreshRuntime ? { oauthRefreshRuntime: input.oauthRefreshRuntime } : {}),
   });
 }
 
@@ -236,6 +239,56 @@ describe('oauthRefreshScheduler', () => {
       accountIds.antigravity_due,
       accountIds.gemini_due,
     ].sort((a, b) => a - b));
+  });
+
+  it('skips accounts that are still in oauth refresh backoff', async () => {
+    const nowMs = Date.parse('2026-04-05T12:00:00.000Z');
+    vi.setSystemTime(nowMs);
+
+    const site = await db.insert(schema.sites).values({
+      name: 'oauth-refresh-backoff-site',
+      url: 'https://oauth-refresh-backoff.example.com',
+      platform: 'codex',
+      status: 'active',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'oauth-refresh-backoff-user',
+      accessToken: 'oauth-refresh-backoff-token',
+      apiToken: null,
+      status: 'active',
+      oauthProvider: 'codex',
+      oauthAccountKey: 'oauth-refresh-backoff-user',
+      extraConfig: buildOauthExtraConfig({
+        provider: 'codex',
+        refreshToken: 'codex-refresh',
+        tokenExpiresAt: nowMs + (4 * 24 * 60 * 60 * 1000),
+        oauthRefreshRuntime: {
+          status: 'backoff',
+          consecutiveFailures: 2,
+          backoffUntil: new Date(nowMs + 5 * 60 * 1000).toISOString(),
+          lastError: 'refresh retry exhausted',
+        },
+      }),
+    }).returning().get();
+
+    const result = await executeOauthTokenAutoRefreshPass({ nowMs });
+
+    expect(result).toMatchObject({
+      scanned: 1,
+      refreshed: 0,
+      failed: 0,
+      skipped: 1,
+      refreshedAccountIds: [],
+      failedAccountIds: [],
+    });
+    expect(refreshOauthAccessTokenSingleflightMock).not.toHaveBeenCalled();
+
+    const refreshedAccount = await db.select().from(schema.accounts)
+      .where(eq(schema.accounts.id, account.id))
+      .get();
+    expect(String(refreshedAccount?.extraConfig || '')).toContain('backoffUntil');
   });
 
   it('starts with an immediate pass and keeps polling until stopped', async () => {

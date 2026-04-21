@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { eq } from 'drizzle-orm';
 import type { ConversationFileInputSummary } from '../proxy-core/capabilities/conversationFileCapabilities.js';
 import type { DownstreamFormat } from '../transformers/shared/normalized.js';
 import {
@@ -36,6 +37,12 @@ export type EndpointCapabilityProfile = {
   wantsContinuationAwareResponses: boolean;
 };
 
+type UpstreamEndpointPersistenceContext = {
+  db: typeof import('../db/index.js').db;
+  schema: typeof import('../db/index.js').schema;
+  upsertSetting: typeof import('../db/upsertSetting.js').upsertSetting;
+};
+
 type EndpointRuntimeState = {
   preferredEndpoint: UpstreamEndpointRuntimeEndpoint | null;
   preferredUpdatedAtMs: number;
@@ -46,10 +53,44 @@ type EndpointRuntimeState = {
 const ENDPOINT_RUNTIME_PREFERRED_TTL_MS = 24 * 60 * 60 * 1000;
 const ENDPOINT_RUNTIME_BLOCK_TTL_MS = 6 * 60 * 60 * 1000;
 const MAX_ENDPOINT_RUNTIME_STATES = 512;
+const ENDPOINT_RUNTIME_PERSIST_DEBOUNCE_MS = 500;
+const ENDPOINT_RUNTIME_REFRESH_INTERVAL_MS = 1_000;
+const ENDPOINT_RUNTIME_SETTING_KEY_PREFIX = 'upstream_endpoint_runtime_state_v1:';
 export const MAX_ENDPOINT_RUNTIME_MODEL_KEY_LENGTH = 64;
 export const MODEL_KEY_HASH_SUFFIX_LENGTH = 8;
 
 const endpointRuntimeStates = new Map<string, EndpointRuntimeState>();
+const endpointRuntimeLoadedBySite = new Map<number, number>();
+const endpointRuntimeDirtyBySite = new Set<number>();
+const endpointRuntimeMutationVersionBySite = new Map<number, number>();
+const endpointRuntimeLoadPromisesBySite = new Map<number, Promise<void>>();
+const endpointRuntimeSaveTimersBySite = new Map<number, ReturnType<typeof setTimeout>>();
+const endpointRuntimePersistInFlightBySite = new Map<number, Promise<void>>();
+let upstreamEndpointPersistenceContextPromise: Promise<UpstreamEndpointPersistenceContext> | null = null;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function isMissingSettingsTableError(error: unknown): boolean {
+  const message = String((error as { message?: unknown })?.message || error || '');
+  const causeMessage = String((error as { cause?: { message?: unknown } })?.cause?.message || '');
+  return message.includes('no such table: settings') || causeMessage.includes('no such table: settings');
+}
+
+async function getUpstreamEndpointPersistenceContext(): Promise<UpstreamEndpointPersistenceContext> {
+  if (!upstreamEndpointPersistenceContextPromise) {
+    upstreamEndpointPersistenceContextPromise = Promise.all([
+      import('../db/index.js'),
+      import('../db/upsertSetting.js'),
+    ]).then(([dbModule, upsertSettingModule]) => ({
+      db: dbModule.db,
+      schema: dbModule.schema,
+      upsertSetting: upsertSettingModule.upsertSetting,
+    }));
+  }
+  return upstreamEndpointPersistenceContextPromise;
+}
 
 function asTrimmedString(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
@@ -138,19 +179,261 @@ function buildEndpointRuntimeStateKey(input: {
   ].join(':');
 }
 
-function sweepEndpointRuntimeStates(nowMs = Date.now()): void {
-  for (const [key, state] of endpointRuntimeStates.entries()) {
-    const hasActiveBlock = Object.values(state.blockedUntilMsByEndpoint).some((untilMs) => (
-      typeof untilMs === 'number' && untilMs > nowMs
-    ));
-    const preferredFresh = (
-      !!state.preferredEndpoint
-      && (state.preferredUpdatedAtMs + ENDPOINT_RUNTIME_PREFERRED_TTL_MS) > nowMs
-    );
-    const recentlyTouched = (state.lastTouchedAtMs + ENDPOINT_RUNTIME_PREFERRED_TTL_MS) > nowMs;
-    if (!hasActiveBlock && !preferredFresh && !recentlyTouched) {
+function buildEndpointRuntimeSettingKey(siteId: number): string {
+  return `${ENDPOINT_RUNTIME_SETTING_KEY_PREFIX}${Math.trunc(siteId || 0)}`;
+}
+
+function getSiteIdFromEndpointStateKey(stateKey: string): number {
+  const siteIdRaw = String(stateKey || '').split(':', 1)[0] || '0';
+  return Math.trunc(Number(siteIdRaw) || 0);
+}
+
+function clearEndpointRuntimeStatesForSite(siteId: number): void {
+  const prefix = `${Math.trunc(siteId || 0)}:`;
+  for (const key of endpointRuntimeStates.keys()) {
+    if (key.startsWith(prefix)) {
       endpointRuntimeStates.delete(key);
     }
+  }
+}
+
+function cloneEndpointRuntimeState(state: EndpointRuntimeState): EndpointRuntimeState {
+  return {
+    preferredEndpoint: state.preferredEndpoint,
+    preferredUpdatedAtMs: state.preferredUpdatedAtMs,
+    lastTouchedAtMs: state.lastTouchedAtMs,
+    blockedUntilMsByEndpoint: { ...state.blockedUntilMsByEndpoint },
+  };
+}
+
+function hasActiveEndpointBlock(state: EndpointRuntimeState, nowMs = Date.now()): boolean {
+  return Object.values(state.blockedUntilMsByEndpoint).some((untilMs) => (
+    typeof untilMs === 'number' && untilMs > nowMs
+  ));
+}
+
+function isEndpointPreferredFresh(state: EndpointRuntimeState, nowMs = Date.now()): boolean {
+  return !!state.preferredEndpoint && (state.preferredUpdatedAtMs + ENDPOINT_RUNTIME_PREFERRED_TTL_MS) > nowMs;
+}
+
+function shouldKeepEndpointRuntimeState(state: EndpointRuntimeState, nowMs = Date.now()): boolean {
+  const recentlyTouched = (state.lastTouchedAtMs + ENDPOINT_RUNTIME_PREFERRED_TTL_MS) > nowMs;
+  return hasActiveEndpointBlock(state, nowMs) || isEndpointPreferredFresh(state, nowMs) || recentlyTouched;
+}
+
+function normalizePersistedEndpointRuntimeState(raw: unknown): EndpointRuntimeState | null {
+  if (!isRecord(raw)) return null;
+  const preferredEndpoint = raw.preferredEndpoint;
+  const normalizedPreferredEndpoint = (
+    preferredEndpoint === 'chat' || preferredEndpoint === 'messages' || preferredEndpoint === 'responses'
+  ) ? preferredEndpoint : null;
+  const preferredUpdatedAtMs = Math.trunc(Number(raw.preferredUpdatedAtMs) || 0);
+  const lastTouchedAtMs = Math.trunc(Number(raw.lastTouchedAtMs) || 0);
+  if (preferredUpdatedAtMs <= 0 || lastTouchedAtMs <= 0) return null;
+  const blockedUntilMsByEndpoint: Partial<Record<UpstreamEndpointRuntimeEndpoint, number>> = {};
+  if (isRecord(raw.blockedUntilMsByEndpoint)) {
+    for (const endpoint of ['chat', 'messages', 'responses'] as UpstreamEndpointRuntimeEndpoint[]) {
+      const untilMs = Number(raw.blockedUntilMsByEndpoint[endpoint]);
+      if (Number.isFinite(untilMs) && untilMs > 0) {
+        blockedUntilMsByEndpoint[endpoint] = untilMs;
+      }
+    }
+  }
+  return {
+    preferredEndpoint: normalizedPreferredEndpoint,
+    preferredUpdatedAtMs,
+    lastTouchedAtMs,
+    blockedUntilMsByEndpoint,
+  };
+}
+
+function buildEndpointRuntimePersistencePayload(siteId: number, nowMs = Date.now()) {
+  sweepEndpointRuntimeStates(nowMs);
+  const states: Record<string, EndpointRuntimeState> = {};
+  for (const [key, state] of endpointRuntimeStates.entries()) {
+    if (getSiteIdFromEndpointStateKey(key) !== siteId) continue;
+    if (!shouldKeepEndpointRuntimeState(state, nowMs)) continue;
+    states[key] = cloneEndpointRuntimeState(state);
+  }
+  return {
+    version: 1 as const,
+    savedAtMs: nowMs,
+    states,
+  };
+}
+
+async function persistEndpointRuntimeStateForSite(siteId: number): Promise<void> {
+  const normalizedSiteId = Math.trunc(siteId || 0);
+  if (normalizedSiteId <= 0) return;
+  const inFlight = endpointRuntimePersistInFlightBySite.get(normalizedSiteId);
+  if (inFlight) {
+    await inFlight;
+    return;
+  }
+  const targetMutationVersion = endpointRuntimeMutationVersionBySite.get(normalizedSiteId) || 0;
+  const task = (async () => {
+    const { upsertSetting } = await getUpstreamEndpointPersistenceContext();
+    const payload = buildEndpointRuntimePersistencePayload(normalizedSiteId);
+    await upsertSetting(buildEndpointRuntimeSettingKey(normalizedSiteId), payload);
+    endpointRuntimeLoadedBySite.set(normalizedSiteId, Date.now());
+    if ((endpointRuntimeMutationVersionBySite.get(normalizedSiteId) || 0) === targetMutationVersion) {
+      endpointRuntimeDirtyBySite.delete(normalizedSiteId);
+      return;
+    }
+    endpointRuntimeDirtyBySite.add(normalizedSiteId);
+  })();
+  const wrappedTask = task.finally(() => {
+    if (endpointRuntimePersistInFlightBySite.get(normalizedSiteId) === wrappedTask) {
+      endpointRuntimePersistInFlightBySite.delete(normalizedSiteId);
+    }
+    if (endpointRuntimeDirtyBySite.has(normalizedSiteId)) {
+      queueEndpointRuntimePersistence(normalizedSiteId);
+    }
+  });
+  endpointRuntimePersistInFlightBySite.set(normalizedSiteId, wrappedTask);
+  await wrappedTask;
+}
+
+function queueEndpointRuntimePersistence(siteId: number): void {
+  const normalizedSiteId = Math.trunc(siteId || 0);
+  if (normalizedSiteId <= 0) return;
+  if (endpointRuntimeSaveTimersBySite.has(normalizedSiteId)) return;
+  const timer = setTimeout(() => {
+    endpointRuntimeSaveTimersBySite.delete(normalizedSiteId);
+    void persistEndpointRuntimeStateForSite(normalizedSiteId).catch((error) => {
+      console.error('Failed to persist upstream endpoint runtime state', error);
+    });
+  }, ENDPOINT_RUNTIME_PERSIST_DEBOUNCE_MS);
+  endpointRuntimeSaveTimersBySite.set(normalizedSiteId, timer);
+}
+
+function scheduleEndpointRuntimePersistence(siteId: number): void {
+  const normalizedSiteId = Math.trunc(siteId || 0);
+  if (normalizedSiteId <= 0) return;
+  endpointRuntimeDirtyBySite.add(normalizedSiteId);
+  endpointRuntimeMutationVersionBySite.set(
+    normalizedSiteId,
+    (endpointRuntimeMutationVersionBySite.get(normalizedSiteId) || 0) + 1,
+  );
+  queueEndpointRuntimePersistence(normalizedSiteId);
+}
+
+async function loadEndpointRuntimeStateForSiteFromSettings(siteId: number): Promise<void> {
+  const { db, schema } = await getUpstreamEndpointPersistenceContext();
+  const normalizedSiteId = Math.trunc(siteId || 0);
+  clearEndpointRuntimeStatesForSite(normalizedSiteId);
+  if (!schema?.settings?.value || !schema?.settings?.key) {
+    endpointRuntimeLoadedBySite.set(normalizedSiteId, Date.now());
+    return;
+  }
+
+  let row: { value?: string | null } | undefined;
+  try {
+    row = await db.select({ value: schema.settings.value })
+      .from(schema.settings)
+      .where(eq(schema.settings.key, buildEndpointRuntimeSettingKey(normalizedSiteId)))
+      .get();
+  } catch (error) {
+    if (isMissingSettingsTableError(error)) {
+      endpointRuntimeLoadedBySite.set(normalizedSiteId, Date.now());
+      return;
+    }
+    throw error;
+  }
+  if (!row?.value) {
+    endpointRuntimeLoadedBySite.set(normalizedSiteId, Date.now());
+    return;
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(row.value);
+  } catch {
+    endpointRuntimeLoadedBySite.set(normalizedSiteId, Date.now());
+    return;
+  }
+  if (!isRecord(parsed) || !isRecord(parsed.states)) {
+    endpointRuntimeLoadedBySite.set(normalizedSiteId, Date.now());
+    return;
+  }
+
+  const nowMs = Date.now();
+  for (const [key, rawState] of Object.entries(parsed.states)) {
+    if (getSiteIdFromEndpointStateKey(key) !== normalizedSiteId) continue;
+    const state = normalizePersistedEndpointRuntimeState(rawState);
+    if (!state) continue;
+    if (!shouldKeepEndpointRuntimeState(state, nowMs)) continue;
+    endpointRuntimeStates.set(key, state);
+  }
+  enforceEndpointRuntimeStateLimit();
+  endpointRuntimeLoadedBySite.set(normalizedSiteId, nowMs);
+}
+
+export async function ensureUpstreamEndpointRuntimeStateLoaded(siteId: number, nowMs = Date.now()): Promise<void> {
+  const normalizedSiteId = Math.trunc(siteId || 0);
+  if (normalizedSiteId <= 0) return;
+  const loadedAtMs = endpointRuntimeLoadedBySite.get(normalizedSiteId) || 0;
+  if (
+    loadedAtMs > 0
+    && (endpointRuntimeDirtyBySite.has(normalizedSiteId) || (nowMs - loadedAtMs) < ENDPOINT_RUNTIME_REFRESH_INTERVAL_MS)
+  ) {
+    return;
+  }
+  if (!endpointRuntimeLoadPromisesBySite.has(normalizedSiteId)) {
+    endpointRuntimeLoadPromisesBySite.set(normalizedSiteId, (async () => {
+      try {
+        await loadEndpointRuntimeStateForSiteFromSettings(normalizedSiteId);
+      } catch (error) {
+        console.warn('Failed to restore upstream endpoint runtime state from settings', error);
+        endpointRuntimeLoadedBySite.delete(normalizedSiteId);
+      } finally {
+        endpointRuntimeLoadPromisesBySite.delete(normalizedSiteId);
+      }
+    })());
+  }
+  await endpointRuntimeLoadPromisesBySite.get(normalizedSiteId);
+}
+
+export async function flushUpstreamEndpointRuntimePersistence(siteId?: number): Promise<void> {
+  const normalizedSiteId = Math.trunc(siteId || 0);
+  if (normalizedSiteId > 0) {
+    while (true) {
+      const timer = endpointRuntimeSaveTimersBySite.get(normalizedSiteId);
+      if (timer) {
+        clearTimeout(timer);
+        endpointRuntimeSaveTimersBySite.delete(normalizedSiteId);
+        await persistEndpointRuntimeStateForSite(normalizedSiteId);
+        continue;
+      }
+      const inFlight = endpointRuntimePersistInFlightBySite.get(normalizedSiteId);
+      if (inFlight) {
+        await inFlight;
+        continue;
+      }
+      if (endpointRuntimeDirtyBySite.has(normalizedSiteId)) {
+        await persistEndpointRuntimeStateForSite(normalizedSiteId);
+        continue;
+      }
+      return;
+    }
+  }
+
+  const siteIds = new Set<number>([
+    ...endpointRuntimeSaveTimersBySite.keys(),
+    ...endpointRuntimePersistInFlightBySite.keys(),
+    ...endpointRuntimeDirtyBySite.values(),
+  ]);
+  for (const pendingSiteId of siteIds) {
+    await flushUpstreamEndpointRuntimePersistence(pendingSiteId);
+  }
+}
+
+function sweepEndpointRuntimeStates(nowMs = Date.now()): void {
+  for (const [key, state] of endpointRuntimeStates.entries()) {
+    if (shouldKeepEndpointRuntimeState(state, nowMs)) {
+      continue;
+    }
+    endpointRuntimeStates.delete(key);
   }
 }
 
@@ -187,15 +470,7 @@ function getOrCreateEndpointRuntimeState(key: string, nowMs = Date.now()): Endpo
 function maybeDeleteEndpointRuntimeState(key: string, nowMs = Date.now()): void {
   const state = endpointRuntimeStates.get(key);
   if (!state) return;
-
-  const hasActiveBlock = Object.values(state.blockedUntilMsByEndpoint).some((untilMs) => (
-    typeof untilMs === 'number' && untilMs > nowMs
-  ));
-  const preferredFresh = (
-    !!state.preferredEndpoint
-    && (state.preferredUpdatedAtMs + ENDPOINT_RUNTIME_PREFERRED_TTL_MS) > nowMs
-  );
-  if (!hasActiveBlock && !preferredFresh) {
+  if (!shouldKeepEndpointRuntimeState(state, nowMs)) {
     endpointRuntimeStates.delete(key);
   }
 }
@@ -342,6 +617,16 @@ export function applyUpstreamEndpointRuntimePreference(
 
 export function resetUpstreamEndpointRuntimeState(): void {
   endpointRuntimeStates.clear();
+  endpointRuntimeLoadedBySite.clear();
+  endpointRuntimeDirtyBySite.clear();
+  endpointRuntimeMutationVersionBySite.clear();
+  endpointRuntimeLoadPromisesBySite.clear();
+  for (const timer of endpointRuntimeSaveTimersBySite.values()) {
+    clearTimeout(timer);
+  }
+  endpointRuntimeSaveTimersBySite.clear();
+  endpointRuntimePersistInFlightBySite.clear();
+  upstreamEndpointPersistenceContextPromise = null;
 }
 
 export function recordUpstreamEndpointSuccess(input: {
@@ -375,6 +660,8 @@ export function recordUpstreamEndpointSuccess(input: {
   state.preferredEndpoint = input.endpoint;
   state.preferredUpdatedAtMs = nowMs;
   delete state.blockedUntilMsByEndpoint[input.endpoint];
+  endpointRuntimeLoadedBySite.set(Math.trunc(input.siteId || 0), nowMs);
+  scheduleEndpointRuntimePersistence(input.siteId);
   return {
     action: 'success',
     endpoint: input.endpoint,
@@ -422,6 +709,8 @@ export function recordUpstreamEndpointFailure(input: {
     state.preferredUpdatedAtMs = nowMs;
     delete state.blockedUntilMsByEndpoint[suggestedEndpoint];
   }
+  endpointRuntimeLoadedBySite.set(Math.trunc(input.siteId || 0), nowMs);
+  scheduleEndpointRuntimePersistence(input.siteId);
   return {
     action: 'failure',
     endpoint: input.endpoint,

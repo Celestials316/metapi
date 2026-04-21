@@ -31,6 +31,9 @@ const dbInsertMock = vi.fn((_arg?: any) => ({
   values: (values: Record<string, unknown>) => {
     insertedProxyLogs.push(values);
     return {
+      onConflictDoUpdate: () => ({
+        run: () => undefined,
+      }),
       run: () => undefined,
     };
   },
@@ -94,6 +97,7 @@ vi.mock('../../services/oauth/quota.js', () => ({
 }));
 
 vi.mock('../../db/index.js', () => ({
+  runtimeDbDialect: 'sqlite',
   db: {
     insert: (arg: any) => dbInsertMock(arg),
     select: () => ({
@@ -118,6 +122,9 @@ vi.mock('../../db/index.js', () => ({
   hasProxyLogDownstreamApiKeyIdColumn: async () => false,
   hasProxyLogStreamTimingColumns: async () => false,
   schema: {
+    settings: {
+      key: {},
+    },
     proxyLogs: {},
     siteApiEndpoints: {
       id: {},
@@ -294,10 +301,21 @@ describe('responses proxy codex oauth refresh', () => {
     expect(secondOptions.headers.Version || secondOptions.headers.version).toBe('0.101.0');
     expect(String(secondOptions.headers.Session_id || secondOptions.headers.session_id || '')).toMatch(/^[0-9a-f-]{36}$/i);
     expect(secondOptions.headers.Conversation_id || secondOptions.headers.conversation_id).toBeUndefined();
-    expect(secondOptions.headers['User-Agent'] || secondOptions.headers['user-agent']).toBe('CodexClient/1.0');
+    expect(secondOptions.headers['User-Agent'] || secondOptions.headers['user-agent']).toBe('codex_cli_rs/0.101.0 (Mac OS 26.0.1; arm64) Apple_Terminal/464');
     expect(secondOptions.headers.Accept || secondOptions.headers.accept).toBe('text/event-stream');
     expect(secondOptions.headers.Connection || secondOptions.headers.connection).toBe('Keep-Alive');
     expect(response.json()?.output_text).toContain('ok after codex token refresh');
+    expect(insertedProxyLogs).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        status: 'retried',
+        httpStatus: 401,
+        errorMessage: expect.stringContaining('expired token'),
+      }),
+      expect.objectContaining({
+        status: 'success',
+        httpStatus: 200,
+      }),
+    ]));
   });
 
   it('refreshes codex oauth token and retries the same responses request on 403', async () => {
@@ -797,9 +815,9 @@ describe('responses proxy codex oauth refresh', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
 
     const [, options] = fetchMock.mock.calls[0] as [string, any];
-    expect(options.headers.Version || options.headers.version).toBe('0.202.0');
+    expect(options.headers.Version || options.headers.version).toBe('0.101.0');
     expect(options.headers.Session_id || options.headers.session_id).toBe('session-from-client');
-    expect(options.headers['User-Agent'] || options.headers['user-agent']).toBe('OpenClaw/1.0');
+    expect(options.headers['User-Agent'] || options.headers['user-agent']).toBe('codex_cli_rs/0.101.0 (Mac OS 26.0.1; arm64) Apple_Terminal/464');
     expect(options.headers['openai-beta']).toBeUndefined();
     expect(options.headers['x-openai-client-user-agent']).toBeUndefined();
     expect(options.headers.origin).toBeUndefined();
@@ -882,6 +900,82 @@ describe('responses proxy codex oauth refresh', () => {
     const [, secondOptions] = fetchMock.mock.calls[1] as [string, any];
     expect(firstOptions.headers.Session_id || firstOptions.headers.session_id).toBe('session-http-serial-1');
     expect(secondOptions.headers.Session_id || secondOptions.headers.session_id).toBe('session-http-serial-1');
+  });
+
+  it('serializes concurrent codex HTTP responses requests that only share conversation id', async () => {
+    const firstUpstream = createDeferred<Response>();
+    fetchMock
+      .mockImplementationOnce(() => firstUpstream.promise)
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        id: 'resp_codex_conv_serial_2',
+        object: 'response',
+        model: 'gpt-5.2-codex',
+        status: 'completed',
+        output_text: 'second conversation request finished',
+        usage: { input_tokens: 4, output_tokens: 2, total_tokens: 6 },
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }));
+
+    const headers = {
+      'openai-beta': 'responses-2025-03-11',
+      'x-stainless-lang': 'typescript',
+      conversation_id: 'conversation-only-serial-1',
+      'user-agent': 'OpenClaw/1.0',
+    };
+
+    const firstResponsePromise = app.inject({
+      method: 'POST',
+      url: '/v1/responses',
+      headers,
+      payload: {
+        model: 'gpt-5.2-codex',
+        input: 'first conversation request',
+      },
+    });
+
+    await waitFor(() => fetchMock.mock.calls.length === 1);
+
+    const secondResponsePromise = app.inject({
+      method: 'POST',
+      url: '/v1/responses',
+      headers,
+      payload: {
+        model: 'gpt-5.2-codex',
+        input: 'second conversation request',
+      },
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    firstUpstream.resolve(new Response(JSON.stringify({
+      id: 'resp_codex_conv_serial_1',
+      object: 'response',
+      model: 'gpt-5.2-codex',
+      status: 'completed',
+      output_text: 'first conversation request finished',
+      usage: { input_tokens: 4, output_tokens: 2, total_tokens: 6 },
+    }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }));
+
+    const firstResponse = await firstResponsePromise;
+    expect(firstResponse.statusCode).toBe(200);
+    expect(firstResponse.json()).toMatchObject({
+      output_text: 'first conversation request finished',
+    });
+
+    await waitFor(() => fetchMock.mock.calls.length === 2);
+
+    const secondResponse = await secondResponsePromise;
+    expect(secondResponse.statusCode).toBe(200);
+    expect(secondResponse.json()).toMatchObject({
+      output_text: 'second conversation request finished',
+    });
   });
 
   it('does not gate codex responses requests without a downstream session id behind the session lease queue', async () => {
@@ -1097,6 +1191,77 @@ describe('responses proxy codex oauth refresh', () => {
     expect(selectPreferredChannelMock.mock.calls[0]?.[1]).toBe(11);
   });
 
+  it('rebinds sticky channels after websocket transport fast-path successes when only conversation id is present', async () => {
+    config.proxyStickySessionEnabled = true;
+
+    const selected = {
+      channel: { id: 11, routeId: 22 },
+      site: { name: 'codex-site', url: 'https://chatgpt.com/backend-api/codex', platform: 'codex' },
+      account: {
+        id: 33,
+        username: 'codex-user@example.com',
+        extraConfig: JSON.stringify({
+          credentialMode: 'session',
+          oauth: {
+            provider: 'codex',
+            accountId: 'chatgpt-account-123',
+            email: 'codex-user@example.com',
+            planType: 'plus',
+          },
+        }),
+      },
+      tokenName: 'default',
+      tokenValue: 'expired-access-token',
+      actualModel: 'gpt-5.2-codex',
+    };
+    selectChannelMock.mockReturnValue(selected);
+    selectPreferredChannelMock.mockReturnValue(selected);
+
+    const stickyHeaders = {
+      'x-metapi-responses-websocket-transport': '1',
+      conversation_id: 'conversation-sticky-fast-path-1',
+    };
+    const ssePayload = createSseResponse([
+      'event: response.created\n',
+      'data: {"type":"response.created","response":{"id":"resp_codex_conv_fast_path","model":"gpt-5.4","created_at":1706000000,"status":"in_progress","output":[]}}\n\n',
+      'event: response.completed\n',
+      'data: {"type":"response.completed","response":{"id":"resp_codex_conv_fast_path","model":"gpt-5.4","status":"completed","usage":{"input_tokens":3,"output_tokens":1,"total_tokens":4}}}\n\n',
+      'data: [DONE]\n\n',
+    ]);
+    fetchMock.mockResolvedValue(ssePayload);
+
+    const firstResponse = await app.inject({
+      method: 'POST',
+      url: '/v1/responses',
+      headers: stickyHeaders,
+      payload: {
+        model: 'gpt-5.4',
+        input: 'hello codex',
+        stream: true,
+      },
+    });
+
+    expect(firstResponse.statusCode).toBe(200);
+    expect(firstResponse.body).toContain('event: response.completed');
+    expect(selectPreferredChannelMock).not.toHaveBeenCalled();
+
+    const secondResponse = await app.inject({
+      method: 'POST',
+      url: '/v1/responses',
+      headers: stickyHeaders,
+      payload: {
+        model: 'gpt-5.4',
+        input: 'hello again',
+        stream: true,
+      },
+    });
+
+    expect(secondResponse.statusCode).toBe(200);
+    expect(selectPreferredChannelMock).toHaveBeenCalledTimes(1);
+    expect(selectPreferredChannelMock.mock.calls[0]?.[0]).toBe('gpt-5.4');
+    expect(selectPreferredChannelMock.mock.calls[0]?.[1]).toBe(11);
+  });
+
   it('decodes zstd-compressed codex responses SSE before relaying native downstream streams', async () => {
     fetchMock.mockResolvedValue(createCompressedSseResponse([
       'event: response.created\n',
@@ -1157,10 +1322,12 @@ describe('responses proxy codex oauth refresh', () => {
     expect(firstBody.store).toBe(false);
     expect(firstBody.stream).toBe(true);
     expect(firstBody.max_output_tokens).toBeUndefined();
+    expect(firstBody.metadata).toBeUndefined();
     expect(secondBody.instructions).toBe('');
     expect(secondBody.store).toBe(false);
     expect(secondBody.stream).toBe(true);
     expect(secondBody.max_output_tokens).toBeUndefined();
+    expect(secondBody.metadata).toBeUndefined();
   });
 
   it('does not record success when a streaming responses request ends with response.failed', async () => {
