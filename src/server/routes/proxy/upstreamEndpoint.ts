@@ -989,7 +989,7 @@ export function buildUpstreamEndpointRequest(input: {
       });
     }
 
-    if (isCodexCompatibleRequest) {
+    if (isCodexCompatibleRequest || sitePlatform === 'openai') {
       return prepareCodexCompatibleOpenAiResponsesRequest({
         endpoint: 'responses',
         modelName: input.modelName,
