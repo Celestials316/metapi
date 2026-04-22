@@ -68,10 +68,10 @@
 
 ## 5. 当前总状态
 
-- 当前阶段：**定向门禁与最终复审均已通过，正在按正确账号提交并推送**
+- 当前阶段：**本轮 pending_overload 治理闭环已完成并推送到 `main`**
 - 当前轮次目标：**P0-1 ~ P0-3 最小闭环**
 - 用户追加验收：**此前对比 sub2api / new-api 提炼出的高价值吸收点，必须确认已在现有代码或本次改动中全部落地到位**
-- 当前阻塞：仅剩 commit / push 与收口回写
+- 当前阻塞：无；后续如需继续增强，转入新增需求而非本轮阻塞
 
 ## 6. P0 清单（本轮）
 
@@ -170,16 +170,20 @@
 
 ## 10. 最终收口清单
 
-- [ ] 追踪文档已创建并与真实状态一致
-- [ ] P0-1 完成且小测试通过
-- [ ] P0-2 完成且小测试通过
-- [ ] P0-3 完成且小测试通过
-- [ ] 定向门禁通过
-- [ ] 独立 reviewer 审查通过
-- [ ] git diff / status 清晰可提交
-- [ ] 使用正确 GitHub 账号提交并推送
+- [x] 追踪文档已创建并与真实状态一致
+- [x] P0-1 完成且小测试通过
+- [x] P0-2 完成且小测试通过
+- [x] P0-3 完成且小测试通过
+- [x] 定向门禁通过
+- [x] 独立 reviewer 审查通过
+- [x] git diff / status 清晰可提交
+- [x] 使用正确 GitHub 账号提交并推送
 
 ## 11. 最终收口记录
 
-- 当前：未完成
-- 备注：本文件创建后，后续每推进一项都要同步回写状态与测试结果
+- 当前：已完成
+- 备注：
+  - 定向门禁：`npx vitest run src/server/services/tokenRouter.selection.test.ts src/server/services/proxyRetryPolicy.test.ts src/server/services/proxyFailureTaxonomy.test.ts src/server/runtimeSettingsHydration.test.ts src/server/routes/api/settings.events.test.ts src/web/pages/settings.proxy-transport.test.tsx src/server/services/proxyOpsSnapshotService.test.ts src/server/routes/api/stats.proxy-logs.test.ts src/web/pages/ProxyOps.test.tsx src/web/pages/ProxyLogs.server-driven.test.tsx` ✅（`10 files passed / 110 tests passed`）
+  - 额外门禁：`npm run typecheck` ✅；`npm run repo:drift-check` ✅（`Violations: 0`）
+  - 独立 reviewer：通过，确认 pending_overload 闭环与此前 sub2api / new-api 高价值吸收点在当前仓库 + 本次改动下无新的 must-fix 缺口
+  - 提交：`7f54af505c80fcff71ab95f1b5245b534bee7504` `完善 pending_overload 治理闭环与设置链路`
