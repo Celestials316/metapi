@@ -22,6 +22,7 @@ const RETRYABLE_FAILURE_CLASSES = new Set<ProxyFailureClass>([
   'challenge_cloudflare',
   'challenge_turnstile',
   'challenge_shield',
+  'pending_overload',
   'rate_limit',
   'quota_exceeded',
   'auth_invalid',

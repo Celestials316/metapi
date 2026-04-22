@@ -57,6 +57,7 @@ interface RuntimeSettingsBody {
   disableCrossProtocolFallback?: boolean;
   proxySessionChannelConcurrencyLimit?: number;
   proxySessionChannelQueueWaitMs?: number;
+  tokenRouterPendingOverloadCooldownSec?: number;
   proxyDebugTraceEnabled?: boolean;
   proxyDebugCaptureHeaders?: boolean;
   proxyDebugCaptureBodies?: boolean;
@@ -440,6 +441,12 @@ function applyImportedSettingToRuntime(key: string, value: unknown) {
       config.proxySessionChannelQueueWaitMs = Math.trunc(queueWaitMs);
       return;
     }
+    case 'token_router_pending_overload_cooldown_sec': {
+      const cooldownSec = Number(value);
+      if (!Number.isFinite(cooldownSec) || cooldownSec < 1) return;
+      config.tokenRouterPendingOverloadCooldownSec = Math.trunc(cooldownSec);
+      return;
+    }
     case 'proxy_debug_trace_enabled': {
       try {
         config.proxyDebugTraceEnabled = parseBooleanFlag(value, '代理调试追踪开关');
@@ -705,6 +712,7 @@ function getRuntimeSettingsResponse(currentAdminIp = '') {
     disableCrossProtocolFallback: config.disableCrossProtocolFallback,
     proxySessionChannelConcurrencyLimit: config.proxySessionChannelConcurrencyLimit,
     proxySessionChannelQueueWaitMs: config.proxySessionChannelQueueWaitMs,
+    tokenRouterPendingOverloadCooldownSec: config.tokenRouterPendingOverloadCooldownSec,
     proxyDebugTraceEnabled: config.proxyDebugTraceEnabled,
     proxyDebugCaptureHeaders: config.proxyDebugCaptureHeaders,
     proxyDebugCaptureBodies: config.proxyDebugCaptureBodies,
@@ -1217,6 +1225,19 @@ export async function settingsRoutes(app: FastifyInstance) {
       }
       config.proxySessionChannelQueueWaitMs = nextQueueWaitMs;
       upsertSetting('proxy_session_channel_queue_wait_ms', config.proxySessionChannelQueueWaitMs);
+    }
+
+    if (body.tokenRouterPendingOverloadCooldownSec !== undefined) {
+      const rawPendingOverloadCooldownSec = Number(body.tokenRouterPendingOverloadCooldownSec);
+      if (!Number.isFinite(rawPendingOverloadCooldownSec) || rawPendingOverloadCooldownSec < 1) {
+        return reply.code(400).send({ success: false, message: 'pending 过载冷却时间必须是大于等于 1 的整数秒' });
+      }
+      const nextPendingOverloadCooldownSec = Math.trunc(rawPendingOverloadCooldownSec);
+      if (nextPendingOverloadCooldownSec !== config.tokenRouterPendingOverloadCooldownSec) {
+        changedLabels.push(`pending 过载冷却（${config.tokenRouterPendingOverloadCooldownSec}s -> ${nextPendingOverloadCooldownSec}s）`);
+      }
+      config.tokenRouterPendingOverloadCooldownSec = nextPendingOverloadCooldownSec;
+      upsertSetting('token_router_pending_overload_cooldown_sec', config.tokenRouterPendingOverloadCooldownSec);
     }
 
     if (body.proxyDebugTraceEnabled !== undefined) {

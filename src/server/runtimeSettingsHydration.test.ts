@@ -21,6 +21,7 @@ describe('applyRuntimeSettings', () => {
     applyRuntimeSettings(new Map([
       ['disable_cross_protocol_fallback', JSON.stringify(true)],
       ['responses_compact_fallback_to_responses_enabled', JSON.stringify(true)],
+      ['token_router_pending_overload_cooldown_sec', JSON.stringify(75)],
       ['webhook_enabled', JSON.stringify(false)],
       ['bark_enabled', JSON.stringify(false)],
       ['serverchan_enabled', JSON.stringify(false)],
@@ -29,6 +30,7 @@ describe('applyRuntimeSettings', () => {
 
     expect(config.disableCrossProtocolFallback).toBe(true);
     expect(config.responsesCompactFallbackToResponsesEnabled).toBe(true);
+    expect(config.tokenRouterPendingOverloadCooldownSec).toBe(75);
     expect(config.webhookEnabled).toBe(false);
     expect(config.barkEnabled).toBe(false);
     expect(config.serverChanEnabled).toBe(false);
@@ -43,5 +45,19 @@ describe('applyRuntimeSettings', () => {
     ]));
 
     expect(config.smtpPort).toBe(587);
+  });
+
+  it('normalizes and validates pending-overload cooldown during hydration', () => {
+    config.tokenRouterPendingOverloadCooldownSec = 30;
+
+    applyRuntimeSettings(new Map([
+      ['token_router_pending_overload_cooldown_sec', JSON.stringify(12.9)],
+    ]));
+    expect(config.tokenRouterPendingOverloadCooldownSec).toBe(12);
+
+    applyRuntimeSettings(new Map([
+      ['token_router_pending_overload_cooldown_sec', JSON.stringify(0)],
+    ]));
+    expect(config.tokenRouterPendingOverloadCooldownSec).toBe(12);
   });
 });

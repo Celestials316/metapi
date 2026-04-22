@@ -369,6 +369,7 @@ export type RuntimeSettingsPayload = {
   disableCrossProtocolFallback?: boolean;
   proxySessionChannelConcurrencyLimit?: number;
   proxySessionChannelQueueWaitMs?: number;
+  tokenRouterPendingOverloadCooldownSec?: number;
   proxyDebugTraceEnabled?: boolean;
   proxyDebugCaptureHeaders?: boolean;
   proxyDebugCaptureBodies?: boolean;

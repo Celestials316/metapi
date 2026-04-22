@@ -122,6 +122,7 @@ export function buildConfig(env: NodeJS.ProcessEnv) {
     tokenRouterFailureCooldownMaxSec: normalizeTokenRouterFailureCooldownMaxSec(
       parseNumber(env.TOKEN_ROUTER_FAILURE_COOLDOWN_MAX_SEC, TOKEN_ROUTER_FAILURE_COOLDOWN_MAX_SEC_CEILING),
     ) ?? TOKEN_ROUTER_FAILURE_COOLDOWN_MAX_SEC_CEILING,
+    tokenRouterPendingOverloadCooldownSec: Math.max(1, Math.trunc(parseNumber(env.TOKEN_ROUTER_PENDING_OVERLOAD_COOLDOWN_SEC, 60))),
     tokenRouterCacheTtlMs: Math.max(100, Math.trunc(parseNumber(env.TOKEN_ROUTER_CACHE_TTL_MS, 1_500))),
     proxyMaxChannelAttempts: Math.max(1, Math.trunc(parseNumber(env.PROXY_MAX_CHANNEL_ATTEMPTS, 3))),
     proxyStickySessionEnabled: parseBoolean(env.PROXY_STICKY_SESSION_ENABLED, true),

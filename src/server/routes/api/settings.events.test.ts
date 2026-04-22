@@ -126,7 +126,7 @@ describe('settings and auth events', () => {
     expect(savedInterval?.value).toBe(JSON.stringify(8));
   });
 
-  it('persists codex upstream websocket and session lease settings from runtime settings', async () => {
+  it('persists codex upstream websocket and pending-overload transport settings from runtime settings', async () => {
     const updateResponse = await app.inject({
       method: 'PUT',
       url: '/api/settings/runtime',
@@ -134,6 +134,7 @@ describe('settings and auth events', () => {
         codexUpstreamWebsocketEnabled: true,
         proxySessionChannelConcurrencyLimit: 6,
         proxySessionChannelQueueWaitMs: 4200,
+        tokenRouterPendingOverloadCooldownSec: 75,
       },
     });
 
@@ -142,20 +143,147 @@ describe('settings and auth events', () => {
       codexUpstreamWebsocketEnabled?: boolean;
       proxySessionChannelConcurrencyLimit?: number;
       proxySessionChannelQueueWaitMs?: number;
+      tokenRouterPendingOverloadCooldownSec?: number;
     };
     expect(updated.codexUpstreamWebsocketEnabled).toBe(true);
     expect(updated.proxySessionChannelConcurrencyLimit).toBe(6);
     expect(updated.proxySessionChannelQueueWaitMs).toBe(4200);
+    expect(updated.tokenRouterPendingOverloadCooldownSec).toBe(75);
     expect(config.codexUpstreamWebsocketEnabled).toBe(true);
     expect(config.proxySessionChannelConcurrencyLimit).toBe(6);
     expect(config.proxySessionChannelQueueWaitMs).toBe(4200);
+    expect(config.tokenRouterPendingOverloadCooldownSec).toBe(75);
 
     const savedWebsocket = await db.select().from(schema.settings).where(eq(schema.settings.key, 'codex_upstream_websocket_enabled')).get();
     const savedConcurrency = await db.select().from(schema.settings).where(eq(schema.settings.key, 'proxy_session_channel_concurrency_limit')).get();
     const savedQueueWait = await db.select().from(schema.settings).where(eq(schema.settings.key, 'proxy_session_channel_queue_wait_ms')).get();
+    const savedPendingOverloadCooldown = await db.select().from(schema.settings).where(eq(schema.settings.key, 'token_router_pending_overload_cooldown_sec')).get();
     expect(savedWebsocket?.value).toBe(JSON.stringify(true));
     expect(savedConcurrency?.value).toBe(JSON.stringify(6));
     expect(savedQueueWait?.value).toBe(JSON.stringify(4200));
+    expect(savedPendingOverloadCooldown?.value).toBe(JSON.stringify(75));
+  });
+
+  it('applies pending-overload cooldown to runtime immediately after backup import', async () => {
+    config.tokenRouterPendingOverloadCooldownSec = 30;
+
+    const importResponse = await app.inject({
+      method: 'POST',
+      url: '/api/settings/backup/import',
+      payload: {
+        data: {
+          timestamp: new Date().toISOString(),
+          type: 'preferences',
+          preferences: {
+            settings: [
+              {
+                key: 'token_router_pending_overload_cooldown_sec',
+                value: 90,
+              },
+            ],
+          },
+        },
+      },
+    });
+
+    expect(importResponse.statusCode).toBe(200);
+    expect(config.tokenRouterPendingOverloadCooldownSec).toBe(90);
+
+    const savedPendingOverloadCooldown = await db.select().from(schema.settings).where(eq(schema.settings.key, 'token_router_pending_overload_cooldown_sec')).get();
+    expect(savedPendingOverloadCooldown?.value).toBe(JSON.stringify(90));
+
+    const runtimeResponse = await app.inject({
+      method: 'GET',
+      url: '/api/settings/runtime',
+    });
+    expect(runtimeResponse.statusCode).toBe(200);
+    const runtime = runtimeResponse.json() as { tokenRouterPendingOverloadCooldownSec?: number };
+    expect(runtime.tokenRouterPendingOverloadCooldownSec).toBe(90);
+  });
+
+  it('ignores invalid pending-overload cooldown values during backup import', async () => {
+    config.tokenRouterPendingOverloadCooldownSec = 30;
+
+    const importResponse = await app.inject({
+      method: 'POST',
+      url: '/api/settings/backup/import',
+      payload: {
+        data: {
+          timestamp: new Date().toISOString(),
+          type: 'preferences',
+          preferences: {
+            settings: [
+              {
+                key: 'token_router_pending_overload_cooldown_sec',
+                value: 0,
+              },
+            ],
+          },
+        },
+      },
+    });
+
+    expect(importResponse.statusCode).toBe(200);
+    expect(config.tokenRouterPendingOverloadCooldownSec).toBe(30);
+
+    const body = importResponse.json() as { appliedSettings?: Array<{ key: string; value: unknown }> };
+    expect(body.appliedSettings ?? []).toEqual([]);
+
+    const savedPendingOverloadCooldown = await db.select().from(schema.settings).where(eq(schema.settings.key, 'token_router_pending_overload_cooldown_sec')).get();
+    expect(savedPendingOverloadCooldown).toBeUndefined();
+
+    const runtimeResponse = await app.inject({
+      method: 'GET',
+      url: '/api/settings/runtime',
+    });
+    expect(runtimeResponse.statusCode).toBe(200);
+    const runtime = runtimeResponse.json() as { tokenRouterPendingOverloadCooldownSec?: number };
+    expect(runtime.tokenRouterPendingOverloadCooldownSec).toBe(30);
+  });
+
+  it('normalizes pending-overload cooldown to an integer during backup import', async () => {
+    config.tokenRouterPendingOverloadCooldownSec = 30;
+
+    const importResponse = await app.inject({
+      method: 'POST',
+      url: '/api/settings/backup/import',
+      payload: {
+        data: {
+          timestamp: new Date().toISOString(),
+          type: 'preferences',
+          preferences: {
+            settings: [
+              {
+                key: 'token_router_pending_overload_cooldown_sec',
+                value: 12.9,
+              },
+            ],
+          },
+        },
+      },
+    });
+
+    expect(importResponse.statusCode).toBe(200);
+    expect(config.tokenRouterPendingOverloadCooldownSec).toBe(12);
+
+    const body = importResponse.json() as { appliedSettings?: Array<{ key: string; value: unknown }> };
+    expect(body.appliedSettings ?? []).toEqual([
+      {
+        key: 'token_router_pending_overload_cooldown_sec',
+        value: 12,
+      },
+    ]);
+
+    const savedPendingOverloadCooldown = await db.select().from(schema.settings).where(eq(schema.settings.key, 'token_router_pending_overload_cooldown_sec')).get();
+    expect(savedPendingOverloadCooldown?.value).toBe(JSON.stringify(12));
+
+    const runtimeResponse = await app.inject({
+      method: 'GET',
+      url: '/api/settings/runtime',
+    });
+    expect(runtimeResponse.statusCode).toBe(200);
+    const runtime = runtimeResponse.json() as { tokenRouterPendingOverloadCooldownSec?: number };
+    expect(runtime.tokenRouterPendingOverloadCooldownSec).toBe(12);
   });
 
   it('persists proxy debug runtime settings from runtime settings', async () => {

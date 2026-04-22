@@ -1,5 +1,6 @@
 ﻿import { and, eq, inArray, isNull } from 'drizzle-orm';
 import { db, schema } from '../db/index.js';
+import { classifyProxyFailure } from './proxyFailureTaxonomy.js';
 import { upsertSetting } from '../db/upsertSetting.js';
 import {
   config,
@@ -193,6 +194,13 @@ const SITE_TRANSIENT_FAILURE_PATTERNS: RegExp[] = [
   /econnrefused/i,
 ];
 
+const PENDING_REQUEST_OVERLOAD_PATTERNS: RegExp[] = [
+  /too many pending requests/i,
+  /pending requests?.*retry later/i,
+  /pending overload/i,
+  /pending request overload/i,
+];
+
 const USAGE_LIMIT_RATE_LIMIT_PATTERNS: RegExp[] = [
   /usage_limit_reached/i,
   /usage\s+limit\s+has\s+been\s+reached/i,
@@ -374,9 +382,18 @@ function matchesAnyPattern(patterns: RegExp[], input?: string | null): boolean {
   return patterns.some((pattern) => pattern.test(text));
 }
 
+function isPendingRequestOverloadFailure(context: SiteRuntimeFailureContext = {}): boolean {
+  const failure = classifyProxyFailure({
+    status: typeof context.status === 'number' ? context.status : 0,
+    errorMessage: context.errorText,
+  });
+  return failure.className === 'pending_overload';
+}
+
 function isUsageLimitRateLimitFailure(context: SiteRuntimeFailureContext = {}): boolean {
   const status = typeof context.status === 'number' ? context.status : 0;
   if (status !== 429) return false;
+  if (isPendingRequestOverloadFailure(context)) return false;
   return matchesAnyPattern(USAGE_LIMIT_RATE_LIMIT_PATTERNS, context.errorText);
 }
 
@@ -587,6 +604,9 @@ function resolveShortWindowLimitCooldown(
 ): string | null {
   const status = typeof context.status === 'number' ? context.status : 0;
   const errorText = (context.errorText || '').trim();
+  if (isPendingRequestOverloadFailure({ status, errorText })) {
+    return new Date(nowMs + (config.tokenRouterPendingOverloadCooldownSec * 1000)).toISOString();
+  }
   if (!isUsageLimitRateLimitFailure({ status, errorText })) return null;
 
   const resetHint = parseCodexQuotaResetHint(status, errorText, nowMs);
@@ -607,6 +627,10 @@ function resolveShortWindowLimitCooldown(
   }
 
   return new Date(nowMs + SHORT_WINDOW_LIMIT_COOLDOWN_MS).toISOString();
+}
+
+function shouldRecordSiteRuntimeFailure(context: SiteRuntimeFailureContext = {}): boolean {
+  return !isPendingRequestOverloadFailure(context);
 }
 
 async function loadCredentialScopedChannelIds(
@@ -2628,6 +2652,51 @@ export class TokenRouter {
       channel.consecutiveFailCount = 0;
       channel.cooldownLevel = 0;
     });
+
+    if (!(typeof ch.oauthRouteUnitId === 'number' && ch.oauthRouteUnitId > 0)) {
+      const affectedChannelIds = await loadCredentialScopedChannelIds(ch, account.id);
+      if (affectedChannelIds.length > 1) {
+        const siblingIds = affectedChannelIds.filter((affectedChannelId) => affectedChannelId !== channelId);
+        if (siblingIds.length > 0) {
+          const siblingRows = await db.select({
+            id: schema.routeChannels.id,
+            cooldownUntil: schema.routeChannels.cooldownUntil,
+            lastFailAt: schema.routeChannels.lastFailAt,
+            consecutiveFailCount: schema.routeChannels.consecutiveFailCount,
+            cooldownLevel: schema.routeChannels.cooldownLevel,
+          })
+            .from(schema.routeChannels)
+            .where(inArray(schema.routeChannels.id, siblingIds))
+            .all();
+          const siblingIdsToReset = siblingRows
+            .filter((candidate) => (
+              !!candidate.cooldownUntil
+              || !!candidate.lastFailAt
+              || (candidate.consecutiveFailCount ?? 0) > 0
+              || (candidate.cooldownLevel ?? 0) > 0
+            ))
+            .map((candidate) => candidate.id);
+
+          if (siblingIdsToReset.length > 0) {
+            await db.update(schema.routeChannels).set({
+              cooldownUntil: null,
+              lastFailAt: null,
+              consecutiveFailCount: 0,
+              cooldownLevel: 0,
+            }).where(inArray(schema.routeChannels.id, siblingIdsToReset)).run();
+
+            for (const siblingId of siblingIdsToReset) {
+              patchCachedChannel(siblingId, (channel) => {
+                channel.cooldownUntil = null;
+                channel.lastFailAt = null;
+                channel.consecutiveFailCount = 0;
+                channel.cooldownLevel = 0;
+              });
+            }
+          }
+        }
+      }
+    }
   }
 
   async recordProbeSuccess(
@@ -2891,7 +2960,9 @@ export class TokenRouter {
           cooldownUntil,
           updatedAt: nowIso,
         }).where(eq(schema.oauthRouteUnitMembers.id, memberRow.member.id)).run();
-        recordSiteRuntimeFailure(memberRow.account.siteId, normalizedContext, nowMs);
+        if (shouldRecordSiteRuntimeFailure(normalizedContext)) {
+          recordSiteRuntimeFailure(memberRow.account.siteId, normalizedContext, nowMs);
+        }
         const preference = await getAccountDispatchPreference(targetAccountId);
         if (preference.mode === 'prefer' && runtimeModelName) {
           recordAccountDispatchFailure({
@@ -2954,7 +3025,9 @@ export class TokenRouter {
       });
     }
 
-    recordSiteRuntimeFailure(account.siteId, normalizedContext, nowMs);
+    if (shouldRecordSiteRuntimeFailure(normalizedContext)) {
+      recordSiteRuntimeFailure(account.siteId, normalizedContext, nowMs);
+    }
     const targetAccountId = Number.isFinite(actualAccountId) && (actualAccountId ?? 0) > 0
       ? Math.trunc(actualAccountId!)
       : account.id;

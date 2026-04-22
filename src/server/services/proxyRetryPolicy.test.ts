@@ -4,6 +4,7 @@ import { shouldAbortSameSiteEndpointFallback, shouldRetryProxyRequest } from './
 describe('proxyRetryPolicy', () => {
   it('retries on taxonomy-recognized retryable failures', () => {
     expect(shouldRetryProxyRequest(429, 'rate limit exceeded')).toBe(true);
+    expect(shouldRetryProxyRequest(429, 'Too many pending requests, please retry later')).toBe(true);
     expect(shouldRetryProxyRequest(503, 'service unavailable')).toBe(true);
     expect(shouldRetryProxyRequest(403, '<html><title>Attention Required</title> cf-ray=abc')).toBe(true);
     expect(shouldRetryProxyRequest(402, '{"error":{"message":"insufficient quota"}}')).toBe(true);
@@ -42,6 +43,12 @@ describe('proxyRetryPolicy', () => {
     expect(
       shouldAbortSameSiteEndpointFallback(429, '{"error":{"message":"rate limit exceeded"}}'),
     ).toBe(true);
+    expect(
+      shouldAbortSameSiteEndpointFallback(429, '{"error":{"message":"Too many pending requests, please retry later"}}'),
+    ).toBe(false);
+    expect(
+      shouldAbortSameSiteEndpointFallback(503, '{"error":{"message":"pending overload"}}'),
+    ).toBe(false);
     expect(
       shouldAbortSameSiteEndpointFallback(402, '{"error":{"message":"insufficient quota"}}'),
     ).toBe(true);

@@ -45,6 +45,7 @@ describe('TokenRouter selection scoring', () => {
   let originalRoutingFallbackUnitCost: number;
   let originalProxySessionChannelConcurrencyLimit: number;
   let originalProxySessionChannelQueueWaitMs: number;
+  let originalTokenRouterPendingOverloadCooldownSec: number;
 
   const nextId = () => {
     idSeed += 1;
@@ -81,6 +82,7 @@ describe('TokenRouter selection scoring', () => {
     originalRoutingFallbackUnitCost = config.routingFallbackUnitCost;
     originalProxySessionChannelConcurrencyLimit = config.proxySessionChannelConcurrencyLimit;
     originalProxySessionChannelQueueWaitMs = config.proxySessionChannelQueueWaitMs;
+    originalTokenRouterPendingOverloadCooldownSec = config.tokenRouterPendingOverloadCooldownSec;
   });
 
   beforeEach(async () => {
@@ -89,6 +91,7 @@ describe('TokenRouter selection scoring', () => {
     mockedCatalogRoutingCost.mockReturnValue(null);
     config.proxySessionChannelConcurrencyLimit = originalProxySessionChannelConcurrencyLimit;
     config.proxySessionChannelQueueWaitMs = originalProxySessionChannelQueueWaitMs;
+    config.tokenRouterPendingOverloadCooldownSec = originalTokenRouterPendingOverloadCooldownSec;
     await db.delete(schema.accountDispatchPreferences).run();
     await db.delete(schema.routeChannels).run();
     await db.delete(schema.tokenRoutes).run();
@@ -108,6 +111,7 @@ describe('TokenRouter selection scoring', () => {
     config.routingFallbackUnitCost = originalRoutingFallbackUnitCost;
     config.proxySessionChannelConcurrencyLimit = originalProxySessionChannelConcurrencyLimit;
     config.proxySessionChannelQueueWaitMs = originalProxySessionChannelQueueWaitMs;
+    config.tokenRouterPendingOverloadCooldownSec = originalTokenRouterPendingOverloadCooldownSec;
     invalidateTokenRouterCache();
     resetAccountDispatchPreferenceCache();
     resetAccountDispatchRuntimeMemory();
@@ -365,6 +369,237 @@ describe('TokenRouter selection scoring', () => {
 
     const afterFailback = await router.selectChannel('gpt-5.4');
     expect(afterFailback?.account.id).toBe(accountA.id);
+  });
+
+  it('temporarily excludes accounts that hit pending request overload until probe success clears it', async () => {
+    config.tokenRouterPendingOverloadCooldownSec = 60;
+    const route = await createRoute('gpt-5.4');
+    const siteA = await createSite('pending-site-a');
+    const siteB = await createSite('pending-site-b');
+    const accountA = await createAccount(siteA.id, 'pending-user-a');
+    const accountB = await createAccount(siteB.id, 'pending-user-b');
+
+    const channelA = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: accountA.id,
+      tokenId: null,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+    await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: accountB.id,
+      tokenId: null,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).run();
+
+    await setAccountDispatchPreferenceMode(accountA.id, 'prefer');
+
+    const router = new TokenRouter();
+    expect((await router.selectChannel('gpt-5.4'))?.account.id).toBe(accountA.id);
+
+    await router.recordFailure(channelA.id, {
+      status: 429,
+      errorText: 'Too many pending requests, please retry later',
+      modelName: 'gpt-5.4',
+    }, accountA.id);
+
+    expect((await router.selectChannel('gpt-5.4'))?.account.id).toBe(accountB.id);
+
+    await router.recordProbeSuccess(channelA.id, 120, 'gpt-5.4', accountA.id);
+    expect((await router.selectChannel('gpt-5.4'))?.account.id).toBe(accountA.id);
+  });
+
+  it('clears sibling credential-scoped pending overload state on normal success recovery', async () => {
+    config.tokenRouterPendingOverloadCooldownSec = 5;
+    const route = await createRoute('gpt-5.4');
+    const site = await createSite('pending-scope-site');
+    const account = await createAccount(site.id, 'pending-scope-user');
+    const token = await createToken(account.id, 'pending-scope-token');
+
+    const channelA = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: account.id,
+      tokenId: token.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+    const siblingChannel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: account.id,
+      tokenId: token.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+
+    const router = new TokenRouter();
+    await router.recordFailure(channelA.id, {
+      status: 429,
+      errorText: 'Too many pending requests, please retry later',
+      modelName: 'gpt-5.4',
+    }, account.id);
+
+    const siblingAfterFailure = await db.select({
+      cooldownUntil: schema.routeChannels.cooldownUntil,
+      lastFailAt: schema.routeChannels.lastFailAt,
+      consecutiveFailCount: schema.routeChannels.consecutiveFailCount,
+      cooldownLevel: schema.routeChannels.cooldownLevel,
+    }).from(schema.routeChannels).where(eq(schema.routeChannels.id, siblingChannel.id)).get();
+    expect(siblingAfterFailure?.cooldownUntil).toBeTruthy();
+    expect(siblingAfterFailure?.lastFailAt).toBeTruthy();
+
+    await router.recordSuccess(channelA.id, 90, 0, 'gpt-5.4', account.id);
+
+    const siblingAfterSuccess = await db.select({
+      cooldownUntil: schema.routeChannels.cooldownUntil,
+      lastFailAt: schema.routeChannels.lastFailAt,
+      consecutiveFailCount: schema.routeChannels.consecutiveFailCount,
+      cooldownLevel: schema.routeChannels.cooldownLevel,
+    }).from(schema.routeChannels).where(eq(schema.routeChannels.id, siblingChannel.id)).get();
+    expect(siblingAfterSuccess?.cooldownUntil).toBeNull();
+    expect(siblingAfterSuccess?.lastFailAt).toBeNull();
+    expect(siblingAfterSuccess?.consecutiveFailCount ?? 0).toBe(0);
+    expect(siblingAfterSuccess?.cooldownLevel ?? 0).toBe(0);
+  });
+
+  it('does not open a site breaker for sibling accounts when only one account hits pending overload', async () => {
+    config.routingWeights = {
+      baseWeightFactor: 1,
+      valueScoreFactor: 0,
+      costWeight: 0,
+      balanceWeight: 0,
+      usageWeight: 0,
+    };
+
+    const route = await createRoute('gpt-5.4');
+
+    const sharedSite = await createSite('pending-shared-site');
+    const hotAccount = await createAccount(sharedSite.id, 'pending-hot-user');
+    const hotToken = await createToken(hotAccount.id, 'pending-hot-token');
+    const hotChannel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: hotAccount.id,
+      tokenId: hotToken.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+
+    const peerAccount = await createAccount(sharedSite.id, 'pending-peer-user');
+    const peerToken = await createToken(peerAccount.id, 'pending-peer-token');
+    const peerChannel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: peerAccount.id,
+      tokenId: peerToken.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+
+    const otherSite = await createSite('pending-other-site');
+    const otherAccount = await createAccount(otherSite.id, 'pending-other-user');
+    const otherToken = await createToken(otherAccount.id, 'pending-other-token');
+    const otherChannel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: otherAccount.id,
+      tokenId: otherToken.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+
+    const router = new TokenRouter();
+    for (let index = 0; index < 3; index += 1) {
+      await router.recordFailure(hotChannel.id, {
+        status: 429,
+        errorText: 'Too many pending requests, please retry later',
+        modelName: 'gpt-5.4',
+      }, hotAccount.id);
+    }
+
+    await db.update(schema.routeChannels).set({
+      cooldownUntil: null,
+      lastFailAt: null,
+      failCount: 0,
+    }).where(eq(schema.routeChannels.id, hotChannel.id)).run();
+    invalidateTokenRouterCache();
+
+    const decision = await router.explainSelection('gpt-5.4');
+    const hotCandidate = decision.candidates.find((candidate) => candidate.channelId === hotChannel.id);
+    const peerCandidate = decision.candidates.find((candidate) => candidate.channelId === peerChannel.id);
+    const otherCandidate = decision.candidates.find((candidate) => candidate.channelId === otherChannel.id);
+
+    expect(hotCandidate).toBeTruthy();
+    expect(peerCandidate).toBeTruthy();
+    expect(otherCandidate).toBeTruthy();
+    expect(peerCandidate?.reason || '').not.toContain('站点熔断');
+    expect((peerCandidate?.probability || 0)).toBeGreaterThan(0);
+    expect((otherCandidate?.probability || 0)).toBeGreaterThan(0);
+  });
+
+  it('does not open a site breaker for sibling accounts when pending overload is reported through a non-429 upstream status', async () => {
+    config.routingWeights = {
+      baseWeightFactor: 1,
+      valueScoreFactor: 0,
+      costWeight: 0,
+      balanceWeight: 0,
+      usageWeight: 0,
+    };
+
+    const route = await createRoute('gpt-5.4');
+
+    const sharedSite = await createSite('pending-non429-shared-site');
+    const hotAccount = await createAccount(sharedSite.id, 'pending-non429-hot-user');
+    const hotToken = await createToken(hotAccount.id, 'pending-non429-hot-token');
+    const hotChannel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: hotAccount.id,
+      tokenId: hotToken.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+
+    const peerAccount = await createAccount(sharedSite.id, 'pending-non429-peer-user');
+    const peerToken = await createToken(peerAccount.id, 'pending-non429-peer-token');
+    const peerChannel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: peerAccount.id,
+      tokenId: peerToken.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+
+    const router = new TokenRouter();
+    for (let index = 0; index < 3; index += 1) {
+      await router.recordFailure(hotChannel.id, {
+        status: 503,
+        errorText: 'pending overload',
+        modelName: 'gpt-5.4',
+      }, hotAccount.id);
+    }
+
+    await db.update(schema.routeChannels).set({
+      cooldownUntil: null,
+      lastFailAt: null,
+      failCount: 0,
+    }).where(eq(schema.routeChannels.id, hotChannel.id)).run();
+    invalidateTokenRouterCache();
+
+    const decision = await router.explainSelection('gpt-5.4');
+    const hotCandidate = decision.candidates.find((candidate) => candidate.channelId === hotChannel.id);
+    const peerCandidate = decision.candidates.find((candidate) => candidate.channelId === peerChannel.id);
+
+    expect(hotCandidate).toBeTruthy();
+    expect(peerCandidate).toBeTruthy();
+    expect(peerCandidate?.reason || '').not.toContain('站点熔断');
+    expect((peerCandidate?.probability || 0)).toBeGreaterThan(0);
   });
 
   it('round-robins inside an oauth route unit while keeping one outer channel', async () => {

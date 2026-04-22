@@ -2,6 +2,7 @@ export type ProxyFailureClass =
   | 'challenge_cloudflare'
   | 'challenge_turnstile'
   | 'challenge_shield'
+  | 'pending_overload'
   | 'rate_limit'
   | 'quota_exceeded'
   | 'auth_invalid'
@@ -54,6 +55,13 @@ const CHALLENGE_SHIELD_PATTERNS = [
   /forbidden by policy/i,
   /unexpected token\s*</i,
   /<html/i,
+];
+
+const PENDING_OVERLOAD_PATTERNS = [
+  /too many pending requests/i,
+  /pending requests?.*retry later/i,
+  /pending overload/i,
+  /pending request overload/i,
 ];
 
 const RATE_LIMIT_PATTERNS = [
@@ -179,6 +187,15 @@ export function classifyProxyFailure(input: {
       retryable: true,
       challenge: true,
       summary: rawMessage || 'Shield challenge',
+    };
+  }
+  if (includesAny(message, PENDING_OVERLOAD_PATTERNS)) {
+    return {
+      className: 'pending_overload',
+      title: 'Pending 请求过载',
+      retryable: true,
+      challenge: false,
+      summary: rawMessage || 'pending overload',
     };
   }
   if (status === 429 || includesAny(message, RATE_LIMIT_PATTERNS)) {

@@ -149,6 +149,15 @@ export function applyRuntimeSettings(settingsMap: Map<string, string>) {
     config.proxySessionChannelQueueWaitMs = Math.trunc(proxySessionChannelQueueWaitMs);
   }
 
+  const tokenRouterPendingOverloadCooldownSec = parseSettingFromMap<number>(settingsMap, 'token_router_pending_overload_cooldown_sec');
+  if (
+    typeof tokenRouterPendingOverloadCooldownSec === 'number'
+    && Number.isFinite(tokenRouterPendingOverloadCooldownSec)
+    && tokenRouterPendingOverloadCooldownSec >= 1
+  ) {
+    config.tokenRouterPendingOverloadCooldownSec = Math.trunc(tokenRouterPendingOverloadCooldownSec);
+  }
+
   const proxyDebugTraceEnabled = parseSettingFromMap<boolean>(settingsMap, 'proxy_debug_trace_enabled');
   if (typeof proxyDebugTraceEnabled === 'boolean') {
     config.proxyDebugTraceEnabled = proxyDebugTraceEnabled;

@@ -59,6 +59,7 @@ describe('Settings proxy transport', () => {
       responsesCompactFallbackToResponsesEnabled: false,
       proxySessionChannelConcurrencyLimit: 4,
       proxySessionChannelQueueWaitMs: 3200,
+      tokenRouterPendingOverloadCooldownSec: 75,
       routingFallbackUnitCost: 1,
       routingWeights: {},
       adminIpAllowlist: [],
@@ -78,6 +79,7 @@ describe('Settings proxy transport', () => {
       responsesCompactFallbackToResponsesEnabled: true,
       proxySessionChannelConcurrencyLimit: 6,
       proxySessionChannelQueueWaitMs: 4200,
+      tokenRouterPendingOverloadCooldownSec: 90,
     });
     apiMock.getModelTokenCandidates.mockResolvedValue({ models: {} });
   });
@@ -106,6 +108,7 @@ describe('Settings proxy transport', () => {
       ));
       expect(collectText(proxyTransportCard)).toContain('HTTP 优先');
       expect(collectText(proxyTransportCard)).toContain('会话池 4 并发 / 3200ms');
+      expect(collectText(proxyTransportCard)).toContain('pending 过载冷却 75s');
 
       const websocketToggleLabel = root.root.find((node) => (
         node.type === 'label'
@@ -131,16 +134,23 @@ describe('Settings proxy transport', () => {
         && node.props.type === 'number'
         && node.props.value === 3200
       ));
+      const pendingCooldownInput = root.root.find((node) => (
+        node.type === 'input'
+        && node.props.type === 'number'
+        && node.props.value === 75
+      ));
 
       await act(async () => {
         websocketToggle.props.onChange({ target: { checked: true } });
         compactFallbackToggle.props.onChange({ target: { checked: true } });
         concurrencyInput.props.onChange({ target: { value: '6' } });
         queueWaitInput.props.onChange({ target: { value: '4200' } });
+        pendingCooldownInput.props.onChange({ target: { value: '90' } });
       });
 
       expect(collectText(proxyTransportCard)).toContain('上游 WebSocket 已启用');
       expect(collectText(proxyTransportCard)).toContain('会话池 6 并发 / 4200ms');
+      expect(collectText(proxyTransportCard)).toContain('pending 过载冷却 90s');
 
       const saveButton = root.root.find((node) => (
         node.type === 'button'
@@ -157,6 +167,7 @@ describe('Settings proxy transport', () => {
         responsesCompactFallbackToResponsesEnabled: true,
         proxySessionChannelConcurrencyLimit: 6,
         proxySessionChannelQueueWaitMs: 4200,
+        tokenRouterPendingOverloadCooldownSec: 90,
       });
     } finally {
       root?.unmount();

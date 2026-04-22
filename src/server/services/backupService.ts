@@ -1266,6 +1266,10 @@ function isSettingValueAcceptable(key: string, value: unknown): boolean {
     return isFiniteNumber(value) && value >= 1;
   }
 
+  if (key === 'token_router_pending_overload_cooldown_sec') {
+    return isFiniteNumber(value) && value >= 1;
+  }
+
   if (key === 'proxy_token') {
     return typeof value === 'string'
       && value.trim().length >= 6
@@ -1283,6 +1287,13 @@ function isSettingValueAcceptable(key: string, value: unknown): boolean {
   }
 
   return true;
+}
+
+function normalizeImportedSettingValue(key: string, value: unknown): unknown {
+  if (key === 'token_router_pending_overload_cooldown_sec' && isFiniteNumber(value)) {
+    return Math.trunc(value);
+  }
+  return value;
 }
 
 async function exportAccountsSection(): Promise<AccountsBackupSection> {
@@ -1843,8 +1854,9 @@ async function importPreferencesSection(section: PreferencesBackupSection): Prom
     for (const row of section.settings) {
       if (!isSettingValueAcceptable(row.key, row.value)) continue;
 
-      await upsertSetting(row.key, row.value, tx);
-      applied.push({ key: row.key, value: row.value });
+      const normalizedValue = normalizeImportedSettingValue(row.key, row.value);
+      await upsertSetting(row.key, normalizedValue, tx);
+      applied.push({ key: row.key, value: normalizedValue });
     }
   });
 

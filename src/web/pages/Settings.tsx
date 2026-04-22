@@ -60,6 +60,7 @@ type RuntimeSettings = {
   disableCrossProtocolFallback: boolean;
   proxySessionChannelConcurrencyLimit: number;
   proxySessionChannelQueueWaitMs: number;
+  tokenRouterPendingOverloadCooldownSec: number;
   routingFallbackUnitCost: number;
   proxyFirstByteTimeoutSec: number;
   routeFailureCooldownMaxValue: number;
@@ -203,6 +204,7 @@ export default function Settings() {
     disableCrossProtocolFallback: false,
     proxySessionChannelConcurrencyLimit: 2,
     proxySessionChannelQueueWaitMs: 1500,
+    tokenRouterPendingOverloadCooldownSec: 60,
     routingFallbackUnitCost: 1,
     proxyFirstByteTimeoutSec: 0,
     routeFailureCooldownMaxValue: 30,
@@ -453,6 +455,7 @@ export default function Settings() {
 
   const proxyTransportModeLabel = runtime.codexUpstreamWebsocketEnabled ? '上游 WebSocket 已启用' : 'HTTP 优先';
   const proxyTransportQueueLabel = `会话池 ${runtime.proxySessionChannelConcurrencyLimit} 并发 / ${runtime.proxySessionChannelQueueWaitMs}ms`;
+  const proxyTransportPendingOverloadLabel = `pending 过载冷却 ${runtime.tokenRouterPendingOverloadCooldownSec}s`;
   const modelAvailabilityProbeDirty = runtime.modelAvailabilityProbeEnabled !== savedModelAvailabilityProbeEnabled;
   const modelAvailabilityProbeStatusTone: SettingsPillTone = modelAvailabilityProbeDirty
     ? 'warning'
@@ -498,6 +501,9 @@ export default function Settings() {
         proxySessionChannelQueueWaitMs: Number(runtimeInfo.proxySessionChannelQueueWaitMs) >= 0
           ? Math.trunc(Number(runtimeInfo.proxySessionChannelQueueWaitMs))
           : 1500,
+        tokenRouterPendingOverloadCooldownSec: Number(runtimeInfo.tokenRouterPendingOverloadCooldownSec) >= 1
+          ? Math.trunc(Number(runtimeInfo.tokenRouterPendingOverloadCooldownSec))
+          : 60,
         routingFallbackUnitCost: Number(runtimeInfo.routingFallbackUnitCost) > 0
           ? Number(runtimeInfo.routingFallbackUnitCost)
           : 1,
@@ -707,6 +713,7 @@ export default function Settings() {
         responsesCompactFallbackToResponsesEnabled: runtime.responsesCompactFallbackToResponsesEnabled,
         proxySessionChannelConcurrencyLimit: runtime.proxySessionChannelConcurrencyLimit,
         proxySessionChannelQueueWaitMs: runtime.proxySessionChannelQueueWaitMs,
+        tokenRouterPendingOverloadCooldownSec: runtime.tokenRouterPendingOverloadCooldownSec,
       });
       setRuntime((prev) => ({
         ...prev,
@@ -722,6 +729,9 @@ export default function Settings() {
         proxySessionChannelQueueWaitMs: Number(res?.proxySessionChannelQueueWaitMs) >= 0
           ? Math.trunc(Number(res.proxySessionChannelQueueWaitMs))
           : prev.proxySessionChannelQueueWaitMs,
+        tokenRouterPendingOverloadCooldownSec: Number(res?.tokenRouterPendingOverloadCooldownSec) >= 1
+          ? Math.trunc(Number(res.tokenRouterPendingOverloadCooldownSec))
+          : prev.tokenRouterPendingOverloadCooldownSec,
       }));
       toast.success('传输与会话并发设置已保存');
     } catch (err: any) {
@@ -1279,6 +1289,9 @@ export default function Settings() {
               <span style={getSettingsPillStyle('neutral')}>
                 {proxyTransportQueueLabel}
               </span>
+              <span style={getSettingsPillStyle('neutral')}>
+                {proxyTransportPendingOverloadLabel}
+              </span>
             </div>
           </div>
           <label style={settingsModernToggleStyle}>
@@ -1351,6 +1364,27 @@ export default function Settings() {
               />
               <div style={settingsModernFieldHintStyle}>
                 超过该时间仍拿不到会话通道时，本次请求会直接放弃排队，避免长期挂起。
+              </div>
+            </div>
+            <div style={settingsModernFieldCardStyle}>
+              <div style={settingsModernFieldLabelStyle}>pending 过载冷却（秒）</div>
+              <input
+                type="number"
+                min={1}
+                value={runtime.tokenRouterPendingOverloadCooldownSec}
+                onChange={(e) => {
+                  const nextValue = Number(e.target.value);
+                  setRuntime((prev) => ({
+                    ...prev,
+                    tokenRouterPendingOverloadCooldownSec: Number.isFinite(nextValue) && nextValue >= 1
+                      ? Math.trunc(nextValue)
+                      : prev.tokenRouterPendingOverloadCooldownSec,
+                  }));
+                }}
+                style={inputStyle}
+              />
+              <div style={settingsModernFieldHintStyle}>
+                当上游返回 `Too many pending requests, please retry later` 时，metapi 会暂时避开同凭证通道这么久，再等待后续探活或成功请求解除。
               </div>
             </div>
           </ResponsiveFormGrid>
