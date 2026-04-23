@@ -17,6 +17,7 @@ describe('detectCliProfile', () => {
       clientAppId: 'codex_cli_rs',
       clientAppName: 'Codex CLI',
       clientConfidence: 'exact',
+      continuityTrust: 'strong',
       capabilities: {
         supportsResponsesCompact: true,
         supportsResponsesWebsocketIncremental: true,

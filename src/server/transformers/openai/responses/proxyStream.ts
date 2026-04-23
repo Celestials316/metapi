@@ -301,6 +301,18 @@ export function createResponsesProxyStreamSession(input: ResponsesProxyStreamSes
         }, 'Upstream returned empty content');
         return true;
       }
+      if (
+        !normalizedEvent.responsesEventType
+        && (normalizedEvent.done || !!normalizedEvent.finishReason)
+        && terminalResult.status !== 'failed'
+      ) {
+        convertedLines = [
+          ...convertedLines,
+          ...completeResponsesStream(responsesState, streamContext, input.getUsage()),
+        ];
+        terminalEventSeen = true;
+        complete();
+      }
       input.writeLines(convertedLines);
       if (eventBlock.event === 'response.completed' || payloadType === 'response.completed' || isIncompleteEvent) {
         terminalEventSeen = true;

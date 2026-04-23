@@ -3471,7 +3471,7 @@ describe('chat proxy stream behavior', () => {
     expect(forwardedBody.include).toEqual(['reasoning.encrypted_content']);
   });
 
-  it('keeps explicit empty include on claude-family codex-surface responses requests and stays on the default messages-first order', async () => {
+  it('keeps explicit empty include on claude-family codex-surface responses requests while codex strict policy stays native responses-first', async () => {
     selectChannelMock.mockReturnValue({
       channel: { id: 11, routeId: 22 },
       site: { name: 'generic-site', url: 'https://upstream.example.com', platform: 'new-api' },
@@ -3482,11 +3482,20 @@ describe('chat proxy stream behavior', () => {
     });
 
     fetchMock.mockResolvedValue(new Response(JSON.stringify({
-      id: 'msg_explicit_empty_include',
-      type: 'message',
+      id: 'resp_explicit_empty_include',
+      object: 'response',
       model: 'upstream-gpt',
-      content: [{ type: 'text', text: 'messages endpoint selected because include stayed empty' }],
-      stop_reason: 'end_turn',
+      output_text: 'responses endpoint selected because codex strict policy is native responses-first',
+      output: [
+        {
+          id: 'msg_explicit_empty_include',
+          type: 'message',
+          role: 'assistant',
+          status: 'completed',
+          content: [{ type: 'output_text', text: 'responses endpoint selected because codex strict policy is native responses-first' }],
+        },
+      ],
+      status: 'completed',
       usage: { input_tokens: 7, output_tokens: 3, total_tokens: 10 },
     }), {
       status: 200,
@@ -3514,11 +3523,13 @@ describe('chat proxy stream behavior', () => {
 
     expect(response.statusCode).toBe(200);
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    const [targetUrl] = fetchMock.mock.calls[0] as [string, any];
-    expect(targetUrl).toContain('/v1/messages');
+    const [targetUrl, options] = fetchMock.mock.calls[0] as [string, any];
+    expect(targetUrl).toContain('/v1/responses');
+    const forwardedBody = JSON.parse(options.body);
+    expect(forwardedBody.include).toEqual([]);
   });
 
-  it('keeps explicit custom include on claude-family codex-surface responses requests and stays on the default messages-first order', async () => {
+  it('keeps explicit custom include on claude-family codex-surface responses requests while codex strict policy stays native responses-first', async () => {
     selectChannelMock.mockReturnValue({
       channel: { id: 11, routeId: 22 },
       site: { name: 'generic-site', url: 'https://upstream.example.com', platform: 'new-api' },
@@ -3529,11 +3540,20 @@ describe('chat proxy stream behavior', () => {
     });
 
     fetchMock.mockResolvedValue(new Response(JSON.stringify({
-      id: 'msg_explicit_custom_include',
-      type: 'message',
+      id: 'resp_explicit_custom_include',
+      object: 'response',
       model: 'upstream-gpt',
-      content: [{ type: 'text', text: 'messages endpoint selected because custom include stayed explicit' }],
-      stop_reason: 'end_turn',
+      output_text: 'responses endpoint selected because codex strict policy is native responses-first',
+      output: [
+        {
+          id: 'msg_explicit_custom_include',
+          type: 'message',
+          role: 'assistant',
+          status: 'completed',
+          content: [{ type: 'output_text', text: 'responses endpoint selected because codex strict policy is native responses-first' }],
+        },
+      ],
+      status: 'completed',
       usage: { input_tokens: 7, output_tokens: 3, total_tokens: 10 },
     }), {
       status: 200,
@@ -3561,8 +3581,10 @@ describe('chat proxy stream behavior', () => {
 
     expect(response.statusCode).toBe(200);
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    const [targetUrl] = fetchMock.mock.calls[0] as [string, any];
-    expect(targetUrl).toContain('/v1/messages');
+    const [targetUrl, options] = fetchMock.mock.calls[0] as [string, any];
+    expect(targetUrl).toContain('/v1/responses');
+    const forwardedBody = JSON.parse(options.body);
+    expect(forwardedBody.include).toEqual(['message.input_image.image_url']);
   });
 
   it('forces anyrouter platform to prefer /v1/messages even when catalog says openai', async () => {

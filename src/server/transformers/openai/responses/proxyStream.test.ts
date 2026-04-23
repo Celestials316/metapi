@@ -136,6 +136,67 @@ describe('createResponsesProxyStreamSession', () => {
     expect(output).toContain('data: [DONE]');
   });
 
+  it('treats downgraded chat-completions finish_reason terminals as completed when native responses terminals are absent', async () => {
+    const lines: string[] = [];
+    let ended = false;
+    const usage = {
+      promptTokens: 0,
+      completionTokens: 0,
+      totalTokens: 0,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+      promptTokensIncludeCache: null,
+    };
+    const chunk = [
+      'data: {"id":"chatcmpl_fallback_1","model":"gpt-5","choices":[{"delta":{"role":"assistant"},"finish_reason":null}]}',
+      '',
+      'data: {"id":"chatcmpl_fallback_1","model":"gpt-5","choices":[{"delta":{"content":"hello from fallback"},"finish_reason":null}]}',
+      '',
+      'data: {"id":"chatcmpl_fallback_1","model":"gpt-5","choices":[{"delta":{},"finish_reason":"stop"}]}',
+      '',
+    ].join('\n');
+
+    const reader = {
+      reads: 0,
+      async read() {
+        if (this.reads > 0) return { done: true };
+        this.reads += 1;
+        return { done: false, value: new TextEncoder().encode(chunk) };
+      },
+      async cancel() {
+        return undefined;
+      },
+      releaseLock() {},
+    };
+
+    const session = createResponsesProxyStreamSession({
+      modelName: 'gpt-5',
+      successfulUpstreamPath: '/v1/responses',
+      getUsage: () => usage,
+      writeLines: (nextLines) => {
+        lines.push(...nextLines);
+      },
+      writeRaw: () => {},
+    });
+
+    const result = await session.run(reader as any, {
+      end() {
+        ended = true;
+      },
+    });
+
+    expect(result).toEqual({
+      status: 'completed',
+      errorMessage: null,
+    });
+    expect(ended).toBe(true);
+    const output = lines.join('');
+    expect(output).toContain('event: response.output_text.delta');
+    expect(output).toContain('event: response.completed');
+    expect(output).not.toContain('event: response.failed');
+    expect(output).toContain('data: [DONE]');
+  });
+
   it('preserves response.incomplete SSE terminals instead of coercing them to response.failed', async () => {
     const lines: string[] = [];
     let ended = false;
