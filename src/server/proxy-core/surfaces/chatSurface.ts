@@ -65,6 +65,11 @@ import {
   selectSurfaceChannelForAttempt,
   trySurfaceOauthRefreshRecovery,
 } from './sharedSurface.js';
+import {
+  clearChannelAffinityBinding,
+  recordChannelAffinitySuccess,
+  resolveChannelAffinityRequest,
+} from '../../services/channelAffinity.js';
 import { runWithSiteApiEndpointPool, SiteApiEndpointRequestError } from '../../services/siteApiEndpointService.js';
 import {
   buildSurfaceProxyDebugResponseHeaders,
@@ -210,6 +215,15 @@ export async function handleChatSurfaceRequest(
     requestHeaders: request.headers as Record<string, unknown>,
     requestBody: request.body,
   });
+  const channelAffinity = resolveChannelAffinityRequest({
+    config: config.channelAffinity,
+    requestedModel,
+    downstreamPath,
+    headers: request.headers as Record<string, unknown>,
+    body: request.body,
+    clientContext,
+    downstreamApiKeyId,
+  });
   const finalizeDebugFailure = async (status: number, payload: unknown, upstreamPath: string | null = null) => {
     await safeFinalizeSurfaceProxyDebugTrace(debugTrace, {
       finalStatus: 'failed',
@@ -238,6 +252,9 @@ export async function handleChatSurfaceRequest(
     const stickyPreferredChannelId = retryCount === 0
       ? getSurfaceStickyPreferredChannelId(stickySessionKey)
       : null;
+    const affinityPreferredChannelId = retryCount === 0 && !stickyPreferredChannelId
+      ? (channelAffinity?.preferredChannelId ?? null)
+      : null;
     const selected = await selectSurfaceChannelForAttempt({
       requestedModel,
       downstreamPolicy,
@@ -245,6 +262,7 @@ export async function handleChatSurfaceRequest(
       retryCount,
       stickySessionKey,
       forcedChannelId,
+      affinityPreferredChannelId,
     });
 
     if (!selected) {
@@ -260,6 +278,30 @@ export async function handleChatSurfaceRequest(
       return reply.code(503).send({
         error: { message: noChannelMessage, type: 'server_error' },
       });
+    }
+
+    const affinityRetryLocked = Boolean(
+      retryCount === 0
+      && affinityPreferredChannelId
+      && channelAffinity?.skipRetryOnFailure
+      && selected.channel.id === affinityPreferredChannelId
+    );
+    const canRetryCurrentSelection = () => canRetryChannelSelection(
+      retryCount,
+      forcedChannelId,
+      affinityRetryLocked,
+    );
+    const recordChannelAffinityIfSuccessful = () => recordChannelAffinitySuccess({
+      config: config.channelAffinity,
+      resolution: channelAffinity,
+      selectedChannelId: selected.channel.id,
+    });
+    if (
+      retryCount === 0
+      && affinityPreferredChannelId
+      && selected.channel.id !== affinityPreferredChannelId
+    ) {
+      clearChannelAffinityBinding(channelAffinity?.cacheKey, affinityPreferredChannelId);
     }
 
     excludeChannelIds.push(selected.channel.id);
@@ -506,7 +548,7 @@ export async function handleChatSurfaceRequest(
         errorMessage: busyMessage,
         retryCount,
       });
-      if (canRetryChannelSelection(retryCount, forcedChannelId)) {
+      if (canRetryCurrentSelection()) {
         retryCount += 1;
         continue;
       }
@@ -588,6 +630,7 @@ export async function handleChatSurfaceRequest(
               errorLabel: '[proxy/chat] failed to record success metrics',
             },
           });
+          recordChannelAffinityIfSuccessful();
         };
 
         const writeLines = (lines: string[]) => {
@@ -711,7 +754,7 @@ export async function handleChatSurfaceRequest(
               upstreamPath: successfulUpstreamPath,
             });
             const terminalFailureOutcome = failureOutcome.action === 'retry'
-              ? (canRetryChannelSelection(retryCount, forcedChannelId)
+              ? (canRetryCurrentSelection()
                 ? null
                 : finalizeRetryAsUpstreamFailure(failure.status, failure.reason))
               : failureOutcome;
@@ -913,7 +956,7 @@ export async function handleChatSurfaceRequest(
           upstreamPath: successfulUpstreamPath,
         });
         const terminalFailureOutcome = failureOutcome.action === 'retry'
-          ? (canRetryChannelSelection(retryCount, forcedChannelId)
+          ? (canRetryCurrentSelection()
             ? null
             : finalizeRetryAsUpstreamFailure(failure.status, failure.reason))
           : failureOutcome;
@@ -952,6 +995,7 @@ export async function handleChatSurfaceRequest(
           errorLabel: '[proxy/chat] failed to record success metrics',
         },
       });
+      recordChannelAffinityIfSuccessful();
       await finalizeDebugSuccess(
         upstream.status,
         successfulUpstreamPath,
@@ -990,7 +1034,7 @@ export async function handleChatSurfaceRequest(
           retryCount,
         });
         const terminalFailureOutcome = failureOutcome.action === 'retry'
-          ? (canRetryChannelSelection(retryCount, forcedChannelId)
+          ? (canRetryCurrentSelection()
             ? null
             : finalizeRetryAsUpstreamFailure(endpointFailureStatus || 502, surfacedErrorMessage))
           : failureOutcome;
@@ -1120,6 +1164,15 @@ export async function handleClaudeCountTokensSurfaceRequest(
     requestHeaders: request.headers as Record<string, unknown>,
     requestBody: rawBody,
   });
+  const channelAffinity = resolveChannelAffinityRequest({
+    config: config.channelAffinity,
+    requestedModel,
+    downstreamPath,
+    headers: request.headers as Record<string, unknown>,
+    body: rawBody,
+    clientContext,
+    downstreamApiKeyId,
+  });
   const finalizeDebugFailure = async (status: number, payload: unknown, upstreamPath: string | null = null) => {
     await safeFinalizeSurfaceProxyDebugTrace(debugTrace, {
       finalStatus: 'failed',
@@ -1147,6 +1200,9 @@ export async function handleClaudeCountTokensSurfaceRequest(
     const stickyPreferredChannelId = retryCount === 0
       ? getSurfaceStickyPreferredChannelId(stickySessionKey)
       : null;
+    const affinityPreferredChannelId = retryCount === 0 && !stickyPreferredChannelId
+      ? (channelAffinity?.preferredChannelId ?? null)
+      : null;
     const selected = await selectSurfaceChannelForAttempt({
       requestedModel,
       downstreamPolicy,
@@ -1154,6 +1210,7 @@ export async function handleClaudeCountTokensSurfaceRequest(
       retryCount,
       stickySessionKey,
       forcedChannelId,
+      affinityPreferredChannelId,
     });
 
     if (!selected) {
@@ -1168,6 +1225,30 @@ export async function handleClaudeCountTokensSurfaceRequest(
       return reply.code(503).send({
         error: { message: noChannelMessage, type: 'server_error' },
       });
+    }
+
+    const affinityRetryLocked = Boolean(
+      retryCount === 0
+      && affinityPreferredChannelId
+      && channelAffinity?.skipRetryOnFailure
+      && selected.channel.id === affinityPreferredChannelId
+    );
+    const canRetryCurrentSelection = () => canRetryChannelSelection(
+      retryCount,
+      forcedChannelId,
+      affinityRetryLocked,
+    );
+    const recordChannelAffinityIfSuccessful = () => recordChannelAffinitySuccess({
+      config: config.channelAffinity,
+      resolution: channelAffinity,
+      selectedChannelId: selected.channel.id,
+    });
+    if (
+      retryCount === 0
+      && affinityPreferredChannelId
+      && selected.channel.id !== affinityPreferredChannelId
+    ) {
+      clearChannelAffinityBinding(channelAffinity?.cacheKey, affinityPreferredChannelId);
     }
 
     excludeChannelIds.push(selected.channel.id);
@@ -1211,7 +1292,7 @@ export async function handleClaudeCountTokensSurfaceRequest(
       },
     });
     if (!endpointCandidates.includes('messages')) {
-      if (canRetryChannelSelection(retryCount, forcedChannelId)) {
+      if (canRetryCurrentSelection()) {
         retryCount += 1;
         continue;
       }
@@ -1249,7 +1330,7 @@ export async function handleClaudeCountTokensSurfaceRequest(
         errorMessage: busyMessage,
         retryCount,
       });
-      if (canRetryChannelSelection(retryCount, forcedChannelId)) {
+      if (canRetryCurrentSelection()) {
         retryCount += 1;
         continue;
       }
@@ -1382,6 +1463,7 @@ export async function handleClaudeCountTokensSurfaceRequest(
       } = countTokensResult;
 
       tokenRouter.recordSuccess(selected.channel.id, latency, 0, modelName, selected.account.id);
+      recordChannelAffinityIfSuccessful();
       recordDownstreamCostUsage(request, 0);
       await failureToolkit.log({
         selected,
@@ -1430,7 +1512,7 @@ export async function handleClaudeCountTokensSurfaceRequest(
           retryCount,
         });
         const terminalFailureOutcome = failureOutcome.action === 'retry'
-          ? (canRetryChannelSelection(retryCount, forcedChannelId)
+          ? (canRetryCurrentSelection()
             ? null
             : finalizeRetryAsUpstreamFailure(endpointFailureStatus || 502, surfacedErrorMessage))
           : failureOutcome;
@@ -1452,7 +1534,7 @@ export async function handleClaudeCountTokensSurfaceRequest(
         retryCount,
       });
       const terminalFailureOutcome = failureOutcome.action === 'retry'
-        ? (canRetryChannelSelection(retryCount, forcedChannelId)
+        ? (canRetryCurrentSelection()
           ? null
           : finalizeRetryAsExecutionFailure(describeErrorWithCauses(error, 'network failure')))
         : failureOutcome;

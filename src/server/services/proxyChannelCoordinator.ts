@@ -1,13 +1,17 @@
 import { config } from '../config.js';
 import {
+  clearStoredStickyChannelBinding,
+  clearStoredStickyChannelsByChannelIds,
+  ensureResponsesContinuityStateLoaded,
+  flushResponsesContinuityPersistence,
+  getStoredStickyChannelId,
+  resetResponsesContinuityStore,
+  setStoredStickyChannelBinding,
+} from './responsesContinuityStore.js';
+import {
   getCredentialModeFromExtraConfig,
   hasOauthProvider,
 } from './accountExtraConfig.js';
-
-type StickyEntry = {
-  channelId: number;
-  expiresAtMs: number;
-};
 
 type ActiveLeaseState = {
   release: () => void;
@@ -45,7 +49,6 @@ export type AcquireProxyChannelLeaseResult =
   | { status: 'acquired'; lease: ProxyChannelLease }
   | { status: 'timeout'; waitMs: number };
 
-const stickySessionBindings = new Map<string, StickyEntry>();
 const channelRuntimeStates = new Map<number, ChannelRuntimeState>();
 let nextLeaseId = 1;
 type SessionScopedChannelInput =
@@ -60,14 +63,6 @@ type SessionScopedChannelInput =
 function shouldUnrefTimer(timer: ReturnType<typeof setTimeout> | ReturnType<typeof setInterval>) {
   if (typeof (timer as { unref?: () => void }).unref === 'function') {
     (timer as { unref: () => void }).unref();
-  }
-}
-
-function cleanupExpiredStickyBindings(nowMs = Date.now()): void {
-  for (const [key, entry] of stickySessionBindings.entries()) {
-    if (entry.expiresAtMs <= nowMs) {
-      stickySessionBindings.delete(key);
-    }
   }
 }
 
@@ -141,6 +136,7 @@ class ProxyChannelCoordinator {
   buildStickySessionKey(input: {
     clientKind?: string | null;
     sessionId?: string | null;
+    continuityKey?: string | null;
     requestedModel: string;
     downstreamPath: string;
     downstreamApiKeyId?: number | null;
@@ -152,22 +148,17 @@ class ProxyChannelCoordinator {
     if (!requestedModel) return null;
     const downstreamPath = String(input.downstreamPath || '').trim().toLowerCase() || 'unknown';
     const clientKind = String(input.clientKind || 'generic').trim().toLowerCase() || 'generic';
+    const continuityKey = String(input.continuityKey || '').trim();
     const owner = typeof input.downstreamApiKeyId === 'number' && Number.isFinite(input.downstreamApiKeyId)
       ? `key:${Math.trunc(input.downstreamApiKeyId)}`
       : 'key:anonymous';
-    return [owner, clientKind, downstreamPath, requestedModel, sessionId].join('|');
+    return [owner, clientKind, downstreamPath, requestedModel, sessionId, continuityKey || 'no-continuity'].join('|');
   }
 
   getStickyChannelId(stickySessionKey?: string | null, nowMs = Date.now()): number | null {
-    cleanupExpiredStickyBindings(nowMs);
     const normalizedKey = String(stickySessionKey || '').trim();
     if (!normalizedKey) return null;
-    const entry = stickySessionBindings.get(normalizedKey);
-    if (!entry || entry.expiresAtMs <= nowMs) {
-      stickySessionBindings.delete(normalizedKey);
-      return null;
-    }
-    return entry.channelId;
+    return getStoredStickyChannelId(normalizedKey, nowMs);
   }
 
   bindStickyChannel(stickySessionKey: string | null | undefined, channelId: number, accountIdentity?: SessionScopedChannelInput): void {
@@ -175,8 +166,8 @@ class ProxyChannelCoordinator {
     if (!isSessionScopedChannel(accountIdentity)) return;
     const normalizedKey = String(stickySessionKey || '').trim();
     if (!normalizedKey || !Number.isFinite(channelId) || channelId <= 0) return;
-    cleanupExpiredStickyBindings();
-    stickySessionBindings.set(normalizedKey, {
+    setStoredStickyChannelBinding({
+      key: normalizedKey,
       channelId: Math.trunc(channelId),
       expiresAtMs: Date.now() + getStickySessionTtlMs(),
     });
@@ -185,28 +176,11 @@ class ProxyChannelCoordinator {
   clearStickyChannel(stickySessionKey?: string | null, channelId?: number | null): void {
     const normalizedKey = String(stickySessionKey || '').trim();
     if (!normalizedKey) return;
-    const existing = stickySessionBindings.get(normalizedKey);
-    if (!existing) return;
-    if (typeof channelId === 'number' && Number.isFinite(channelId) && existing.channelId !== Math.trunc(channelId)) {
-      return;
-    }
-    stickySessionBindings.delete(normalizedKey);
+    clearStoredStickyChannelBinding(normalizedKey, channelId);
   }
 
   clearStickyChannelsByChannelIds(channelIds: number[]): void {
-    const normalizedChannelIds = new Set(
-      (Array.isArray(channelIds) ? channelIds : [])
-        .filter((channelId): channelId is number => Number.isFinite(channelId) && channelId > 0)
-        .map((channelId) => Math.trunc(channelId)),
-    );
-    if (normalizedChannelIds.size <= 0) return;
-
-    cleanupExpiredStickyBindings();
-    for (const [stickySessionKey, entry] of stickySessionBindings.entries()) {
-      if (normalizedChannelIds.has(entry.channelId)) {
-        stickySessionBindings.delete(stickySessionKey);
-      }
-    }
+    clearStoredStickyChannelsByChannelIds(channelIds);
   }
 
   getActiveChannelIds(): number[] {
@@ -390,8 +364,16 @@ class ProxyChannelCoordinator {
   }
 }
 
+export async function ensureProxyChannelCoordinatorStateLoaded(nowMs = Date.now()): Promise<void> {
+  await ensureResponsesContinuityStateLoaded(nowMs);
+}
+
+export async function flushProxyChannelCoordinatorStatePersistence(): Promise<void> {
+  await flushResponsesContinuityPersistence();
+}
+
 export function resetProxyChannelCoordinatorState(): void {
-  stickySessionBindings.clear();
+  resetResponsesContinuityStore();
   channelRuntimeStates.clear();
   nextLeaseId = 1;
 }

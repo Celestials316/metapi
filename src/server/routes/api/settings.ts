@@ -39,6 +39,9 @@ import { extractClientIp, findInvalidIpAllowlistEntries, isIpAllowed } from '../
 import { invalidateSiteProxyCache, normalizeSiteProxyUrl, withExplicitProxyRequestInit } from '../../services/siteProxy.js';
 import { performFactoryReset } from '../../services/factoryResetService.js';
 import { normalizeLogCleanupRetentionDays } from '../../shared/logCleanupRetentionDays.js';
+import { normalizeDownstreamRateLimitConfig } from '../../services/downstreamRateLimit.js';
+import { normalizePayloadRulesConfig } from '../../services/payloadRules.js';
+import { normalizeChannelAffinityConfig } from '../../services/channelAffinity.js';
 import { stopProxyLogRetentionService } from '../../services/proxyLogRetentionService.js';
 import { extractNestedErrorMessages } from '../../services/errorMessageService.js';
 import {
@@ -58,6 +61,7 @@ interface RuntimeSettingsBody {
   proxySessionChannelConcurrencyLimit?: number;
   proxySessionChannelQueueWaitMs?: number;
   tokenRouterPendingOverloadCooldownSec?: number;
+  tokenRouterTimeoutCooldownSec?: number;
   proxyDebugTraceEnabled?: boolean;
   proxyDebugCaptureHeaders?: boolean;
   proxyDebugCaptureBodies?: boolean;
@@ -98,6 +102,9 @@ interface RuntimeSettingsBody {
   notifyCooldownSec?: number;
   adminIpAllowlist?: string[] | string;
   routingFallbackUnitCost?: number;
+  payloadRules?: unknown;
+  downstreamRateLimit?: unknown;
+  channelAffinity?: unknown;
   proxyFirstByteTimeoutSec?: number;
   tokenRouterFailureCooldownMaxSec?: number;
   routingWeights?: Partial<RoutingWeights>;
@@ -447,6 +454,24 @@ function applyImportedSettingToRuntime(key: string, value: unknown) {
       config.tokenRouterPendingOverloadCooldownSec = Math.trunc(cooldownSec);
       return;
     }
+    case 'token_router_timeout_cooldown_sec': {
+      const cooldownSec = Number(value);
+      if (!Number.isFinite(cooldownSec) || cooldownSec < 1) return;
+      config.tokenRouterTimeoutCooldownSec = Math.trunc(cooldownSec);
+      return;
+    }
+    case 'payload_rules': {
+      config.payloadRules = normalizePayloadRulesConfig(value);
+      return;
+    }
+    case 'downstream_rate_limit': {
+      config.downstreamRateLimit = normalizeDownstreamRateLimitConfig(value);
+      return;
+    }
+    case 'channel_affinity': {
+      config.channelAffinity = normalizeChannelAffinityConfig(value);
+      return;
+    }
     case 'proxy_debug_trace_enabled': {
       try {
         config.proxyDebugTraceEnabled = parseBooleanFlag(value, '代理调试追踪开关');
@@ -713,6 +738,7 @@ function getRuntimeSettingsResponse(currentAdminIp = '') {
     proxySessionChannelConcurrencyLimit: config.proxySessionChannelConcurrencyLimit,
     proxySessionChannelQueueWaitMs: config.proxySessionChannelQueueWaitMs,
     tokenRouterPendingOverloadCooldownSec: config.tokenRouterPendingOverloadCooldownSec,
+    tokenRouterTimeoutCooldownSec: config.tokenRouterTimeoutCooldownSec,
     proxyDebugTraceEnabled: config.proxyDebugTraceEnabled,
     proxyDebugCaptureHeaders: config.proxyDebugCaptureHeaders,
     proxyDebugCaptureBodies: config.proxyDebugCaptureBodies,
@@ -756,6 +782,9 @@ function getRuntimeSettingsResponse(currentAdminIp = '') {
     proxyTokenMasked: maskSecret(config.proxyToken),
     globalBlockedBrands: config.globalBlockedBrands,
     globalAllowedModels: config.globalAllowedModels,
+    payloadRules: config.payloadRules,
+    downstreamRateLimit: config.downstreamRateLimit,
+    channelAffinity: config.channelAffinity,
   };
 }
 
@@ -1240,6 +1269,19 @@ export async function settingsRoutes(app: FastifyInstance) {
       upsertSetting('token_router_pending_overload_cooldown_sec', config.tokenRouterPendingOverloadCooldownSec);
     }
 
+    if (body.tokenRouterTimeoutCooldownSec !== undefined) {
+      const rawTimeoutCooldownSec = Number(body.tokenRouterTimeoutCooldownSec);
+      if (!Number.isFinite(rawTimeoutCooldownSec) || rawTimeoutCooldownSec < 1) {
+        return reply.code(400).send({ success: false, message: 'stream timeout 冷却时间必须是大于等于 1 的整数秒' });
+      }
+      const nextTimeoutCooldownSec = Math.trunc(rawTimeoutCooldownSec);
+      if (nextTimeoutCooldownSec !== config.tokenRouterTimeoutCooldownSec) {
+        changedLabels.push(`stream timeout 冷却（${config.tokenRouterTimeoutCooldownSec}s -> ${nextTimeoutCooldownSec}s）`);
+      }
+      config.tokenRouterTimeoutCooldownSec = nextTimeoutCooldownSec;
+      upsertSetting('token_router_timeout_cooldown_sec', config.tokenRouterTimeoutCooldownSec);
+    }
+
     if (body.proxyDebugTraceEnabled !== undefined) {
       let nextValue = false;
       try {
@@ -1662,6 +1704,33 @@ export async function settingsRoutes(app: FastifyInstance) {
       }
       config.routingWeights = nextWeights;
       upsertSetting('routing_weights', nextWeights);
+    }
+
+    if (body.payloadRules !== undefined) {
+      const nextPayloadRules = normalizePayloadRulesConfig(body.payloadRules);
+      if (JSON.stringify(nextPayloadRules) !== JSON.stringify(config.payloadRules)) {
+        changedLabels.push('Payload Override 规则');
+      }
+      config.payloadRules = nextPayloadRules;
+      upsertSetting('payload_rules', nextPayloadRules);
+    }
+
+    if (body.downstreamRateLimit !== undefined) {
+      const nextDownstreamRateLimit = normalizeDownstreamRateLimitConfig(body.downstreamRateLimit);
+      if (JSON.stringify(nextDownstreamRateLimit) !== JSON.stringify(config.downstreamRateLimit)) {
+        changedLabels.push('下游双阈值限流');
+      }
+      config.downstreamRateLimit = nextDownstreamRateLimit;
+      upsertSetting('downstream_rate_limit', nextDownstreamRateLimit);
+    }
+
+    if (body.channelAffinity !== undefined) {
+      const nextChannelAffinity = normalizeChannelAffinityConfig(body.channelAffinity);
+      if (JSON.stringify(nextChannelAffinity) !== JSON.stringify(config.channelAffinity)) {
+        changedLabels.push('Channel Affinity');
+      }
+      config.channelAffinity = nextChannelAffinity;
+      upsertSetting('channel_affinity', nextChannelAffinity);
     }
 
     if (body.routingFallbackUnitCost !== undefined) {

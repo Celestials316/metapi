@@ -1,5 +1,9 @@
 import { and, eq, gt, inArray, isNotNull } from 'drizzle-orm';
 import { db, schema } from '../db/index.js';
+import {
+  ensureAccountDispatchRuntimeStateLoaded,
+  listAccountDispatchRuntimeSnapshots,
+} from './accountDispatchRuntimeMemory.js';
 import { isUsableAccountToken } from './accountTokenService.js';
 import { getOauthInfoFromAccount } from './oauth/oauthAccount.js';
 import { proxyChannelCoordinator } from './proxyChannelCoordinator.js';
@@ -8,7 +12,7 @@ import { recordProxyOpsRecoverySignal } from './proxyOpsSignals.js';
 import { tokenRouter } from './tokenRouter.js';
 import { isExactTokenRouteModelPattern } from '../../shared/tokenRoutePatterns.js';
 
-type RecoveryProbeSource = 'cooldown' | 'active';
+type RecoveryProbeSource = 'cooldown' | 'active' | 'suppressed';
 
 type RecoveryProbeCandidate = {
   source: RecoveryProbeSource;
@@ -17,6 +21,7 @@ type RecoveryProbeCandidate = {
   tokenValue: string;
   account: typeof schema.accounts.$inferSelect;
   site: typeof schema.sites.$inferSelect;
+  actualAccountId?: number;
 };
 
 const CHANNEL_RECOVERY_SWEEP_INTERVAL_MS = 30_000;
@@ -43,9 +48,9 @@ function buildRecoveryProbeKey(channelId: number, modelName: string): string {
 }
 
 function resolveRecoveryProbeWindowMs(source: RecoveryProbeSource): number {
-  return source === 'cooldown'
-    ? CHANNEL_RECOVERY_COOLDOWN_RECHECK_MS
-    : CHANNEL_RECOVERY_ACTIVE_RECHECK_MS;
+  if (source === 'cooldown') return CHANNEL_RECOVERY_COOLDOWN_RECHECK_MS;
+  if (source === 'suppressed') return CHANNEL_RECOVERY_COOLDOWN_RECHECK_MS;
+  return CHANNEL_RECOVERY_ACTIVE_RECHECK_MS;
 }
 
 function resolveProbeModelName(row: {
@@ -170,11 +175,73 @@ async function loadActiveProbeCandidates(activeChannelIds: number[]): Promise<Re
   });
 }
 
+async function loadSuppressedProbeCandidates(nowMs: number): Promise<RecoveryProbeCandidate[]> {
+  await ensureAccountDispatchRuntimeStateLoaded();
+  const suppressedSnapshots = listAccountDispatchRuntimeSnapshots({ nowMs })
+    .filter((snapshot) => (
+      snapshot.status === 'degraded'
+      && (snapshot.suppressionReason === 'auth_invalid' || snapshot.suppressionReason === 'hard_error')
+    ));
+  if (suppressedSnapshots.length <= 0) return [];
+
+  const routeIds = Array.from(new Set(suppressedSnapshots.map((snapshot) => snapshot.routeId).filter((routeId) => routeId > 0)));
+  const accountIds = Array.from(new Set(suppressedSnapshots.map((snapshot) => snapshot.accountId).filter((accountId) => accountId > 0)));
+  if (routeIds.length <= 0 || accountIds.length <= 0) return [];
+
+  const snapshotModelsByScope = new Map<string, Array<{ modelName: string; accountId: number }>>();
+  for (const snapshot of suppressedSnapshots) {
+    const scopeKey = `${snapshot.routeId}:${snapshot.accountId}`;
+    const items = snapshotModelsByScope.get(scopeKey) ?? [];
+    items.push({ modelName: snapshot.modelName, accountId: snapshot.accountId });
+    snapshotModelsByScope.set(scopeKey, items);
+  }
+
+  const rows = await db.select()
+    .from(schema.routeChannels)
+    .innerJoin(schema.accounts, eq(schema.routeChannels.accountId, schema.accounts.id))
+    .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
+    .innerJoin(schema.tokenRoutes, eq(schema.routeChannels.routeId, schema.tokenRoutes.id))
+    .leftJoin(schema.accountTokens, eq(schema.routeChannels.tokenId, schema.accountTokens.id))
+    .where(and(
+      eq(schema.routeChannels.enabled, true),
+      eq(schema.accounts.status, 'active'),
+      eq(schema.sites.status, 'active'),
+      inArray(schema.routeChannels.routeId, routeIds),
+      inArray(schema.routeChannels.accountId, accountIds),
+    ))
+    .all();
+
+  return rows.flatMap((row) => {
+    const scopeKey = `${row.route_channels.routeId}:${row.route_channels.accountId}`;
+    const scopedSnapshots = snapshotModelsByScope.get(scopeKey) ?? [];
+    const tokenValue = resolveProbeTokenValue(row);
+    if (!tokenValue || scopedSnapshots.length <= 0) return [];
+    return scopedSnapshots.flatMap((snapshot) => {
+      const modelName = String(snapshot.modelName || '').trim();
+      if (!modelName) return [];
+      return [{
+        source: 'suppressed' as const,
+        channelId: row.route_channels.id,
+        modelName,
+        tokenValue,
+        account: row.accounts,
+        site: row.sites,
+        actualAccountId: snapshot.accountId,
+      }];
+    });
+  });
+}
+
 function mergeRecoveryProbeCandidates(candidates: RecoveryProbeCandidate[]): RecoveryProbeCandidate[] {
+  const sourcePriority: Record<RecoveryProbeSource, number> = {
+    cooldown: 3,
+    suppressed: 2,
+    active: 1,
+  };
   const merged = new Map<number, RecoveryProbeCandidate>();
   for (const candidate of candidates) {
     const existing = merged.get(candidate.channelId);
-    if (!existing || (existing.source === 'active' && candidate.source === 'cooldown')) {
+    if (!existing || sourcePriority[candidate.source] > sourcePriority[existing.source]) {
       merged.set(candidate.channelId, candidate);
     }
   }
@@ -230,7 +297,7 @@ async function runRecoveryProbeCandidate(candidate: RecoveryProbeCandidate, nowM
         candidate.channelId,
         result.latencyMs ?? 0,
         candidate.modelName,
-        candidate.account.id,
+        candidate.actualAccountId ?? candidate.account.id,
       );
     }
   } catch (error) {
@@ -257,14 +324,16 @@ export async function runChannelRecoveryProbeSweep(nowMs = Date.now()): Promise<
   recoveryProbeSweepInFlight = (async () => {
     const nowIso = new Date(nowMs).toISOString();
     const activeChannelIds = proxyChannelCoordinator.getActiveChannelIds();
-    const [coolingCandidates, activeCandidates] = await Promise.all([
+    const [coolingCandidates, activeCandidates, suppressedCandidates] = await Promise.all([
       loadCoolingProbeCandidates(nowIso),
       loadActiveProbeCandidates(activeChannelIds),
+      loadSuppressedProbeCandidates(nowMs),
     ]);
 
     const merged = mergeRecoveryProbeCandidates([
       ...coolingCandidates,
       ...activeCandidates,
+      ...suppressedCandidates,
     ]);
     const dueCandidates = merged
       .filter((candidate) => shouldProbeCandidate(candidate, nowMs))

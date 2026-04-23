@@ -2,6 +2,13 @@ import { eq } from 'drizzle-orm';
 
 export type AccountDispatchRuntimeStatus = 'healthy' | 'degraded' | 'recovering' | 'failback_hold';
 export type AccountDispatchFailureKind = 'soft' | 'hard';
+export type AccountDispatchSuppressionReason =
+  | 'selection_blocked'
+  | 'pending_overload'
+  | 'timeout'
+  | 'auth_invalid'
+  | 'hard_error'
+  | 'soft_error';
 
 export type AccountDispatchRuntimeSnapshot = {
   key: string;
@@ -9,6 +16,7 @@ export type AccountDispatchRuntimeSnapshot = {
   modelName: string;
   accountId: number;
   status: AccountDispatchRuntimeStatus;
+  suppressionReason: AccountDispatchSuppressionReason | null;
   consecutiveSoftFailureCount: number;
   degradedAtMs: number | null;
   recoveringAtMs: number | null;
@@ -80,6 +88,21 @@ function normalizeModelName(value: unknown): string {
   return normalized || 'unknown-model';
 }
 
+function normalizeSuppressionReason(value: unknown): AccountDispatchSuppressionReason | null {
+  const normalized = String(value || '').trim() as AccountDispatchSuppressionReason;
+  switch (normalized) {
+    case 'selection_blocked':
+    case 'pending_overload':
+    case 'timeout':
+    case 'auth_invalid':
+    case 'hard_error':
+    case 'soft_error':
+      return normalized;
+    default:
+      return null;
+  }
+}
+
 export function buildAccountDispatchRuntimeKey(routeId: number, modelName: string, accountId: number): string {
   return `${Math.trunc(routeId || 0)}:${normalizeModelName(modelName)}:${Math.trunc(accountId || 0)}`;
 }
@@ -102,6 +125,7 @@ function parseAccountDispatchRuntimeKey(key: string): {
 function createHealthyState(nowMs: number): AccountDispatchRuntimeState {
   return {
     status: 'healthy',
+    suppressionReason: null,
     consecutiveSoftFailureCount: 0,
     degradedAtMs: null,
     recoveringAtMs: null,
@@ -115,6 +139,7 @@ function createHealthyState(nowMs: number): AccountDispatchRuntimeState {
 function cloneState(state: AccountDispatchRuntimeState): AccountDispatchRuntimeState {
   return {
     status: state.status,
+    suppressionReason: state.suppressionReason,
     consecutiveSoftFailureCount: state.consecutiveSoftFailureCount,
     degradedAtMs: state.degradedAtMs,
     recoveringAtMs: state.recoveringAtMs,
@@ -148,6 +173,7 @@ function enforceStateLimit(): void {
 function ensureFreshState(state: AccountDispatchRuntimeState, nowMs = Date.now()): AccountDispatchRuntimeState {
   if (state.status === 'failback_hold' && typeof state.holdUntilMs === 'number' && state.holdUntilMs <= nowMs) {
     state.status = 'healthy';
+    state.suppressionReason = null;
     state.holdUntilMs = null;
     state.updatedAtMs = nowMs;
   }
@@ -177,6 +203,7 @@ function toSnapshot(key: string, state: AccountDispatchRuntimeState, nowMs = Dat
     key,
     ...parseAccountDispatchRuntimeKey(key),
     status: fresh.status,
+    suppressionReason: fresh.suppressionReason,
     consecutiveSoftFailureCount: fresh.consecutiveSoftFailureCount,
     degradedAtMs: fresh.degradedAtMs,
     recoveringAtMs: fresh.recoveringAtMs,
@@ -232,6 +259,7 @@ function normalizePersistedState(raw: unknown): AccountDispatchRuntimeState | nu
   };
   return {
     status,
+    suppressionReason: normalizeSuppressionReason(raw.suppressionReason),
     consecutiveSoftFailureCount: Math.max(0, Math.trunc(Number(raw.consecutiveSoftFailureCount) || 0)),
     degradedAtMs: asNullableNumber(raw.degradedAtMs),
     recoveringAtMs: asNullableNumber(raw.recoveringAtMs),
@@ -385,6 +413,25 @@ export function getAccountDispatchRuntimeSnapshot(
   return toSnapshot(key, state, nowMs);
 }
 
+export function listAccountDispatchRuntimeSnapshots(input: {
+  accountId?: number | null;
+  nowMs?: number;
+} = {}): AccountDispatchRuntimeSnapshot[] {
+  const nowMs = input.nowMs ?? Date.now();
+  const targetAccountId = Number.isFinite(input.accountId as number)
+    ? Math.trunc(Number(input.accountId))
+    : null;
+  sweepExpiredStates(nowMs);
+  const snapshots: AccountDispatchRuntimeSnapshot[] = [];
+  for (const [key, state] of accountDispatchRuntimeStates.entries()) {
+    const parsed = parseAccountDispatchRuntimeKey(key);
+    if (targetAccountId && parsed.accountId !== targetAccountId) continue;
+    if (!shouldPersistState(state, nowMs)) continue;
+    snapshots.push(toSnapshot(key, state, nowMs));
+  }
+  return snapshots.sort((left, right) => right.updatedAtMs - left.updatedAtMs);
+}
+
 export function recordAccountDispatchSelectionBlocked(
   routeId: number,
   modelName: string,
@@ -394,6 +441,7 @@ export function recordAccountDispatchSelectionBlocked(
   const key = buildAccountDispatchRuntimeKey(routeId, modelName, accountId);
   return updateState(key, (state) => {
     state.status = 'degraded';
+    state.suppressionReason = 'selection_blocked';
     state.consecutiveSoftFailureCount = 0;
     state.degradedAtMs = nowMs;
     state.recoveringAtMs = null;
@@ -407,19 +455,23 @@ export function recordAccountDispatchFailure(input: {
   modelName: string;
   accountId: number;
   kind: AccountDispatchFailureKind;
+  reason?: AccountDispatchSuppressionReason | string | null;
   nowMs?: number;
 }): AccountDispatchRuntimeSnapshot {
   const nowMs = input.nowMs ?? Date.now();
   const key = buildAccountDispatchRuntimeKey(input.routeId, input.modelName, input.accountId);
+  const reason = normalizeSuppressionReason(input.reason);
   return updateState(key, (state) => {
     state.lastFailureAtMs = nowMs;
-    if (
-      input.kind === 'hard'
+    const shouldDegradeNow = input.kind === 'hard'
+      || reason === 'pending_overload'
+      || reason === 'auth_invalid'
       || state.status === 'recovering'
       || state.status === 'failback_hold'
-      || (state.consecutiveSoftFailureCount + 1) >= ACCOUNT_DISPATCH_SOFT_FAILURE_THRESHOLD
-    ) {
+      || (state.consecutiveSoftFailureCount + 1) >= ACCOUNT_DISPATCH_SOFT_FAILURE_THRESHOLD;
+    if (shouldDegradeNow) {
       state.status = 'degraded';
+      state.suppressionReason = reason || (input.kind === 'hard' ? 'hard_error' : 'soft_error');
       state.consecutiveSoftFailureCount = 0;
       state.degradedAtMs = nowMs;
       state.recoveringAtMs = null;
@@ -428,6 +480,7 @@ export function recordAccountDispatchFailure(input: {
     }
 
     state.status = 'healthy';
+    state.suppressionReason = null;
     state.consecutiveSoftFailureCount += 1;
   }, nowMs);
 }
@@ -467,11 +520,13 @@ export function recordAccountDispatchSuccess(
     if (state.status === 'failback_hold') {
       if (typeof state.holdUntilMs !== 'number' || state.holdUntilMs <= nowMs) {
         state.status = 'healthy';
+        state.suppressionReason = null;
         state.holdUntilMs = null;
       }
       return;
     }
     state.status = 'healthy';
+    state.suppressionReason = null;
     state.degradedAtMs = null;
     state.recoveringAtMs = null;
     state.holdUntilMs = null;

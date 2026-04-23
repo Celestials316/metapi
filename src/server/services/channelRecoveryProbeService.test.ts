@@ -15,6 +15,7 @@ type RecoveryModule = typeof import('./channelRecoveryProbeService.js');
 type CoordinatorModule = typeof import('./proxyChannelCoordinator.js');
 type ConfigModule = typeof import('../config.js');
 type TokenRouterModule = typeof import('./tokenRouter.js');
+type RuntimeMemoryModule = typeof import('./accountDispatchRuntimeMemory.js');
 
 describe('channelRecoveryProbeService', () => {
   let db: DbModule['db'];
@@ -25,6 +26,9 @@ describe('channelRecoveryProbeService', () => {
   let resetProxyChannelCoordinatorState: CoordinatorModule['resetProxyChannelCoordinatorState'];
   let invalidateTokenRouterCache: TokenRouterModule['invalidateTokenRouterCache'];
   let resetSiteRuntimeHealthState: TokenRouterModule['resetSiteRuntimeHealthState'];
+  let TokenRouter: TokenRouterModule['TokenRouter'];
+  let getAccountDispatchRuntimeSnapshot: RuntimeMemoryModule['getAccountDispatchRuntimeSnapshot'];
+  let resetAccountDispatchRuntimeMemory: RuntimeMemoryModule['resetAccountDispatchRuntimeMemory'];
   let config: ConfigModule['config'];
   let dataDir = '';
   let originalDataDir: string | undefined;
@@ -41,6 +45,7 @@ describe('channelRecoveryProbeService', () => {
     const coordinatorModule = await import('./proxyChannelCoordinator.js');
     const configModule = await import('../config.js');
     const tokenRouterModule = await import('./tokenRouter.js');
+    const runtimeMemoryModule = await import('./accountDispatchRuntimeMemory.js');
 
     db = dbModule.db;
     schema = dbModule.schema;
@@ -50,6 +55,9 @@ describe('channelRecoveryProbeService', () => {
     resetProxyChannelCoordinatorState = coordinatorModule.resetProxyChannelCoordinatorState;
     invalidateTokenRouterCache = tokenRouterModule.invalidateTokenRouterCache;
     resetSiteRuntimeHealthState = tokenRouterModule.resetSiteRuntimeHealthState;
+    TokenRouter = tokenRouterModule.TokenRouter;
+    getAccountDispatchRuntimeSnapshot = runtimeMemoryModule.getAccountDispatchRuntimeSnapshot;
+    resetAccountDispatchRuntimeMemory = runtimeMemoryModule.resetAccountDispatchRuntimeMemory;
     config = configModule.config;
     originalConcurrencyLimit = config.proxySessionChannelConcurrencyLimit;
   });
@@ -65,6 +73,7 @@ describe('channelRecoveryProbeService', () => {
     resetChannelRecoveryProbeState();
     resetProxyChannelCoordinatorState();
     invalidateTokenRouterCache();
+    resetAccountDispatchRuntimeMemory();
     resetSiteRuntimeHealthState();
 
     await db.delete(schema.routeChannels).run();
@@ -80,6 +89,7 @@ describe('channelRecoveryProbeService', () => {
     resetChannelRecoveryProbeState();
     resetProxyChannelCoordinatorState();
     invalidateTokenRouterCache();
+    resetAccountDispatchRuntimeMemory();
     resetSiteRuntimeHealthState();
     rmSync(dataDir, { recursive: true, force: true });
     if (originalDataDir === undefined) {
@@ -168,7 +178,7 @@ describe('channelRecoveryProbeService', () => {
     const token = await db.insert(schema.accountTokens).values({
       accountId: account.id,
       name: 'default',
-      token: 'sk-active-token',
+      token: 'probe-active-token-ready',
       enabled: true,
       isDefault: true,
     }).returning().get();
@@ -197,10 +207,59 @@ describe('channelRecoveryProbeService', () => {
     expect(probeRuntimeModelMock).toHaveBeenCalledTimes(1);
     expect(probeRuntimeModelMock.mock.calls[0]?.[0]).toMatchObject({
       modelName: 'gpt-5.2',
-      tokenValue: 'sk-active-token',
+      tokenValue: 'probe-active-token-ready',
     });
 
     lease.lease.release();
+  });
+
+  it('re-probes auth-invalid suppressed channels and moves them into recovering on success', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'suppressed-site',
+      url: 'https://suppressed-site.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'suppressed-user',
+      accessToken: 'access-suppressed',
+      apiToken: 'probe-suppressed-api-token',
+      status: 'active',
+    }).returning().get();
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gpt-5.4',
+      enabled: true,
+    }).returning().get();
+
+    const channel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: account.id,
+      tokenId: null,
+      enabled: true,
+    }).returning().get();
+
+    const router = new TokenRouter();
+    await router.recordFailure(channel.id, {
+      status: 401,
+      errorText: 'invalid access token',
+      modelName: 'gpt-5.4',
+    }, account.id);
+
+    expect(getAccountDispatchRuntimeSnapshot(route.id, 'gpt-5.4', account.id)).toMatchObject({
+      status: 'degraded',
+      suppressionReason: 'auth_invalid',
+    });
+
+    await runChannelRecoveryProbeSweep();
+
+    expect(probeRuntimeModelMock).toHaveBeenCalledTimes(1);
+    expect(probeRuntimeModelMock.mock.calls[0]?.[0]).toMatchObject({
+      modelName: 'gpt-5.4',
+      tokenValue: 'probe-suppressed-api-token',
+    });
+    expect(getAccountDispatchRuntimeSnapshot(route.id, 'gpt-5.4', account.id).status).toBe('recovering');
   });
 
   it('skips provider-directed quota cooldown channels during recovery sweeps', async () => {

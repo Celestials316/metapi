@@ -25,6 +25,8 @@ export type ProxyRuntimeRequest = {
   runtime?: {
     executor: 'default' | 'codex' | 'gemini-cli' | 'antigravity' | 'claude';
     modelName?: string;
+    requestedModel?: string;
+    protocol?: string;
     stream?: boolean;
     oauthProjectId?: string | null;
     action?: 'generateContent' | 'streamGenerateContent' | 'countTokens';

@@ -134,6 +134,78 @@ describe('accountDispatchRuntimeMemory', () => {
     expect(failedDuringRecovery.status).toBe('degraded');
   });
 
+  it('preserves typed pending-overload suppression through recovery stages and clears it after hold expiry', () => {
+    const recordFailureWithReason = recordAccountDispatchFailure as unknown as (input: {
+      routeId: number;
+      modelName: string;
+      accountId: number;
+      kind: 'soft' | 'hard';
+      reason: string;
+      nowMs: number;
+    }) => Record<string, unknown>;
+
+    const degraded = recordFailureWithReason({
+      routeId,
+      modelName,
+      accountId,
+      kind: 'soft',
+      reason: 'pending_overload',
+      nowMs: 400_000,
+    });
+    expect(degraded.status).toBe('degraded');
+    expect(degraded.suppressionReason).toBe('pending_overload');
+
+    const recovering = recordAccountDispatchProbeSuccess(routeId, modelName, accountId, 401_000) as Record<string, unknown>;
+    expect(recovering.status).toBe('recovering');
+    expect(recovering.suppressionReason).toBe('pending_overload');
+
+    const hold = recordAccountDispatchSuccess(routeId, modelName, accountId, 402_000) as Record<string, unknown>;
+    expect(hold.status).toBe('failback_hold');
+    expect(hold.suppressionReason).toBe('pending_overload');
+
+    const healthy = getAccountDispatchRuntimeSnapshot(
+      routeId,
+      modelName,
+      accountId,
+      ((hold.holdUntilMs as number | undefined) || 402_000) + 1,
+    ) as Record<string, unknown>;
+    expect(healthy.status).toBe('healthy');
+    expect(healthy.suppressionReason).toBeNull();
+  });
+
+  it('records typed timeout suppression once soft failures cross the threshold', () => {
+    const recordFailureWithReason = recordAccountDispatchFailure as unknown as (input: {
+      routeId: number;
+      modelName: string;
+      accountId: number;
+      kind: 'soft' | 'hard';
+      reason: string;
+      nowMs: number;
+    }) => Record<string, unknown>;
+
+    const firstFailure = recordFailureWithReason({
+      routeId,
+      modelName,
+      accountId,
+      kind: 'soft',
+      reason: 'timeout',
+      nowMs: 500_000,
+    });
+    expect(firstFailure.status).toBe('healthy');
+    expect(firstFailure.suppressionReason).toBeNull();
+
+    const secondFailure = recordFailureWithReason({
+      routeId,
+      modelName,
+      accountId,
+      kind: 'soft',
+      reason: 'timeout',
+      nowMs: 501_000,
+    });
+    expect(secondFailure.status).toBe('degraded');
+    expect(secondFailure.suppressionReason).toBe('timeout');
+  });
+
   it('clears all runtime states for a specific account only', async () => {
     recordAccountDispatchSelectionBlocked(routeId, modelName, accountId, 300_000);
     recordAccountDispatchSelectionBlocked(routeId + 1, `${modelName}-mini`, accountId, 301_000);

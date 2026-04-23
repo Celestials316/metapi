@@ -8,7 +8,7 @@ import { resolveProviderProfile } from '../../proxy-core/providers/registry.js';
 import { prepareCodexCompatibleOpenAiResponsesRequest } from '../../proxy-core/providers/codexProviderProfile.js';
 import { config } from '../../config.js';
 import { fetchModelPricingCatalog } from '../../services/modelPricingService.js';
-import { applyPayloadRules } from '../../services/payloadRules.js';
+import { applyPayloadHeaderRules, applyPayloadRules } from '../../services/payloadRules.js';
 import {
   applyUpstreamEndpointRuntimePreference,
   buildEndpointCapabilityProfile,
@@ -708,6 +708,8 @@ export function buildUpstreamEndpointRequest(input: {
   runtime?: {
     executor: 'default' | 'codex' | 'gemini-cli' | 'antigravity' | 'claude';
     modelName?: string;
+    requestedModel?: string;
+    protocol?: string;
     stream?: boolean;
     oauthProjectId?: string | null;
     action?: 'generateContent' | 'streamGenerateContent' | 'countTokens';
@@ -799,6 +801,7 @@ export function buildUpstreamEndpointRequest(input: {
   };
 
   const openaiBody = stripGeminiUnsupportedFields(input.openaiBody);
+  const requestedModelForPayloadRules = resolveRequestedModelForPayloadRules(input);
   const runtime = {
     executor: (
       sitePlatform === 'codex'
@@ -812,10 +815,11 @@ export function buildUpstreamEndpointRequest(input: {
               : 'default'
     ) as 'default' | 'codex' | 'gemini-cli' | 'antigravity' | 'claude',
     modelName: input.modelName,
+    requestedModel: requestedModelForPayloadRules,
+    protocol: sitePlatform || undefined,
     stream: input.stream,
     oauthProjectId: asTrimmedString(input.oauthProjectId) || null,
   };
-  const requestedModelForPayloadRules = resolveRequestedModelForPayloadRules(input);
   const applyConfiguredPayloadRules = <T extends Record<string, unknown>>(body: T): T => (
     applyPayloadRules({
       rules: config.payloadRules,
@@ -824,6 +828,16 @@ export function buildUpstreamEndpointRequest(input: {
       requestedModel: requestedModelForPayloadRules,
       protocol: sitePlatform,
     }) as T
+  );
+  const applyConfiguredHeaderRules = (headers: Record<string, string>): Record<string, string> => (
+    applyPayloadHeaderRules({
+      rules: config.payloadRules,
+      headers,
+      modelName: input.modelName,
+      requestedModel: requestedModelForPayloadRules,
+      protocol: sitePlatform,
+      endpoint: input.endpoint,
+    })
   );
 
   if (isInternalGeminiUpstream) {
@@ -842,7 +856,7 @@ export function buildUpstreamEndpointRequest(input: {
     if (!providerProfile) {
       throw new Error(`missing provider profile for platform: ${sitePlatform}`);
     }
-    return providerProfile.prepareRequest({
+    const prepared = providerProfile.prepareRequest({
       endpoint: input.endpoint,
       modelName: input.modelName,
       stream: input.stream,
@@ -855,6 +869,10 @@ export function buildUpstreamEndpointRequest(input: {
       body: configuredGeminiRequest,
       action: input.stream ? 'streamGenerateContent' : 'generateContent',
     });
+    return {
+      ...prepared,
+      headers: applyConfiguredHeaderRules(prepared.headers),
+    };
   }
 
   if (input.endpoint === 'messages') {
@@ -896,7 +914,7 @@ export function buildUpstreamEndpointRequest(input: {
     const configuredClaudeBody = applyConfiguredPayloadRules(sanitizedBody);
 
     if (providerProfile?.id === 'claude') {
-      return providerProfile.prepareRequest({
+      const prepared = providerProfile.prepareRequest({
         endpoint: 'messages',
         modelName: input.modelName,
         stream: input.stream,
@@ -908,6 +926,10 @@ export function buildUpstreamEndpointRequest(input: {
         claudeHeaders,
         body: configuredClaudeBody,
       });
+      return {
+        ...prepared,
+        headers: applyConfiguredHeaderRules(prepared.headers),
+      };
     }
 
     const headers = buildClaudeRuntimeHeaders({
@@ -921,7 +943,7 @@ export function buildUpstreamEndpointRequest(input: {
 
     return {
       path: resolveEndpointPath('messages'),
-      headers,
+      headers: applyConfiguredHeaderRules(headers),
       body: configuredClaudeBody,
       runtime,
     };
@@ -969,7 +991,7 @@ export function buildUpstreamEndpointRequest(input: {
       if (providerProfile?.id !== 'codex') {
         throw new Error(`missing codex provider profile for platform: ${sitePlatform}`);
       }
-      return providerProfile.prepareRequest({
+      const prepared = providerProfile.prepareRequest({
         endpoint: 'responses',
         modelName: input.modelName,
         stream: input.stream,
@@ -987,10 +1009,14 @@ export function buildUpstreamEndpointRequest(input: {
         responsesWebsocketTransport,
         body: configuredResponsesBody,
       });
+      return {
+        ...prepared,
+        headers: applyConfiguredHeaderRules(prepared.headers),
+      };
     }
 
     if (isCodexCompatibleRequest || sitePlatform === 'openai') {
-      return prepareCodexCompatibleOpenAiResponsesRequest({
+      const prepared = prepareCodexCompatibleOpenAiResponsesRequest({
         endpoint: 'responses',
         modelName: input.modelName,
         stream: input.stream,
@@ -1009,6 +1035,10 @@ export function buildUpstreamEndpointRequest(input: {
         responsesWebsocketTransport,
         body: configuredResponsesBody,
       });
+      return {
+        ...prepared,
+        headers: applyConfiguredHeaderRules(prepared.headers),
+      };
     }
 
     const headers = ensureStreamAcceptHeader({
@@ -1017,7 +1047,7 @@ export function buildUpstreamEndpointRequest(input: {
     }, input.stream);
     return {
       path: resolveEndpointPath('responses'),
-      headers,
+      headers: applyConfiguredHeaderRules(headers),
       body: configuredResponsesBody,
       runtime,
     };
@@ -1036,7 +1066,7 @@ export function buildUpstreamEndpointRequest(input: {
   );
   return {
     path: resolveEndpointPath('chat'),
-    headers,
+    headers: applyConfiguredHeaderRules(headers),
     body: configuredChatBody,
     runtime,
   };

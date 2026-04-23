@@ -1,9 +1,12 @@
 import Fastify, { type FastifyInstance } from 'fastify';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { config } from '../../config.js';
+import { normalizeChannelAffinityConfig, resetChannelAffinityState } from '../../services/channelAffinity.js';
 
 const fetchMock = vi.fn();
 const selectChannelMock = vi.fn();
 const selectNextChannelMock = vi.fn();
+const selectPreferredChannelMock = vi.fn();
 const recordSuccessMock = vi.fn();
 const recordFailureMock = vi.fn();
 const refreshModelsAndRebuildRoutesMock = vi.fn();
@@ -30,6 +33,7 @@ vi.mock('../../services/tokenRouter.js', () => ({
   tokenRouter: {
     selectChannel: (...args: unknown[]) => selectChannelMock(...args),
     selectNextChannel: (...args: unknown[]) => selectNextChannelMock(...args),
+    selectPreferredChannel: (...args: unknown[]) => selectPreferredChannelMock(...args),
     recordSuccess: (...args: unknown[]) => recordSuccessMock(...args),
     recordFailure: (...args: unknown[]) => recordFailureMock(...args),
   },
@@ -97,6 +101,7 @@ vi.mock('../../db/index.js', () => ({
 
 describe('/v1/videos routes', () => {
   let app: FastifyInstance;
+  const originalChannelAffinity = config.channelAffinity;
 
   const buildMultipartBody = (boundary: string) => Buffer.from(
     `--${boundary}\r\n`
@@ -122,6 +127,7 @@ describe('/v1/videos routes', () => {
     fetchMock.mockReset();
     selectChannelMock.mockReset();
     selectNextChannelMock.mockReset();
+    selectPreferredChannelMock.mockReset();
     recordSuccessMock.mockReset();
     recordFailureMock.mockReset();
     refreshModelsAndRebuildRoutesMock.mockReset();
@@ -136,6 +142,8 @@ describe('/v1/videos routes', () => {
     resolveProxyVideoTaskSiteMock.mockReset();
     siteApiEndpointRows = [];
     shouldRetryProxyRequestMock.mockReturnValue(false);
+    resetChannelAffinityState();
+    config.channelAffinity = normalizeChannelAffinityConfig(undefined);
 
     selectChannelMock.mockReturnValue({
       channel: { id: 11, routeId: 22 },
@@ -149,9 +157,128 @@ describe('/v1/videos routes', () => {
   });
 
   afterAll(async () => {
+    resetChannelAffinityState();
+    config.channelAffinity = originalChannelAffinity;
     if (app) {
       await app.close();
     }
+  });
+
+  it('reuses a recorded affinity binding for repeated video create requests', async () => {
+    config.channelAffinity = normalizeChannelAffinityConfig({
+      enabled: true,
+      rules: [
+        {
+          name: 'videos-prompt-affinity',
+          pathRegex: ['^/v1/videos$'],
+          keySources: [{ type: 'body_path', path: 'prompt' }],
+          ttlSeconds: 600,
+        },
+      ],
+    });
+    saveProxyVideoTaskMock
+      .mockResolvedValueOnce({ publicId: 'vid_local_a', upstreamVideoId: 'vid_upstream_a' })
+      .mockResolvedValueOnce({ publicId: 'vid_local_b', upstreamVideoId: 'vid_upstream_b' });
+
+    const selected = {
+      channel: { id: 11, routeId: 22 },
+      site: { id: 44, name: 'demo-site', url: 'https://upstream.example.com', platform: 'openai' },
+      account: { id: 33, username: 'demo-user' },
+      tokenName: 'default',
+      tokenValue: 'sk-demo',
+      actualModel: 'sora-2',
+    };
+    selectChannelMock.mockReturnValue(selected);
+    selectPreferredChannelMock.mockReturnValue(selected);
+    fetchMock.mockImplementation(() => Promise.resolve(new Response(JSON.stringify({
+      id: 'vid_upstream_runtime',
+      object: 'video',
+      status: 'queued',
+      model: 'sora-2',
+    }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    })));
+
+    const firstResponse = await app.inject({
+      method: 'POST',
+      url: '/v1/videos',
+      payload: { model: 'sora-2', prompt: 'affinity video prompt' },
+    });
+    const secondResponse = await app.inject({
+      method: 'POST',
+      url: '/v1/videos',
+      payload: { model: 'sora-2', prompt: 'affinity video prompt' },
+    });
+
+    expect(firstResponse.statusCode).toBe(200);
+    expect(secondResponse.statusCode).toBe(200);
+    expect(selectChannelMock).toHaveBeenCalledTimes(1);
+    expect(selectPreferredChannelMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not fan out to another channel when an affinity-bound video create request enables skipRetryOnFailure', async () => {
+    config.channelAffinity = normalizeChannelAffinityConfig({
+      enabled: true,
+      rules: [
+        {
+          name: 'videos-prompt-affinity-skip-retry',
+          pathRegex: ['^/v1/videos$'],
+          keySources: [{ type: 'body_path', path: 'prompt' }],
+          ttlSeconds: 600,
+          skipRetryOnFailure: true,
+        },
+      ],
+    });
+    shouldRetryProxyRequestMock.mockReturnValue(true);
+    saveProxyVideoTaskMock.mockResolvedValue({ publicId: 'vid_local_seed', upstreamVideoId: 'vid_upstream_seed' });
+
+    const selected = {
+      channel: { id: 11, routeId: 22 },
+      site: { id: 44, name: 'demo-site', url: 'https://upstream.example.com', platform: 'openai' },
+      account: { id: 33, username: 'demo-user' },
+      tokenName: 'default',
+      tokenValue: 'sk-demo',
+      actualModel: 'sora-2',
+    };
+    selectChannelMock.mockReturnValue(selected);
+    selectPreferredChannelMock.mockReturnValue(selected);
+    selectNextChannelMock.mockReturnValue({
+      ...selected,
+      channel: { id: 12, routeId: 23 },
+      tokenValue: 'sk-next',
+    });
+
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        id: 'vid_upstream_seed',
+        object: 'video',
+        status: 'queued',
+        model: 'sora-2',
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response('retryable upstream failure', {
+        status: 503,
+        headers: { 'content-type': 'text/plain' },
+      }));
+
+    const firstResponse = await app.inject({
+      method: 'POST',
+      url: '/v1/videos',
+      payload: { model: 'sora-2', prompt: 'affinity video prompt skip' },
+    });
+    const secondResponse = await app.inject({
+      method: 'POST',
+      url: '/v1/videos',
+      payload: { model: 'sora-2', prompt: 'affinity video prompt skip' },
+    });
+
+    expect(firstResponse.statusCode).toBe(200);
+    expect(secondResponse.statusCode).toBe(503);
+    expect(selectPreferredChannelMock).toHaveBeenCalledTimes(1);
+    expect(selectNextChannelMock).not.toHaveBeenCalled();
   });
 
   it('creates an upstream video task and stores a local public id mapping', async () => {

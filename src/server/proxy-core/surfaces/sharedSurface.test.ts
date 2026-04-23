@@ -28,6 +28,7 @@ const bindStickyChannelMock = vi.fn();
 const clearStickyChannelMock = vi.fn();
 const acquireChannelLeaseMock = vi.fn();
 const buildStickySessionKeyMock = vi.fn();
+const ensureProxyChannelCoordinatorStateLoadedMock = vi.fn();
 const consoleWarnMock = vi.spyOn(console, 'warn').mockImplementation(() => {});
 const consoleErrorMock = vi.spyOn(console, 'error').mockImplementation(() => {});
 
@@ -43,6 +44,7 @@ vi.mock('../../services/tokenRouter.js', () => ({
 }));
 
 vi.mock('../../services/proxyChannelCoordinator.js', () => ({
+  ensureProxyChannelCoordinatorStateLoaded: (...args: unknown[]) => ensureProxyChannelCoordinatorStateLoadedMock(...args),
   proxyChannelCoordinator: {
     getStickyChannelId: (...args: unknown[]) => getStickyChannelIdMock(...args),
     bindStickyChannel: (...args: unknown[]) => bindStickyChannelMock(...args),
@@ -142,6 +144,7 @@ describe('selectSurfaceChannelForAttempt', () => {
     clearStickyChannelMock.mockReset();
     acquireChannelLeaseMock.mockReset();
     buildStickySessionKeyMock.mockReset();
+    ensureProxyChannelCoordinatorStateLoadedMock.mockReset();
     consoleWarnMock.mockClear();
     consoleErrorMock.mockClear();
   });
@@ -262,8 +265,31 @@ describe('selectSurfaceChannelForAttempt', () => {
     );
     expect(getStickyChannelIdMock).not.toHaveBeenCalled();
     expect(selectChannelMock).not.toHaveBeenCalled();
-    expect(selectNextChannelMock).not.toHaveBeenCalled();
-    expect(refreshModelsAndRebuildRoutesMock).not.toHaveBeenCalled();
+  });
+
+  it('prefers the channel-affinity binding on the first attempt after sticky lookup misses', async () => {
+    const selected = { channel: { id: 66 } };
+    getStickyChannelIdMock.mockReturnValueOnce(null);
+    selectPreferredChannelMock.mockResolvedValueOnce(selected);
+
+    const { selectSurfaceChannelForAttempt } = await import('./sharedSurface.js');
+    const result = await selectSurfaceChannelForAttempt({
+      requestedModel: 'gpt-5.2',
+      downstreamPolicy: EMPTY_DOWNSTREAM_ROUTING_POLICY,
+      excludeChannelIds: [],
+      retryCount: 0,
+      stickySessionKey: 'sticky-session',
+      affinityPreferredChannelId: 66,
+    });
+
+    expect(result).toBe(selected);
+    expect(selectPreferredChannelMock).toHaveBeenCalledWith(
+      'gpt-5.2',
+      66,
+      EMPTY_DOWNSTREAM_ROUTING_POLICY,
+      [],
+    );
+    expect(selectChannelMock).not.toHaveBeenCalled();
   });
 
   it('does not refresh or fall back when the forced tester channel is unavailable', async () => {
@@ -781,6 +807,84 @@ describe('selectSurfaceChannelForAttempt', () => {
       model: 'gpt-5.2',
       reason: 'socket hang up',
     });
+  });
+
+  it('does not retry execution errors when retry policy rejects the expanded failure text', async () => {
+    composeProxyLogMessageMock.mockReturnValue('normalized error');
+    formatUtcSqlDateTimeMock.mockReturnValue('2026-03-21 22:00:00');
+    insertProxyLogMock.mockResolvedValue(undefined);
+    shouldRetryProxyRequestMock.mockReturnValue(false);
+
+    const { createSurfaceFailureToolkit } = await import('./sharedSurface.js');
+    const toolkit = createSurfaceFailureToolkit({
+      warningScope: 'responses',
+      downstreamPath: '/v1/responses',
+      maxRetries: 2,
+      clientContext: null,
+      downstreamApiKeyId: null,
+    });
+
+    const result = await toolkit.handleExecutionError({
+      selected: {
+        channel: { id: 11, routeId: 22 },
+        account: { id: 33, username: 'oauth-user' },
+        site: { name: 'Codex OAuth' },
+        actualModel: 'upstream-model',
+      },
+      requestedModel: 'gpt-5.2',
+      modelName: 'upstream-model',
+      errorMessage: 'bad response body: invalid json',
+      latencyMs: 650,
+      retryCount: 0,
+    });
+
+    expect(shouldRetryProxyRequestMock).toHaveBeenCalledWith(0, 'bad response body: invalid json');
+    expect(result).toEqual({
+      action: 'respond',
+      status: 502,
+      payload: {
+        error: {
+          message: 'Upstream error: bad response body: invalid json',
+          type: 'upstream_error',
+        },
+      },
+    });
+  });
+
+  it('retries execution errors only when retry policy accepts the expanded failure text', async () => {
+    composeProxyLogMessageMock.mockReturnValue('normalized error');
+    formatUtcSqlDateTimeMock.mockReturnValue('2026-03-21 22:00:00');
+    insertProxyLogMock.mockResolvedValue(undefined);
+    shouldRetryProxyRequestMock.mockReturnValue(true);
+
+    const { createSurfaceFailureToolkit } = await import('./sharedSurface.js');
+    const toolkit = createSurfaceFailureToolkit({
+      warningScope: 'responses',
+      downstreamPath: '/v1/responses',
+      maxRetries: 2,
+      clientContext: null,
+      downstreamApiKeyId: null,
+    });
+
+    const result = await toolkit.handleExecutionError({
+      selected: {
+        channel: { id: 11, routeId: 22 },
+        account: { id: 33, username: 'oauth-user' },
+        site: { name: 'Codex OAuth' },
+        actualModel: 'upstream-model',
+      },
+      requestedModel: 'gpt-5.2',
+      modelName: 'upstream-model',
+      errorMessage: 'fetch failed',
+      latencyMs: 650,
+      retryCount: 0,
+      error: new TypeError('fetch failed', {
+        cause: new Error('read ECONNRESET'),
+      }),
+    } as any);
+
+    expect(shouldRetryProxyRequestMock).toHaveBeenCalledWith(0, 'fetch failed: read ECONNRESET');
+    expect(result).toEqual({ action: 'retry' });
   });
 
   it('expands nested execution error causes before logging and responding', async () => {

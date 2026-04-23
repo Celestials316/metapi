@@ -1,5 +1,8 @@
 import * as routeRefreshWorkflow from '../services/routeRefreshWorkflow.js';
-import { proxyChannelCoordinator } from '../services/proxyChannelCoordinator.js';
+import {
+  ensureProxyChannelCoordinatorStateLoaded,
+  proxyChannelCoordinator,
+} from '../services/proxyChannelCoordinator.js';
 import { canRetryProxyChannel } from '../services/proxyChannelRetry.js';
 import type { DownstreamRoutingPolicy } from '../services/downstreamPolicyTypes.js';
 import { tokenRouter } from '../services/tokenRouter.js';
@@ -76,8 +79,13 @@ export function buildForcedChannelUnavailableMessage(forcedChannelId?: number | 
   return `指定通道 #${normalizedForcedChannelId} 当前不可用，固定通道模式不会自动切换其他通道`;
 }
 
-export function canRetryChannelSelection(retryCount: number, forcedChannelId?: number | null): boolean {
+export function canRetryChannelSelection(
+  retryCount: number,
+  forcedChannelId?: number | null,
+  disableRetry?: boolean,
+): boolean {
   if (normalizeForcedChannelId(forcedChannelId) !== null) return false;
+  if (disableRetry === true) return false;
   return canRetryProxyChannel(retryCount);
 }
 
@@ -88,7 +96,9 @@ export async function selectProxyChannelForAttempt(input: {
   retryCount: number;
   stickySessionKey?: string | null;
   forcedChannelId?: number | null;
+  affinityPreferredChannelId?: number | null;
 }): Promise<SelectedChannel> {
+  await ensureProxyChannelCoordinatorStateLoaded();
   const normalizedForcedChannelId = normalizeForcedChannelId(input.forcedChannelId);
   if (normalizedForcedChannelId !== null) {
     if (input.retryCount > 0) return null;
@@ -145,6 +155,21 @@ export async function selectProxyChannelForAttempt(input: {
         }
       }
     }
+  }
+
+  const normalizedAffinityPreferredChannelId = normalizeForcedChannelId(input.affinityPreferredChannelId);
+  if (
+    !selected
+    && input.retryCount === 0
+    && normalizedAffinityPreferredChannelId !== null
+    && !input.excludeChannelIds.includes(normalizedAffinityPreferredChannelId)
+  ) {
+    selected = await tokenRouter.selectPreferredChannel(
+      input.requestedModel,
+      normalizedAffinityPreferredChannelId,
+      input.downstreamPolicy,
+      input.excludeChannelIds,
+    );
   }
 
   if (!selected) {

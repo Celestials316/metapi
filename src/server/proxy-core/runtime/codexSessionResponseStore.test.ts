@@ -1,13 +1,31 @@
-import { describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   buildCodexSessionResponseStoreKey,
   clearCodexSessionResponseId,
+  ensureCodexSessionResponseStoreLoaded,
+  flushCodexSessionResponseStorePersistence,
   getCodexSessionResponseId,
   resetCodexSessionResponseStore,
   setCodexSessionResponseId,
 } from './codexSessionResponseStore.js';
 
 describe('codexSessionResponseStore', () => {
+  let dataDir = '';
+
+  beforeAll(async () => {
+    dataDir = mkdtempSync(join(tmpdir(), 'metapi-responses-continuity-'));
+    process.env.DATA_DIR = dataDir;
+    await import('../../db/migrate.js');
+  });
+
+  afterAll(() => {
+    resetCodexSessionResponseStore();
+    delete process.env.DATA_DIR;
+    rmSync(dataDir, { recursive: true, force: true });
+  });
   it('evicts the oldest session id when the store exceeds the cap', () => {
     resetCodexSessionResponseStore();
 
@@ -153,5 +171,32 @@ describe('codexSessionResponseStore', () => {
     expect(getCodexSessionResponseId(originalScopedKey)).toBe('resp-roundtrip-2');
 
     resetCodexSessionResponseStore();
+  });
+
+  it('persists scoped response anchors across a reset and reload', async () => {
+    resetCodexSessionResponseStore();
+    await ensureCodexSessionResponseStoreLoaded();
+
+    const originalScopedKey = buildCodexSessionResponseStoreKey({
+      sessionId: 'session-persist',
+      siteId: 10,
+      accountId: 20,
+      channelId: 30,
+    });
+    const driftedScopedKey = buildCodexSessionResponseStoreKey({
+      sessionId: 'session-persist',
+      siteId: 10,
+      accountId: 21,
+      channelId: 31,
+    });
+
+    setCodexSessionResponseId(originalScopedKey, 'resp-persist-1');
+    await flushCodexSessionResponseStorePersistence();
+
+    resetCodexSessionResponseStore();
+    await ensureCodexSessionResponseStoreLoaded();
+
+    expect(getCodexSessionResponseId(originalScopedKey)).toBe('resp-persist-1');
+    expect(getCodexSessionResponseId(driftedScopedKey)).toBe('resp-persist-1');
   });
 });

@@ -3,6 +3,7 @@ export type ProxyFailureClass =
   | 'challenge_turnstile'
   | 'challenge_shield'
   | 'pending_overload'
+  | 'processing_error'
   | 'rate_limit'
   | 'quota_exceeded'
   | 'auth_invalid'
@@ -64,6 +65,12 @@ const PENDING_OVERLOAD_PATTERNS = [
   /pending request overload/i,
 ];
 
+const PROCESSING_ERROR_PATTERNS = [
+  /an error occurred while processing your request/i,
+  /processing error/i,
+  /failed to process your request/i,
+];
+
 const RATE_LIMIT_PATTERNS = [
   /rate limit/i,
   /too many requests/i,
@@ -106,6 +113,8 @@ const TIMEOUT_PATTERNS = [
   /timeout/i,
   /etimedout/i,
   /deadline exceeded/i,
+  /stream closed before response\.completed/i,
+  /response\.incomplete/i,
   /读取超时/,
   /请求超时/,
 ];
@@ -196,6 +205,15 @@ export function classifyProxyFailure(input: {
       retryable: true,
       challenge: false,
       summary: rawMessage || 'pending overload',
+    };
+  }
+  if (includesAny(message, PROCESSING_ERROR_PATTERNS)) {
+    return {
+      className: 'processing_error',
+      title: '上游处理错误',
+      retryable: true,
+      challenge: false,
+      summary: rawMessage || 'processing error',
     };
   }
   if (status === 429 || includesAny(message, RATE_LIMIT_PATTERNS)) {

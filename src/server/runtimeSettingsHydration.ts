@@ -2,6 +2,8 @@ import {
   config,
   normalizeTokenRouterFailureCooldownMaxSec,
 } from './config.js';
+import { normalizeChannelAffinityConfig } from './services/channelAffinity.js';
+import { normalizeDownstreamRateLimitConfig } from './services/downstreamRateLimit.js';
 import { normalizePayloadRulesConfig } from './services/payloadRules.js';
 import { normalizeLogCleanupRetentionDays } from './shared/logCleanupRetentionDays.js';
 
@@ -97,6 +99,14 @@ export function applyRuntimeSettings(settingsMap: Map<string, string>) {
     config.payloadRules = normalizePayloadRulesConfig(parseSettingFromMap<unknown>(settingsMap, 'payload_rules'));
   }
 
+  if (settingsMap.has('downstream_rate_limit')) {
+    config.downstreamRateLimit = normalizeDownstreamRateLimitConfig(parseSettingFromMap<unknown>(settingsMap, 'downstream_rate_limit'));
+  }
+
+  if (settingsMap.has('channel_affinity')) {
+    config.channelAffinity = normalizeChannelAffinityConfig(parseSettingFromMap<unknown>(settingsMap, 'channel_affinity'));
+  }
+
   const checkinCron = parseSettingFromMap<string>(settingsMap, 'checkin_cron');
   if (typeof checkinCron === 'string' && checkinCron) config.checkinCron = checkinCron;
 
@@ -156,6 +166,15 @@ export function applyRuntimeSettings(settingsMap: Map<string, string>) {
     && tokenRouterPendingOverloadCooldownSec >= 1
   ) {
     config.tokenRouterPendingOverloadCooldownSec = Math.trunc(tokenRouterPendingOverloadCooldownSec);
+  }
+
+  const tokenRouterTimeoutCooldownSec = parseSettingFromMap<number>(settingsMap, 'token_router_timeout_cooldown_sec');
+  if (
+    typeof tokenRouterTimeoutCooldownSec === 'number'
+    && Number.isFinite(tokenRouterTimeoutCooldownSec)
+    && tokenRouterTimeoutCooldownSec >= 1
+  ) {
+    config.tokenRouterTimeoutCooldownSec = Math.trunc(tokenRouterTimeoutCooldownSec);
   }
 
   const proxyDebugTraceEnabled = parseSettingFromMap<boolean>(settingsMap, 'proxy_debug_trace_enabled');

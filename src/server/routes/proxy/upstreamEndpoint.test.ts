@@ -1197,6 +1197,56 @@ describe('buildUpstreamEndpointRequest', () => {
     expect(request.body.store).toBe(false);
   });
 
+  it('applies configured header override rules after provider request preparation', () => {
+    (config as any).payloadRules = {
+      default: [],
+      defaultRaw: [],
+      override: [],
+      overrideRaw: [],
+      filter: [],
+      headerOverride: [
+        {
+          models: [{ name: 'gpt-5.4', protocol: 'codex' }],
+          endpoints: ['responses'],
+          headers: {
+            'User-Agent': 'ops-hotfix/1.0',
+            'X-Route-Override': 'enabled',
+          },
+        },
+      ],
+      headerFilter: [
+        {
+          models: [{ name: 'gpt-5.4', protocol: 'codex' }],
+          endpoints: ['responses'],
+          headers: ['originator'],
+        },
+      ],
+      statusCodeMap: [],
+    };
+
+    const request = buildUpstreamEndpointRequest({
+      endpoint: 'responses',
+      modelName: 'gpt-5.4',
+      stream: false,
+      tokenValue: 'oauth-access-token',
+      oauthProvider: 'codex',
+      sitePlatform: 'codex',
+      siteUrl: 'https://chatgpt.com/backend-api/codex',
+      openaiBody: {
+        model: 'gpt-5.4',
+        messages: [{ role: 'user', content: 'hello codex' }],
+      },
+      downstreamFormat: 'openai',
+      providerHeaders: {
+        Originator: 'codex_cli_rs',
+      },
+    } as any);
+
+    expect(request.headers['User-Agent']).toBe('ops-hotfix/1.0');
+    expect(request.headers['X-Route-Override']).toBe('enabled');
+    expect(request.headers.Originator).toBeUndefined();
+  });
+
   it('builds gemini-cli native requests with project envelope and bearer headers', () => {
     const request = buildUpstreamEndpointRequest({
       endpoint: 'responses',

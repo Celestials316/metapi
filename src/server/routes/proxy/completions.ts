@@ -7,6 +7,11 @@ import { isTokenExpiredError } from '../../services/alertRules.js';
 import { shouldRetryProxyRequest } from '../../services/proxyRetryPolicy.js';
 import { resolveProxyUsageWithSelfLogFallback } from '../../services/proxyUsageFallbackService.js';
 import { mergeProxyUsage, parseProxyUsage, pullSseDataEvents } from '../../services/proxyUsageParser.js';
+import {
+  clearChannelAffinityBinding,
+  recordChannelAffinitySuccess,
+  resolveChannelAffinityRequest,
+} from '../../services/channelAffinity.js';
 import { ensureModelAllowedForDownstreamKey, getDownstreamRoutingPolicy, recordDownstreamCostUsage } from './downstreamPolicy.js';
 import { withSiteRecordProxyRequestInit } from '../../services/siteProxy.js';
 import { getProxyUrlFromExtraConfig } from '../../services/accountExtraConfig.js';
@@ -37,16 +42,28 @@ export async function completionsProxyRoute(app: FastifyInstance) {
     }
     if (!await ensureModelAllowedForDownstreamKey(request, reply, requestedModel)) return;
     const downstreamPolicy = getDownstreamRoutingPolicy(request);
+    const requestHeaders = request.headers as Record<string, unknown>;
     const forcedChannelId = getTesterForcedChannelId({
-      headers: request.headers as Record<string, unknown>,
+      headers: requestHeaders,
       clientIp: request.ip,
     });
-    const downstreamApiKeyId = getProxyAuthContext(request)?.keyId ?? null;
+    const authContext = getProxyAuthContext(request);
+    const downstreamApiKeyId = authContext?.keyId ?? null;
     const downstreamPath = '/v1/completions';
     const clientContext = detectDownstreamClientContext({
       downstreamPath,
-      headers: request.headers as Record<string, unknown>,
+      headers: requestHeaders,
       body,
+    });
+    const channelAffinity = resolveChannelAffinityRequest({
+      config: config.channelAffinity,
+      requestedModel,
+      downstreamPath,
+      headers: requestHeaders,
+      body,
+      clientContext,
+      downstreamGroup: authContext?.source === 'managed' ? authContext.keyName : null,
+      downstreamApiKeyId,
     });
 
     const isStream = body.stream === true;
@@ -55,12 +72,16 @@ export async function completionsProxyRoute(app: FastifyInstance) {
     let retryCount = 0;
 
     while (retryCount <= getProxyMaxChannelRetries()) {
+      const affinityPreferredChannelId = retryCount === 0
+        ? (channelAffinity?.preferredChannelId ?? null)
+        : null;
       const selected = await selectProxyChannelForAttempt({
         requestedModel,
         downstreamPolicy,
         excludeChannelIds,
         retryCount,
         forcedChannelId,
+        affinityPreferredChannelId,
       });
 
       if (!selected) {
@@ -72,6 +93,30 @@ export async function completionsProxyRoute(app: FastifyInstance) {
         return reply.code(503).send({
           error: { message: noChannelMessage, type: 'server_error' },
         });
+      }
+
+      const affinityRetryLocked = Boolean(
+        retryCount === 0
+        && affinityPreferredChannelId
+        && channelAffinity?.skipRetryOnFailure
+        && selected.channel.id === affinityPreferredChannelId
+      );
+      const canRetryCurrentSelection = () => canRetryChannelSelection(
+        retryCount,
+        forcedChannelId,
+        affinityRetryLocked,
+      );
+      const recordChannelAffinityIfSuccessful = () => recordChannelAffinitySuccess({
+        config: config.channelAffinity,
+        resolution: channelAffinity,
+        selectedChannelId: selected.channel.id,
+      });
+      if (
+        retryCount === 0
+        && affinityPreferredChannelId
+        && selected.channel.id !== affinityPreferredChannelId
+      ) {
+        clearChannelAffinityBinding(channelAffinity?.cacheKey, affinityPreferredChannelId);
       }
 
       excludeChannelIds.push(selected.channel.id);
@@ -191,6 +236,7 @@ export async function completionsProxyRoute(app: FastifyInstance) {
           await recordTokenRouterEventBestEffort('record channel success', () => (
             tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost, upstreamModel, selected.account.id)
           ));
+          recordChannelAffinityIfSuccessful();
           recordDownstreamCostUsage(request, estimatedCost);
           logProxy(
             selected,
@@ -253,7 +299,7 @@ export async function completionsProxyRoute(app: FastifyInstance) {
             firstByteLatencyMs,
           );
 
-          if (shouldRetryProxyRequest(failure.status, errText) && canRetryChannelSelection(retryCount, forcedChannelId)) {
+          if (shouldRetryProxyRequest(failure.status, errText) && canRetryCurrentSelection()) {
             retryCount += 1;
             continue;
           }
@@ -294,6 +340,7 @@ export async function completionsProxyRoute(app: FastifyInstance) {
         await recordTokenRouterEventBestEffort('record channel success', () => (
           tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost, upstreamModel, selected.account.id)
         ));
+        recordChannelAffinityIfSuccessful();
         recordDownstreamCostUsage(request, estimatedCost);
         logProxy(
           selected,
@@ -353,7 +400,7 @@ export async function completionsProxyRoute(app: FastifyInstance) {
             detail: `HTTP ${status}`,
           });
         }
-        if ((status > 0 ? shouldRetryProxyRequest(status, errorText) : true) && canRetryChannelSelection(retryCount, forcedChannelId)) {
+        if ((status > 0 ? shouldRetryProxyRequest(status, errorText) : true) && canRetryCurrentSelection()) {
           retryCount++;
           continue;
         }

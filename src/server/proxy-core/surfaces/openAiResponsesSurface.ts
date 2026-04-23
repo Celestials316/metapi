@@ -53,6 +53,7 @@ import { runCodexHttpSessionTask } from '../runtime/codexHttpSessionQueue.js';
 import {
   buildCodexSessionResponseStoreKey,
   clearCodexSessionResponseId,
+  ensureCodexSessionResponseStoreLoaded,
   getCodexSessionResponseId,
   setCodexSessionResponseId,
 } from '../runtime/codexSessionResponseStore.js';
@@ -65,6 +66,11 @@ import {
   shouldFallbackCompactResponsesToResponses,
 } from '../capabilities/responsesCompact.js';
 import { detectDownstreamClientContext } from '../downstreamClientContext.js';
+import {
+  clearChannelAffinityBinding,
+  recordChannelAffinitySuccess,
+  resolveChannelAffinityRequest,
+} from '../../services/channelAffinity.js';
 import { getProxyMaxChannelRetries } from '../../services/proxyChannelRetry.js';
 import { shouldAbortSameSiteEndpointFallback } from '../../services/proxyRetryPolicy.js';
 import { describeErrorWithCauses } from '../../services/errorMessageService.js';
@@ -357,12 +363,14 @@ export async function handleOpenAiResponsesSurfaceRequest(
       });
     }
     if (!await ensureModelAllowedForDownstreamKey(request, reply, requestedModel)) return;
+    await ensureCodexSessionResponseStoreLoaded();
     const downstreamPolicy = getDownstreamRoutingPolicy(request);
     const forcedChannelId = getTesterForcedChannelId({
       headers: request.headers as Record<string, unknown>,
       clientIp: request.ip,
     });
-    const downstreamApiKeyId = getProxyAuthContext(request)?.keyId ?? null;
+    const authContext = getProxyAuthContext(request);
+    const downstreamApiKeyId = authContext?.keyId ?? null;
     const maxRetries = getProxyMaxChannelRetries();
     const failureToolkit = createSurfaceFailureToolkit({
       warningScope: 'responses',
@@ -371,8 +379,33 @@ export async function handleOpenAiResponsesSurfaceRequest(
       clientContext,
       downstreamApiKeyId,
     });
+    const channelAffinity = resolveChannelAffinityRequest({
+      config: config.channelAffinity,
+      requestedModel,
+      downstreamPath,
+      headers: requestHeaders,
+      body: requestEnvelope.parsed.normalizedBody,
+      clientContext,
+      downstreamGroup: authContext?.source === 'managed' ? authContext.keyName : null,
+      downstreamApiKeyId,
+    });
+    const downstreamSessionId = (
+      clientContext.sessionId
+      || getResponsesSessionHeaderValue(requestHeaders)
+    ).trim();
+    const explicitPreviousResponseId = String(
+      body.previous_response_id
+      || requestEnvelope.parsed.normalizedBody.previous_response_id
+      || '',
+    ).trim();
+    const rememberedPreviousResponseId = downstreamSessionId
+      ? getCodexSessionResponseId(downstreamSessionId)
+      : null;
+    const stickyContinuityKey = explicitPreviousResponseId || rememberedPreviousResponseId || null;
     const stickySessionKey = buildSurfaceStickySessionKey({
       clientContext,
+      sessionId: downstreamSessionId || null,
+      continuityKey: stickyContinuityKey,
       requestedModel,
       downstreamPath,
       downstreamApiKeyId,
@@ -414,6 +447,9 @@ export async function handleOpenAiResponsesSurfaceRequest(
       const stickyPreferredChannelId = retryCount === 0
         ? getSurfaceStickyPreferredChannelId(stickySessionKey)
         : null;
+      const affinityPreferredChannelId = retryCount === 0 && !stickyPreferredChannelId
+        ? (channelAffinity?.preferredChannelId ?? null)
+        : null;
       const selected = await selectSurfaceChannelForAttempt({
         requestedModel,
         downstreamPolicy,
@@ -421,6 +457,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
         retryCount,
         stickySessionKey,
         forcedChannelId,
+        affinityPreferredChannelId,
       });
 
       if (!selected) {
@@ -436,6 +473,31 @@ export async function handleOpenAiResponsesSurfaceRequest(
         return reply.code(503).send({
           error: { message: noChannelMessage, type: 'server_error' },
         });
+      }
+
+      const affinityRetryLocked = Boolean(
+        retryCount === 0
+        && affinityPreferredChannelId
+        && channelAffinity?.skipRetryOnFailure
+        && selected.channel.id === affinityPreferredChannelId,
+      );
+      const canRetryCurrentSelection = () => canRetryChannelSelection(
+        retryCount,
+        forcedChannelId,
+        affinityRetryLocked,
+      );
+      const recordChannelAffinityIfSuccessful = () => recordChannelAffinitySuccess({
+        config: config.channelAffinity,
+        resolution: channelAffinity,
+        selectedChannelId: selected.channel.id,
+      });
+      if (
+        retryCount === 0
+        && affinityPreferredChannelId
+        && selected.channel.id !== affinityPreferredChannelId
+        && !stickyPreferredChannelId
+      ) {
+        clearChannelAffinityBinding(channelAffinity?.cacheKey, affinityPreferredChannelId);
       }
 
       excludeChannelIds.push(selected.channel.id);
@@ -458,10 +520,6 @@ export async function handleOpenAiResponsesSurfaceRequest(
       const isCodexSite = String(selected.site.platform || '').trim().toLowerCase() === 'codex';
       const isCodexClient = clientContext.clientKind === 'codex';
       const isCodexCompatibleRequest = isCodexSite || isCodexClient;
-      const downstreamSessionId = (
-        clientContext.sessionId
-        || getResponsesSessionHeaderValue(requestHeaders)
-      ).trim();
       const trustedResponsesSessionStoreKey = downstreamSessionId
         ? buildCodexSessionResponseStoreKey({
           sessionId: downstreamSessionId,
@@ -846,7 +904,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
         errorMessage: busyMessage,
         retryCount,
       });
-      if (retryCount < maxRetries && canRetryChannelSelection(retryCount, forcedChannelId)) {
+      if (retryCount < maxRetries && canRetryCurrentSelection()) {
         retryCount += 1;
         continue;
       }
@@ -1018,7 +1076,8 @@ export async function handleOpenAiResponsesSurfaceRequest(
                   debugTrace?.options.captureStreamChunks ? rawText : { stream: true, usage: parsedUsage },
                   upstreamUsagePresent,
                 );
-	              bindSurfaceStickyChannel({
+	              recordChannelAffinityIfSuccessful();
+              bindSurfaceStickyChannel({
 	                stickySessionKey,
 	                selected,
 	              });
@@ -1056,7 +1115,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
                 upstreamPath: successfulUpstreamPath,
 	              });
 	              const terminalFailureOutcome = failureOutcome.action === 'retry'
-	                ? (canRetryChannelSelection(retryCount, forcedChannelId)
+	                ? (canRetryCurrentSelection()
 	                  ? null
 	                  : finalizeRetryAsUpstreamFailure(failure.status, failure.reason))
 	                : failureOutcome;
@@ -1108,7 +1167,8 @@ export async function handleOpenAiResponsesSurfaceRequest(
                 debugTrace?.options.captureStreamChunks ? rawText : upstreamData,
                 upstreamUsagePresent,
               );
-	            bindSurfaceStickyChannel({
+	            recordChannelAffinityIfSuccessful();
+              bindSurfaceStickyChannel({
 	              stickySessionKey,
 	              selected,
 	            });
@@ -1148,7 +1208,8 @@ export async function handleOpenAiResponsesSurfaceRequest(
                   debugTrace?.options.captureStreamChunks ? rawText : collectedPayload,
                   upstreamUsagePresent,
                 );
-                bindSurfaceStickyChannel({
+                recordChannelAffinityIfSuccessful();
+              bindSurfaceStickyChannel({
                   stickySessionKey,
                   selected,
                 });
@@ -1264,7 +1325,8 @@ export async function handleOpenAiResponsesSurfaceRequest(
               debugTrace?.options.captureStreamChunks ? rawText : { stream: true, usage: parsedUsage },
               upstreamUsagePresent,
             );
-	          bindSurfaceStickyChannel({
+	          recordChannelAffinityIfSuccessful();
+              bindSurfaceStickyChannel({
 	            stickySessionKey,
 	            selected,
 	          });
@@ -1322,7 +1384,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
             upstreamPath: successfulUpstreamPath,
 	          });
 	          const terminalFailureOutcome = failureOutcome.action === 'retry'
-	            ? (canRetryChannelSelection(retryCount, forcedChannelId)
+	            ? (canRetryCurrentSelection()
 	              ? null
 	              : finalizeRetryAsUpstreamFailure(failure.status, failure.reason))
 	            : failureOutcome;
@@ -1380,7 +1442,8 @@ export async function handleOpenAiResponsesSurfaceRequest(
             buildSurfaceProxyDebugResponseHeaders(upstream),
             downstreamData,
           );
-	        bindSurfaceStickyChannel({
+	        recordChannelAffinityIfSuccessful();
+              bindSurfaceStickyChannel({
 	          stickySessionKey,
 	          selected,
 	        });
@@ -1411,7 +1474,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
               retryCount,
             });
             const terminalFailureOutcome = failureOutcome.action === 'retry'
-              ? (canRetryChannelSelection(retryCount, forcedChannelId)
+              ? (canRetryCurrentSelection()
                 ? null
                 : finalizeRetryAsUpstreamFailure(endpointFailureStatus || 502, surfacedErrorMessage))
               : failureOutcome;
@@ -1437,7 +1500,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
             retryCount,
           });
           const terminalFailureOutcome = failureOutcome.action === 'retry'
-            ? (canRetryChannelSelection(retryCount, forcedChannelId)
+            ? (canRetryCurrentSelection()
               ? null
               : finalizeRetryAsExecutionFailure(describeErrorWithCauses(err, 'network failure')))
             : failureOutcome;

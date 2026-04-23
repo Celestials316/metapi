@@ -31,6 +31,10 @@ import {
 } from '../../services/proxyDebugTraceStore.js';
 import { classifyProxyFailure } from '../../services/proxyFailureTaxonomy.js';
 import { getProxyOpsSnapshot } from '../../services/proxyOpsSnapshotService.js';
+import {
+  clearProxyOpsRuntimeState,
+  getProxyOpsRuntimeStateSnapshot,
+} from '../../services/proxyOpsRuntimeStateService.js';
 import { runChannelRecoveryProbeSweep } from '../../services/channelRecoveryProbeService.js';
 import { parseProxyLogMessageMeta } from '../proxy/logPathMeta.js';
 import { requiresManagedAccountTokens } from '../../services/accountExtraConfig.js';
@@ -837,6 +841,24 @@ export async function statsRoutes(app: FastifyInstance) {
     const accountId = normalizeProxyLogNumericId(request.query.accountId);
     const limit = Number.isFinite(Number(request.query.limit)) ? Math.max(1, Math.min(200, Number(request.query.limit))) : 100;
     return getProxyOpsSnapshot({ accountId, limit });
+  });
+
+  app.get('/api/stats/proxy-ops/runtime-state', async () => {
+    return getProxyOpsRuntimeStateSnapshot();
+  });
+
+  app.post<{ Body: {
+    affinity?: { cacheKeys?: string[]; channelIds?: number[] };
+    continuity?: {
+      sessionAnchorKeys?: string[];
+      sessionAnchorHandles?: string[];
+      stickyKeys?: string[];
+      stickyHandles?: string[];
+      stickyChannelIds?: number[];
+    };
+    suppression?: { accountIds?: number[] };
+  } }>('/api/stats/proxy-ops/runtime-state/clear', async (request) => {
+    return clearProxyOpsRuntimeState(request.body || {});
   });
 
   app.post('/api/stats/proxy-ops/recovery-sweep', async () => {

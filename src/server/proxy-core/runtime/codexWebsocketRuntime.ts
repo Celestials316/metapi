@@ -14,6 +14,7 @@ import {
 } from './codexWebsocketHeaders.js';
 import {
   clearCodexSessionResponseId,
+  ensureCodexSessionResponseStoreLoaded,
   getCodexSessionResponseId,
   setCodexSessionResponseId,
 } from './codexSessionResponseStore.js';
@@ -394,6 +395,7 @@ export function createCodexWebsocketRuntime(input?: {
         throw new CodexWebsocketRuntimeError('missing websocket session id');
       }
 
+      await ensureCodexSessionResponseStoreLoaded();
       const session = sessionStore.getOrCreate(sessionId);
       const run = session.queue
         .catch(() => undefined)

@@ -15,6 +15,46 @@ describe('proxyAuthMiddleware', () => {
     consumeManagedKeyRequestMock.mockReset();
   });
 
+  it('rejects managed keys when the configured total request threshold is exceeded within the active window', async () => {
+    const { config } = await import('../config.js');
+    (config as any).downstreamRateLimit = {
+      enabled: true,
+      windowMinutes: 1,
+      totalCount: 1,
+      successCount: 5,
+      group: {},
+    };
+    authorizeDownstreamTokenMock.mockResolvedValue({
+      ok: true,
+      source: 'managed',
+      token: 'sk-rate-limit',
+      key: { id: 77, name: 'rate-limited-key', groupName: 'default' },
+      policy: { supportedModels: [], allowedRouteIds: [], siteWeightMultipliers: {} },
+    });
+    consumeManagedKeyRequestMock.mockResolvedValue(undefined);
+
+    const { proxyAuthMiddleware } = await import('./auth.js');
+    const app = Fastify();
+    app.addHook('onRequest', proxyAuthMiddleware);
+    app.get('/v1/ping', async () => ({ ok: true }));
+
+    const first = await app.inject({
+      method: 'GET',
+      url: '/v1/ping',
+      headers: { Authorization: 'Bearer sk-rate-limit' },
+    });
+    const second = await app.inject({
+      method: 'GET',
+      url: '/v1/ping',
+      headers: { Authorization: 'Bearer sk-rate-limit' },
+    });
+
+    expect(first.statusCode).toBe(200);
+    expect(second.statusCode).toBe(429);
+    expect(second.json()).toMatchObject({ error: expect.stringContaining('including failed attempts') });
+    await app.close();
+  });
+
   afterEach(() => {
     vi.clearAllMocks();
   });

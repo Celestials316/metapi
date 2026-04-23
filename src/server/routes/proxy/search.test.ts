@@ -1,15 +1,19 @@
 import Fastify, { type FastifyInstance } from 'fastify';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { config } from '../../config.js';
+import { normalizeChannelAffinityConfig, resetChannelAffinityState } from '../../services/channelAffinity.js';
 
 const fetchMock = vi.fn();
 const selectChannelMock = vi.fn();
 const selectNextChannelMock = vi.fn();
+const selectPreferredChannelMock = vi.fn();
 const recordSuccessMock = vi.fn();
 const recordFailureMock = vi.fn();
 const refreshModelsAndRebuildRoutesMock = vi.fn();
 const reportProxyAllFailedMock = vi.fn();
 const reportTokenExpiredMock = vi.fn();
 const estimateProxyCostMock = vi.fn(async () => 0);
+const shouldRetryProxyRequestMock = vi.fn();
 const dbInsertMock = vi.fn((_arg?: any) => ({
   values: () => ({
     run: () => undefined,
@@ -28,6 +32,7 @@ vi.mock('../../services/tokenRouter.js', () => ({
   tokenRouter: {
     selectChannel: (...args: unknown[]) => selectChannelMock(...args),
     selectNextChannel: (...args: unknown[]) => selectNextChannelMock(...args),
+    selectPreferredChannel: (...args: unknown[]) => selectPreferredChannelMock(...args),
     recordSuccess: (...args: unknown[]) => recordSuccessMock(...args),
     recordFailure: (...args: unknown[]) => recordFailureMock(...args),
   },
@@ -51,7 +56,7 @@ vi.mock('../../services/modelPricingService.js', () => ({
 }));
 
 vi.mock('../../services/proxyRetryPolicy.js', () => ({
-  shouldRetryProxyRequest: () => false,
+  shouldRetryProxyRequest: (...args: unknown[]) => shouldRetryProxyRequestMock(...args),
   shouldAbortSameSiteEndpointFallback: () => false,
   RETRYABLE_TIMEOUT_PATTERNS: [/(request timed out|connection timed out|read timeout|\btimed out\b)/i],
 }));
@@ -92,6 +97,7 @@ vi.mock('../../db/index.js', () => ({
 
 describe('/v1/search route', () => {
   let app: FastifyInstance;
+  const originalChannelAffinity = config.channelAffinity;
 
   beforeAll(async () => {
     const { searchProxyRoute } = await import('./search.js');
@@ -103,13 +109,19 @@ describe('/v1/search route', () => {
     fetchMock.mockReset();
     selectChannelMock.mockReset();
     selectNextChannelMock.mockReset();
+    selectPreferredChannelMock.mockReset();
     recordSuccessMock.mockReset();
     recordFailureMock.mockReset();
     refreshModelsAndRebuildRoutesMock.mockReset();
     reportProxyAllFailedMock.mockReset();
     reportTokenExpiredMock.mockReset();
     estimateProxyCostMock.mockClear();
+    shouldRetryProxyRequestMock.mockReset();
     dbInsertMock.mockClear();
+
+    shouldRetryProxyRequestMock.mockReturnValue(false);
+    resetChannelAffinityState();
+    config.channelAffinity = normalizeChannelAffinityConfig(undefined);
 
     selectChannelMock.mockReturnValue({
       channel: { id: 11, routeId: 22 },
@@ -123,9 +135,121 @@ describe('/v1/search route', () => {
   });
 
   afterAll(async () => {
+    resetChannelAffinityState();
+    config.channelAffinity = originalChannelAffinity;
     if (app) {
       await app.close();
     }
+  });
+
+  it('reuses a recorded affinity binding for repeated search requests', async () => {
+    config.channelAffinity = normalizeChannelAffinityConfig({
+      enabled: true,
+      rules: [
+        {
+          name: 'search-query-affinity',
+          pathRegex: ['^/v1/search$'],
+          keySources: [{ type: 'body_path', path: 'query' }],
+          ttlSeconds: 600,
+        },
+      ],
+    });
+
+    const selected = {
+      channel: { id: 11, routeId: 22 },
+      site: { id: 44, name: 'demo-site', url: 'https://upstream.example.com', platform: 'openai' },
+      account: { id: 33, username: 'demo-user' },
+      tokenName: 'default',
+      tokenValue: 'sk-demo',
+      actualModel: '__search',
+    };
+    selectChannelMock.mockReturnValue(selected);
+    selectPreferredChannelMock.mockReturnValue(selected);
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({
+      object: 'search.result',
+      data: [{ title: 'AxonHub' }],
+    }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }));
+
+    const firstResponse = await app.inject({
+      method: 'POST',
+      url: '/v1/search',
+      headers: { authorization: 'Bearer sk-demo' },
+      payload: { query: 'affinity-search' },
+    });
+    const secondResponse = await app.inject({
+      method: 'POST',
+      url: '/v1/search',
+      headers: { authorization: 'Bearer sk-demo' },
+      payload: { query: 'affinity-search' },
+    });
+
+    expect(firstResponse.statusCode).toBe(200);
+    expect(secondResponse.statusCode).toBe(200);
+    expect(selectChannelMock).toHaveBeenCalledTimes(1);
+    expect(selectPreferredChannelMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not fan out to another channel when an affinity-bound search request enables skipRetryOnFailure', async () => {
+    config.channelAffinity = normalizeChannelAffinityConfig({
+      enabled: true,
+      rules: [
+        {
+          name: 'search-query-affinity-skip-retry',
+          pathRegex: ['^/v1/search$'],
+          keySources: [{ type: 'body_path', path: 'query' }],
+          ttlSeconds: 600,
+          skipRetryOnFailure: true,
+        },
+      ],
+    });
+    shouldRetryProxyRequestMock.mockReturnValue(true);
+
+    const selected = {
+      channel: { id: 11, routeId: 22 },
+      site: { id: 44, name: 'demo-site', url: 'https://upstream.example.com', platform: 'openai' },
+      account: { id: 33, username: 'demo-user' },
+      tokenName: 'default',
+      tokenValue: 'sk-demo',
+      actualModel: '__search',
+    };
+    selectChannelMock.mockReturnValue(selected);
+    selectPreferredChannelMock.mockReturnValue(selected);
+    selectNextChannelMock.mockReturnValue({
+      ...selected,
+      channel: { id: 12, routeId: 23 },
+      tokenValue: 'sk-next',
+    });
+
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        object: 'search.result',
+        data: [{ title: 'seed' }],
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response('retryable upstream failure', { status: 503 }));
+
+    const firstResponse = await app.inject({
+      method: 'POST',
+      url: '/v1/search',
+      headers: { authorization: 'Bearer sk-demo' },
+      payload: { query: 'affinity-search-skip' },
+    });
+    const secondResponse = await app.inject({
+      method: 'POST',
+      url: '/v1/search',
+      headers: { authorization: 'Bearer sk-demo' },
+      payload: { query: 'affinity-search-skip' },
+    });
+
+    expect(firstResponse.statusCode).toBe(200);
+    expect(secondResponse.statusCode).toBe(503);
+    expect(selectPreferredChannelMock).toHaveBeenCalledTimes(1);
+    expect(selectNextChannelMock).not.toHaveBeenCalled();
   });
 
   it('defaults model to __search and forwards to the upstream /v1/search endpoint', async () => {

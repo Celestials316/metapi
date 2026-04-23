@@ -1,4 +1,6 @@
 import { fetch } from 'undici';
+import { config } from '../../config.js';
+import { mapPayloadStatusCode } from '../../services/payloadRules.js';
 import { readRuntimeResponseText } from '../executors/types.js';
 import { fetchWithObservedFirstByte, isObservedFirstByteTimeoutResponse } from '../firstByteTimeout.js';
 import { withSiteProxyRequestInit } from '../../services/siteProxy.js';
@@ -16,6 +18,8 @@ export type BuiltEndpointRequest = {
   runtime?: {
     executor: 'default' | 'codex' | 'gemini-cli' | 'antigravity' | 'claude';
     modelName?: string;
+    requestedModel?: string;
+    protocol?: string;
     stream?: boolean;
     oauthProjectId?: string | null;
     action?: 'generateContent' | 'streamGenerateContent' | 'countTokens';
@@ -76,6 +80,7 @@ export type ExecuteEndpointFlowInput = {
   tryRecover?: (ctx: EndpointAttemptContext) => Promise<EndpointRecoverResult>;
   shouldDowngrade?: (ctx: EndpointAttemptContext) => boolean;
   shouldAbortRemainingEndpoints?: (ctx: EndpointAttemptContext & { errText: string }) => boolean;
+  mapFailureStatus?: (ctx: EndpointAttemptContext & { errText: string; status: number }) => number;
   onDowngrade?: (ctx: EndpointAttemptContext & { errText: string }) => void | Promise<void>;
   onAttemptFailure?: (ctx: EndpointAttemptContext & { errText: string }) => void | Promise<void>;
   onAttemptSuccess?: (ctx: EndpointAttemptSuccessContext) => void | Promise<void>;
@@ -95,6 +100,31 @@ async function runEndpointFlowHook<T>(
     await hook(ctx);
   } catch (error) {
     console.error(`endpointFlow ${hookName} hook failed`, error);
+  }
+}
+
+function resolveMappedFailureStatus(
+  input: ExecuteEndpointFlowInput,
+  ctx: EndpointAttemptContext & { errText: string },
+): number {
+  const baseStatus = mapPayloadStatusCode({
+    rules: config.payloadRules,
+    status: ctx.response.status || 502,
+    modelName: ctx.request.runtime?.modelName,
+    requestedModel: ctx.request.runtime?.requestedModel,
+    protocol: ctx.request.runtime?.protocol,
+    endpoint: ctx.request.endpoint,
+  });
+  if (!input.mapFailureStatus) return baseStatus;
+  try {
+    const mapped = input.mapFailureStatus({
+      ...ctx,
+      status: baseStatus,
+    });
+    return Number.isFinite(Number(mapped)) ? Math.trunc(Number(mapped)) : baseStatus;
+  } catch (error) {
+    console.error('endpointFlow mapFailureStatus hook failed', error);
+    return baseStatus;
   }
 }
 
@@ -173,7 +203,7 @@ export async function executeEndpointFlow(input: ExecuteEndpointFlowInput): Prom
         errText,
       };
       await runEndpointFlowHook(input.onAttemptFailure, timeoutContext, 'onAttemptFailure');
-      finalStatus = response.status || 408;
+      finalStatus = resolveMappedFailureStatus(input, timeoutContext);
       finalErrText = errText;
       finalRawErrText = rawErrText;
       if (input.disableCrossProtocolFallback) {
@@ -217,37 +247,32 @@ export async function executeEndpointFlow(input: ExecuteEndpointFlowInput): Prom
       baseContext.request.path,
       summarizeUpstreamError(response.status, rawErrText),
     );
-    await runEndpointFlowHook(input.onAttemptFailure, {
+    const attemptFailureContext = {
       ...baseContext,
       errText,
-    }, 'onAttemptFailure');
+    };
+    await runEndpointFlowHook(input.onAttemptFailure, attemptFailureContext, 'onAttemptFailure');
 
     if (input.disableCrossProtocolFallback && !isLastEndpoint) {
-      finalStatus = response.status;
+      finalStatus = resolveMappedFailureStatus(input, attemptFailureContext);
       finalErrText = errText;
       finalRawErrText = rawErrText;
       break;
     }
-    const shouldAbortRemainingEndpoints = !isLastEndpoint && !!input.shouldAbortRemainingEndpoints?.({
-      ...baseContext,
-      errText,
-    });
+    const shouldAbortRemainingEndpoints = !isLastEndpoint && !!input.shouldAbortRemainingEndpoints?.(attemptFailureContext);
     if (shouldAbortRemainingEndpoints) {
-      finalStatus = response.status;
+      finalStatus = resolveMappedFailureStatus(input, attemptFailureContext);
       finalErrText = errText;
       finalRawErrText = rawErrText;
       break;
     }
     const shouldDowngrade = !isLastEndpoint && !!input.shouldDowngrade?.(baseContext);
     if (shouldDowngrade) {
-      await runEndpointFlowHook(input.onDowngrade, {
-        ...baseContext,
-        errText,
-      }, 'onDowngrade');
+      await runEndpointFlowHook(input.onDowngrade, attemptFailureContext, 'onDowngrade');
       continue;
     }
 
-    finalStatus = response.status;
+    finalStatus = resolveMappedFailureStatus(input, attemptFailureContext);
     finalErrText = errText;
     finalRawErrText = rawErrText;
     break;

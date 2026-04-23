@@ -1,6 +1,12 @@
-const MAX_CODEX_SESSION_RESPONSE_IDS = 10_000;
-
-const codexSessionResponseIds = new Map<string, string>();
+import {
+  ensureResponsesContinuityStateLoaded,
+  flushResponsesContinuityPersistence,
+  getStoredSessionResponseId,
+  listStoredSessionResponseAnchorKeys,
+  resetResponsesContinuityStore,
+  clearStoredSessionResponseId,
+  setStoredSessionResponseId,
+} from '../../services/responsesContinuityStore.js';
 
 const SCOPED_SESSION_SEGMENT_PREFIX = 'session:';
 const SCOPED_STORE_KEY_SEGMENT_PATTERN = /^(site|account|channel):\d+$/;
@@ -57,14 +63,14 @@ function getSessionStoreKeys(sessionId: string): string[] {
   ];
 }
 
-function reconcileScopedSessionFallback(bareSessionKey: string): void {
-  if (!bareSessionKey) return;
-
-  for (const key of codexSessionResponseIds.keys()) {
+function reconcileScopedSessionFallback(bareSessionKey: string, responseId: string): void {
+  if (!bareSessionKey || !responseId) return;
+  for (const key of listStoredSessionResponseAnchorKeys()) {
     if (key === bareSessionKey) continue;
     if (getBareSessionStoreKey(key) !== bareSessionKey) continue;
-    codexSessionResponseIds.delete(key);
+    clearStoredSessionResponseId(key);
   }
+  setStoredSessionResponseId(bareSessionKey, responseId);
 }
 
 function normalizeSessionId(sessionId: string): string {
@@ -92,13 +98,13 @@ export function getCodexSessionResponseId(sessionId: string): string | null {
   const normalized = normalizeSessionId(sessionId);
   if (!normalized) return null;
 
-  const direct = codexSessionResponseIds.get(normalized);
+  const direct = getStoredSessionResponseId(normalized);
   if (direct) return direct;
 
   for (const fallbackKey of getFallbackSessionStoreKeys(normalized)) {
-    const fallback = codexSessionResponseIds.get(fallbackKey);
+    const fallback = getStoredSessionResponseId(fallbackKey);
     if (fallback) {
-      reconcileScopedSessionFallback(fallbackKey);
+      reconcileScopedSessionFallback(fallbackKey, fallback);
       return fallback;
     }
   }
@@ -112,18 +118,8 @@ export function setCodexSessionResponseId(sessionId: string, responseId: string)
   if (!normalizedSessionId || !normalizedResponseId) return;
 
   const keysToWrite = new Set<string>(getSessionStoreKeys(normalizedSessionId));
-
   for (const key of keysToWrite) {
-    if (codexSessionResponseIds.has(key)) {
-      codexSessionResponseIds.delete(key);
-    }
-    codexSessionResponseIds.set(key, normalizedResponseId);
-  }
-
-  while (codexSessionResponseIds.size > MAX_CODEX_SESSION_RESPONSE_IDS) {
-    const oldestKey = codexSessionResponseIds.keys().next().value;
-    if (!oldestKey) break;
-    codexSessionResponseIds.delete(oldestKey);
+    setStoredSessionResponseId(key, normalizedResponseId);
   }
 }
 
@@ -131,10 +127,18 @@ export function clearCodexSessionResponseId(sessionId: string): void {
   const normalized = normalizeSessionId(sessionId);
   if (!normalized) return;
   for (const key of getSessionStoreKeys(normalized)) {
-    codexSessionResponseIds.delete(key);
+    clearStoredSessionResponseId(key);
   }
 }
 
+export async function ensureCodexSessionResponseStoreLoaded(nowMs = Date.now()): Promise<void> {
+  await ensureResponsesContinuityStateLoaded(nowMs);
+}
+
+export async function flushCodexSessionResponseStorePersistence(): Promise<void> {
+  await flushResponsesContinuityPersistence();
+}
+
 export function resetCodexSessionResponseStore(): void {
-  codexSessionResponseIds.clear();
+  resetResponsesContinuityStore();
 }

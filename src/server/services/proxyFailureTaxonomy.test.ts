@@ -26,4 +26,36 @@ describe('proxyFailureTaxonomy', () => {
       }).className,
     ).toBe('rate_limit');
   });
+
+  it('classifies upstream processing errors as a dedicated retryable failure bucket', () => {
+    expect(
+      classifyProxyFailure({
+        status: 500,
+        errorMessage: 'An error occurred while processing your request',
+      }),
+    ).toMatchObject({
+      className: 'processing_error',
+      retryable: true,
+      title: '上游处理错误',
+    });
+
+    expect(
+      classifyProxyFailure({
+        status: 429,
+        errorMessage: 'processing error',
+      }).className,
+    ).toBe('processing_error');
+  });
+
+  it('treats interrupted response streams as timeout failures', () => {
+    expect(
+      classifyProxyFailure({
+        status: 502,
+        errorMessage: 'stream closed before response.completed',
+      }),
+    ).toMatchObject({
+      className: 'timeout',
+      retryable: true,
+    });
+  });
 });

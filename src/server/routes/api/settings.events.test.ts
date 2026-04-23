@@ -65,6 +65,23 @@ describe('settings and auth events', () => {
     (config as any).proxyDebugRetentionHours = 24;
     (config as any).proxyDebugMaxBodyBytes = 262144;
     config.routingFallbackUnitCost = 1;
+    (config as any).payloadRules = {
+      default: [],
+      defaultRaw: [],
+      override: [],
+      overrideRaw: [],
+      filter: [],
+      headerOverride: [],
+      headerFilter: [],
+      statusCodeMap: [],
+    };
+    (config as any).downstreamRateLimit = {
+      enabled: false,
+      windowMinutes: 1,
+      totalCount: 0,
+      successCount: 0,
+      group: {},
+    };
     (config as any).proxyFirstByteTimeoutSec = 0;
     (config as any).tokenRouterFailureCooldownMaxSec = 30 * 24 * 60 * 60;
     (config as any).disableCrossProtocolFallback = false;
@@ -135,6 +152,7 @@ describe('settings and auth events', () => {
         proxySessionChannelConcurrencyLimit: 6,
         proxySessionChannelQueueWaitMs: 4200,
         tokenRouterPendingOverloadCooldownSec: 75,
+        tokenRouterTimeoutCooldownSec: 180,
       },
     });
 
@@ -144,24 +162,29 @@ describe('settings and auth events', () => {
       proxySessionChannelConcurrencyLimit?: number;
       proxySessionChannelQueueWaitMs?: number;
       tokenRouterPendingOverloadCooldownSec?: number;
+      tokenRouterTimeoutCooldownSec?: number;
     };
     expect(updated.codexUpstreamWebsocketEnabled).toBe(true);
     expect(updated.proxySessionChannelConcurrencyLimit).toBe(6);
     expect(updated.proxySessionChannelQueueWaitMs).toBe(4200);
     expect(updated.tokenRouterPendingOverloadCooldownSec).toBe(75);
+    expect(updated.tokenRouterTimeoutCooldownSec).toBe(180);
     expect(config.codexUpstreamWebsocketEnabled).toBe(true);
     expect(config.proxySessionChannelConcurrencyLimit).toBe(6);
     expect(config.proxySessionChannelQueueWaitMs).toBe(4200);
     expect(config.tokenRouterPendingOverloadCooldownSec).toBe(75);
+    expect(config.tokenRouterTimeoutCooldownSec).toBe(180);
 
     const savedWebsocket = await db.select().from(schema.settings).where(eq(schema.settings.key, 'codex_upstream_websocket_enabled')).get();
     const savedConcurrency = await db.select().from(schema.settings).where(eq(schema.settings.key, 'proxy_session_channel_concurrency_limit')).get();
     const savedQueueWait = await db.select().from(schema.settings).where(eq(schema.settings.key, 'proxy_session_channel_queue_wait_ms')).get();
     const savedPendingOverloadCooldown = await db.select().from(schema.settings).where(eq(schema.settings.key, 'token_router_pending_overload_cooldown_sec')).get();
+    const savedTimeoutCooldown = await db.select().from(schema.settings).where(eq(schema.settings.key, 'token_router_timeout_cooldown_sec')).get();
     expect(savedWebsocket?.value).toBe(JSON.stringify(true));
     expect(savedConcurrency?.value).toBe(JSON.stringify(6));
     expect(savedQueueWait?.value).toBe(JSON.stringify(4200));
     expect(savedPendingOverloadCooldown?.value).toBe(JSON.stringify(75));
+    expect(savedTimeoutCooldown?.value).toBe(JSON.stringify(180));
   });
 
   it('applies pending-overload cooldown to runtime immediately after backup import', async () => {
@@ -284,6 +307,102 @@ describe('settings and auth events', () => {
     expect(runtimeResponse.statusCode).toBe(200);
     const runtime = runtimeResponse.json() as { tokenRouterPendingOverloadCooldownSec?: number };
     expect(runtime.tokenRouterPendingOverloadCooldownSec).toBe(12);
+  });
+
+  it('applies payload rules, downstream rate-limit, and channel affinity immediately after backup import', async () => {
+    const importResponse = await app.inject({
+      method: 'POST',
+      url: '/api/settings/backup/import',
+      payload: {
+        data: {
+          timestamp: new Date().toISOString(),
+          type: 'preferences',
+          preferences: {
+            settings: [
+              {
+                key: 'payload_rules',
+                value: {
+                  headerOverride: [{
+                    models: [{ name: 'gpt-*', protocol: 'codex' }],
+                    endpoints: ['responses'],
+                    headers: { 'User-Agent': 'backup-import/1.0' },
+                  }],
+                },
+              },
+              {
+                key: 'downstream_rate_limit',
+                value: {
+                  enabled: true,
+                  windowMinutes: 5,
+                  totalCount: 20,
+                  successCount: 6,
+                },
+              },
+              {
+                key: 'channel_affinity',
+                value: {
+                  enabled: true,
+                  rules: [{
+                    name: 'responses-prompt-cache',
+                    pathRegex: ['^/v1/responses$'],
+                    keySources: [{ type: 'body_path', path: 'prompt_cache_key' }],
+                    ttlSeconds: 1200,
+                    skipRetryOnFailure: true,
+                  }],
+                },
+              },
+            ],
+          },
+        },
+      },
+    });
+
+    expect(importResponse.statusCode).toBe(200);
+    expect((config as any).payloadRules).toMatchObject({
+      headerOverride: [{ headers: { 'User-Agent': 'backup-import/1.0' } }],
+    });
+    expect((config as any).downstreamRateLimit).toMatchObject({
+      enabled: true,
+      windowMinutes: 5,
+      totalCount: 20,
+      successCount: 6,
+    });
+    expect((config as any).channelAffinity).toMatchObject({
+      enabled: true,
+      rules: [{
+        name: 'responses-prompt-cache',
+        ttlSeconds: 1200,
+        skipRetryOnFailure: true,
+      }],
+    });
+
+    const runtimeResponse = await app.inject({
+      method: 'GET',
+      url: '/api/settings/runtime',
+    });
+    expect(runtimeResponse.statusCode).toBe(200);
+    const runtime = runtimeResponse.json() as {
+      payloadRules?: unknown;
+      downstreamRateLimit?: unknown;
+      channelAffinity?: unknown;
+    };
+    expect(runtime.payloadRules).toMatchObject({
+      headerOverride: [{ headers: { 'User-Agent': 'backup-import/1.0' } }],
+    });
+    expect(runtime.downstreamRateLimit).toMatchObject({
+      enabled: true,
+      windowMinutes: 5,
+      totalCount: 20,
+      successCount: 6,
+    });
+    expect(runtime.channelAffinity).toMatchObject({
+      enabled: true,
+      rules: [{
+        name: 'responses-prompt-cache',
+        ttlSeconds: 1200,
+        skipRetryOnFailure: true,
+      }],
+    });
   });
 
   it('persists proxy debug runtime settings from runtime settings', async () => {
@@ -589,6 +708,147 @@ describe('settings and auth events', () => {
     expect(getResponse.statusCode).toBe(200);
     const runtime = getResponse.json() as { routingFallbackUnitCost?: number };
     expect(runtime.routingFallbackUnitCost).toBe(0.25);
+  });
+
+  it('persists and returns payload override rules from runtime settings', async () => {
+    const payloadRules = {
+      headerOverride: [
+        {
+          models: [{ name: 'gpt-*', protocol: 'codex' }],
+          endpoints: ['responses'],
+          headers: {
+            'User-Agent': 'ops-hotfix/1.0',
+          },
+        },
+      ],
+      headerFilter: [
+        {
+          models: [{ name: 'gpt-*', protocol: 'codex' }],
+          endpoints: ['responses'],
+          headers: ['originator'],
+        },
+      ],
+      statusCodeMap: [
+        {
+          models: [{ name: 'gpt-*', protocol: 'codex' }],
+          endpoints: ['responses'],
+          from: [529],
+          to: 503,
+        },
+      ],
+    };
+
+    const updateResponse = await app.inject({
+      method: 'PUT',
+      url: '/api/settings/runtime',
+      payload: {
+        payloadRules,
+      },
+    });
+
+    expect(updateResponse.statusCode).toBe(200);
+    const updated = updateResponse.json() as { payloadRules?: unknown };
+    expect(updated.payloadRules).toMatchObject(payloadRules);
+    expect((config as any).payloadRules).toMatchObject(payloadRules);
+
+    const saved = await db.select().from(schema.settings).where(eq(schema.settings.key, 'payload_rules')).get();
+    expect(JSON.parse(saved?.value || '{}')).toMatchObject({
+      default: [],
+      defaultRaw: [],
+      override: [],
+      overrideRaw: [],
+      filter: [],
+      headerOverride: payloadRules.headerOverride,
+      headerFilter: payloadRules.headerFilter,
+      statusCodeMap: payloadRules.statusCodeMap,
+    });
+
+    const getResponse = await app.inject({
+      method: 'GET',
+      url: '/api/settings/runtime',
+    });
+    expect(getResponse.statusCode).toBe(200);
+    const runtime = getResponse.json() as { payloadRules?: unknown };
+    expect(runtime.payloadRules).toMatchObject(payloadRules);
+  });
+
+  it('persists and returns downstream dual-threshold rate-limit config from runtime settings', async () => {
+    const downstreamRateLimit = {
+      enabled: true,
+      windowMinutes: 3,
+      totalCount: 40,
+      successCount: 12,
+      group: {
+        vip: [100, 50],
+        default: [20, 8],
+      },
+    };
+
+    const updateResponse = await app.inject({
+      method: 'PUT',
+      url: '/api/settings/runtime',
+      payload: {
+        downstreamRateLimit,
+      },
+    });
+
+    expect(updateResponse.statusCode).toBe(200);
+    const updated = updateResponse.json() as { downstreamRateLimit?: unknown };
+    expect(updated.downstreamRateLimit).toMatchObject(downstreamRateLimit);
+    expect((config as any).downstreamRateLimit).toMatchObject(downstreamRateLimit);
+
+    const saved = await db.select().from(schema.settings).where(eq(schema.settings.key, 'downstream_rate_limit')).get();
+    expect(saved).toBeTruthy();
+    expect(JSON.parse(saved?.value || '{}')).toMatchObject(downstreamRateLimit);
+
+    const getResponse = await app.inject({
+      method: 'GET',
+      url: '/api/settings/runtime',
+    });
+    expect(getResponse.statusCode).toBe(200);
+    const runtime = getResponse.json() as { downstreamRateLimit?: unknown };
+    expect(runtime.downstreamRateLimit).toMatchObject(downstreamRateLimit);
+  });
+
+  it('persists and returns channel affinity config from runtime settings', async () => {
+    const channelAffinity = {
+      enabled: true,
+      rules: [
+        {
+          name: 'responses-prompt-cache',
+          pathRegex: ['^/v1/responses$'],
+          modelRegex: ['^gpt-5'],
+          keySources: [{ type: 'body_path', path: 'prompt_cache_key' }],
+          ttlSeconds: 1800,
+          skipRetryOnFailure: true,
+        },
+      ],
+    };
+
+    const updateResponse = await app.inject({
+      method: 'PUT',
+      url: '/api/settings/runtime',
+      payload: {
+        channelAffinity,
+      },
+    });
+
+    expect(updateResponse.statusCode).toBe(200);
+    const updated = updateResponse.json() as { channelAffinity?: unknown };
+    expect(updated.channelAffinity).toMatchObject(channelAffinity);
+    expect((config as any).channelAffinity).toMatchObject(channelAffinity);
+
+    const saved = await db.select().from(schema.settings).where(eq(schema.settings.key, 'channel_affinity')).get();
+    expect(saved).toBeTruthy();
+    expect(JSON.parse(saved?.value || '{}')).toMatchObject(channelAffinity);
+
+    const getResponse = await app.inject({
+      method: 'GET',
+      url: '/api/settings/runtime',
+    });
+    expect(getResponse.statusCode).toBe(200);
+    const runtime = getResponse.json() as { channelAffinity?: unknown };
+    expect(runtime.channelAffinity).toMatchObject(channelAffinity);
   });
 
   it('persists and returns token router failure cooldown cap from runtime settings', async () => {

@@ -2,6 +2,8 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { config } from '../../config.js';
+import { normalizeChannelAffinityConfig, resetChannelAffinityState } from '../../services/channelAffinity.js';
 import { resetUpstreamEndpointRuntimeState } from '../../services/upstreamEndpointRuntimeMemory.js';
 
 const fetchMock = vi.fn();
@@ -173,6 +175,7 @@ describe('gemini transformer-owned path parsing', () => {
 
 describe('gemini native proxy routes', () => {
   let app: FastifyInstance;
+  const originalChannelAffinity = config.channelAffinity;
 
   beforeAll(async () => {
     const { proxyRoutes } = await import('./router.js');
@@ -243,11 +246,15 @@ describe('gemini native proxy routes', () => {
     recordSuccessMock.mockResolvedValue(undefined);
     recordFailureMock.mockResolvedValue(undefined);
     resetUpstreamEndpointRuntimeState();
+    resetChannelAffinityState();
+    config.channelAffinity = normalizeChannelAffinityConfig(undefined);
     explainSelectionMock.mockResolvedValue({ selectedChannelId: 11 });
     isModelAllowedByPolicyOrAllowedRoutesMock.mockResolvedValue(true);
   });
 
   afterAll(async () => {
+    resetChannelAffinityState();
+    config.channelAffinity = originalChannelAffinity;
     await app.close();
   });
 
@@ -530,6 +537,131 @@ describe('gemini native proxy routes', () => {
         },
       ],
     });
+  });
+
+  it('reuses a recorded affinity binding for repeated native generateContent requests', async () => {
+    config.channelAffinity = normalizeChannelAffinityConfig({
+      enabled: true,
+      rules: [
+        {
+          name: 'gemini-contents-affinity',
+          pathRegex: ['^/v1beta/models/[^:]+:generateContent$'],
+          keySources: [{ type: 'body_path', path: 'contents.0.parts.0.text' }],
+          ttlSeconds: 600,
+        },
+      ],
+    });
+    fetchMock.mockImplementation(() => Promise.resolve(new Response(JSON.stringify({
+      candidates: [
+        {
+          content: {
+            parts: [{ text: 'hello from gemini affinity' }],
+            role: 'model',
+          },
+          finishReason: 'STOP',
+        },
+      ],
+    }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    })));
+    selectPreferredChannelMock.mockReturnValue(selectChannelMock.mock.results[0]?.value ?? {
+      channel: { id: 11, routeId: 22 },
+      site: { id: 44, name: 'gemini-site', url: 'https://generativelanguage.googleapis.com', platform: 'gemini' },
+      account: { id: 33, username: 'demo-user' },
+      tokenName: 'default',
+      tokenValue: 'gemini-key',
+      actualModel: 'gemini-2.5-flash',
+    });
+
+    const firstResponse = await app.inject({
+      method: 'POST',
+      url: '/v1beta/models/gemini-2.5-flash:generateContent',
+      headers: {
+        'x-goog-api-key': '***',
+      },
+      payload: {
+        contents: [{ role: 'user', parts: [{ text: 'affinity hello' }] }],
+      },
+    });
+    const secondResponse = await app.inject({
+      method: 'POST',
+      url: '/v1beta/models/gemini-2.5-flash:generateContent',
+      headers: {
+        'x-goog-api-key': '***',
+      },
+      payload: {
+        contents: [{ role: 'user', parts: [{ text: 'affinity hello' }] }],
+      },
+    });
+
+    expect(firstResponse.statusCode).toBe(200);
+    expect(secondResponse.statusCode).toBe(200);
+    expect(selectChannelMock).toHaveBeenCalledTimes(1);
+    expect(selectPreferredChannelMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not fan out to another channel when an affinity-bound native generateContent request enables skipRetryOnFailure', async () => {
+    config.channelAffinity = normalizeChannelAffinityConfig({
+      enabled: true,
+      rules: [
+        {
+          name: 'gemini-contents-affinity-skip',
+          pathRegex: ['^/v1beta/models/[^:]+:generateContent$'],
+          keySources: [{ type: 'body_path', path: 'contents.0.parts.0.text' }],
+          ttlSeconds: 600,
+          skipRetryOnFailure: true,
+        },
+      ],
+    });
+    const selected = {
+      channel: { id: 11, routeId: 22 },
+      site: { id: 44, name: 'gemini-site', url: 'https://generativelanguage.googleapis.com', platform: 'gemini' },
+      account: { id: 33, username: 'demo-user' },
+      tokenName: 'default',
+      tokenValue: 'gemini-key',
+      actualModel: 'gemini-2.5-flash',
+    };
+    selectChannelMock.mockReturnValue(selected);
+    selectPreferredChannelMock.mockReturnValue(selected);
+    selectNextChannelMock.mockReturnValue({
+      ...selected,
+      channel: { id: 12, routeId: 23 },
+      tokenValue: 'gemini-key-2',
+    });
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        candidates: [{ content: { parts: [{ text: 'seed ok' }], role: 'model' }, finishReason: 'STOP' }],
+      }), { status: 200, headers: { 'content-type': 'application/json' } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        error: { message: 'retryable gemini upstream failure' },
+      }), { status: 503, headers: { 'content-type': 'application/json' } }));
+
+    const firstResponse = await app.inject({
+      method: 'POST',
+      url: '/v1beta/models/gemini-2.5-flash:generateContent',
+      headers: {
+        'x-goog-api-key': '***',
+      },
+      payload: {
+        contents: [{ role: 'user', parts: [{ text: 'affinity skip hello' }] }],
+      },
+    });
+    const secondResponse = await app.inject({
+      method: 'POST',
+      url: '/v1beta/models/gemini-2.5-flash:generateContent',
+      headers: {
+        'x-goog-api-key': '***',
+      },
+      payload: {
+        contents: [{ role: 'user', parts: [{ text: 'affinity skip hello' }] }],
+      },
+    });
+
+    expect(firstResponse.statusCode).toBe(200);
+    expect(secondResponse.statusCode).toBe(503);
+    expect(selectPreferredChannelMock).toHaveBeenCalledTimes(1);
+    expect(selectNextChannelMock).not.toHaveBeenCalled();
   });
 
   it('wraps gemini-cli native generateContent requests and unwraps the response payload', async () => {

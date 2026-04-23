@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fetch } from 'undici';
+import { config } from '../../config.js';
 import type { BuiltEndpointRequest } from './endpointFlow.js';
 
 vi.mock('undici', async () => {
@@ -22,6 +23,12 @@ function requestFor(path: string): BuiltEndpointRequest {
     path,
     headers: { 'content-type': 'application/json' },
     body: { model: 'gpt-5.2', input: 'hello' },
+    runtime: {
+      executor: 'codex',
+      modelName: 'gpt-5.2',
+      requestedModel: 'gpt-5.2',
+      protocol: 'codex',
+    },
   };
 }
 
@@ -40,6 +47,16 @@ describe('executeEndpointFlow', () => {
 
   beforeEach(() => {
     fetchMock.mockReset();
+    config.payloadRules = {
+      default: [],
+      defaultRaw: [],
+      override: [],
+      overrideRaw: [],
+      filter: [],
+      headerOverride: [],
+      headerFilter: [],
+      statusCodeMap: [],
+    } as any;
   });
 
   it('returns the first successful upstream response', async () => {
@@ -401,6 +418,45 @@ describe('executeEndpointFlow', () => {
       expect(result.status).toBe(400);
       expect(result.errText).toContain('[upstream:/v1/responses]');
       expect(result.errText).toContain('Upstream returned HTTP 400');
+    }
+  });
+
+  it('maps configured upstream failure status codes before returning the final failure', async () => {
+    config.payloadRules = {
+      default: [],
+      defaultRaw: [],
+      override: [],
+      overrideRaw: [],
+      filter: [],
+      headerOverride: [],
+      headerFilter: [],
+      statusCodeMap: [
+        {
+          models: [{ name: 'gpt-*', protocol: 'codex' }],
+          endpoints: ['responses'],
+          from: [529],
+          to: 503,
+        },
+      ],
+    } as any;
+
+    fetchMock.mockResolvedValueOnce(toUndiciResponse(new Response(JSON.stringify({
+      error: { message: 'provider overloaded', type: 'upstream_error' },
+    }), {
+      status: 529,
+      headers: { 'content-type': 'application/json' },
+    })));
+
+    const result = await executeEndpointFlow({
+      siteUrl: 'https://example.com',
+      endpointCandidates: ['responses'],
+      buildRequest: () => requestFor('/v1/responses'),
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.status).toBe(503);
+      expect(result.rawErrText).toContain('provider overloaded');
     }
   });
 });

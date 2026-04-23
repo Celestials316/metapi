@@ -109,19 +109,23 @@ export async function selectSurfaceChannelForAttempt(input: {
   retryCount: number;
   stickySessionKey?: string | null;
   forcedChannelId?: number | null;
+  affinityPreferredChannelId?: number | null;
 }): Promise<SelectedChannel> {
   return await selectProxyChannelForAttempt(input);
 }
 
 export function buildSurfaceStickySessionKey(input: {
   clientContext?: DownstreamClientContext | null;
+  sessionId?: string | null;
+  continuityKey?: string | null;
   requestedModel: string;
   downstreamPath: string;
   downstreamApiKeyId?: number | null;
 }): string | null {
   return proxyChannelCoordinator.buildStickySessionKey({
     clientKind: input.clientContext?.clientKind || null,
-    sessionId: input.clientContext?.sessionId || null,
+    sessionId: input.sessionId ?? input.clientContext?.sessionId ?? null,
+    continuityKey: input.continuityKey || null,
     requestedModel: input.requestedModel,
     downstreamPath: input.downstreamPath,
     downstreamApiKeyId: input.downstreamApiKeyId,
@@ -709,8 +713,10 @@ export function createSurfaceFailureToolkit(input: {
         retryCount: args.retryCount,
       });
 
-      const retry = maybeRetry(args.retryCount);
-      if (retry) return retry;
+      if (shouldRetryProxyRequest(0, errorMessage)) {
+        const retry = maybeRetry(args.retryCount);
+        if (retry) return retry;
+      }
 
       runBestEffort('report proxy all failed', () => reportProxyAllFailed({
         model: args.requestedModel,

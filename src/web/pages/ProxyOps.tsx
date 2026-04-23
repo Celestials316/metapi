@@ -422,6 +422,35 @@ export default function ProxyOps() {
 
                   <div style={gridStyle}>
                     <div style={metricCardStyle}>
+                      <div style={{ fontSize: 13, fontWeight: 700 }}>实时负载</div>
+                      <div style={{ fontSize: 16, fontWeight: 700 }}>
+                        活跃 {account.liveLoad.activeLeaseCount} · 等待 {account.liveLoad.waitingCount}
+                      </div>
+                      <div style={{ color: 'var(--color-text-muted)', fontSize: 12 }}>
+                        session 通道 {account.liveLoad.sessionScopedChannels} · 饱和通道 {account.liveLoad.saturatedChannels}
+                      </div>
+                    </div>
+
+                    <div style={metricCardStyle}>
+                      <div style={{ fontSize: 13, fontWeight: 700 }}>抑制原因</div>
+                      {account.dispatchSuppression.total > 0 ? (
+                        <>
+                          <div style={{ fontSize: 16, fontWeight: 700 }}>
+                            {account.dispatchSuppression.reasons.map((item) => `${item.reason} × ${item.count}`).join(' · ')}
+                          </div>
+                          {(account.dispatchSuppression.entries || []).slice(0, 4).map((entry) => (
+                            <div key={`${entry.routeId}:${entry.modelName}:${entry.updatedAt}`} style={{ fontSize: 13, color: 'var(--color-text-secondary)' }}>
+                              {entry.modelName} · {entry.status}
+                              <div style={{ color: 'var(--color-text-muted)', fontSize: 12 }}>
+                                route #{entry.routeId} · {entry.suppressionReason || 'none'} · {formatWhen(entry.updatedAt)}
+                              </div>
+                            </div>
+                          ))}
+                        </>
+                      ) : <div style={{ color: 'var(--color-text-muted)', fontSize: 12 }}>暂无抑制</div>}
+                    </div>
+
+                    <div style={metricCardStyle}>
                       <div style={{ fontSize: 13, fontWeight: 700 }}>恢复信号</div>
                       {(account.recoverySignals || []).length > 0 ? account.recoverySignals.slice(0, 4).map((signal) => (
                         <div key={`${signal.channelId}:${signal.modelName}`} style={{ fontSize: 13, color: 'var(--color-text-secondary)' }}>

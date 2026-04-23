@@ -140,6 +140,31 @@ describe('ProxyOps page', () => {
             },
           ],
           opsScore: 58,
+          liveLoad: {
+            activeLeaseCount: 2,
+            waitingCount: 1,
+            saturatedChannels: 1,
+            sessionScopedChannels: 1,
+          },
+          dispatchSuppression: {
+            total: 1,
+            reasons: [
+              {
+                reason: 'pending_overload',
+                count: 1,
+              },
+            ],
+            entries: [
+              {
+                routeId: 11,
+                modelName: 'gpt-4o',
+                status: 'degraded',
+                suppressionReason: 'pending_overload',
+                updatedAt: '2026-04-21T11:57:00.000Z',
+                holdUntil: null,
+              },
+            ],
+          },
         },
       ],
     });
@@ -190,6 +215,11 @@ describe('ProxyOps page', () => {
 
       expect(collectText(root!.root)).toContain('保护/挑战信号');
       expect(collectText(root!.root)).toContain('Cloudflare / Turnstile 挑战');
+      expect(collectText(root!.root)).toContain('实时负载');
+      expect(collectText(root!.root)).toContain('活跃 2 · 等待 1');
+      expect(collectText(root!.root)).toContain('抑制原因');
+      expect(collectText(root!.root)).toContain('pending_overload × 1');
+      expect(collectText(root!.root)).toContain('gpt-4o · degraded');
 
       const logsButton = findButtonByText(root!.root, '看失败日志');
       await act(async () => {

@@ -410,11 +410,27 @@ export type RuntimeSettingsPayload = {
   notifyCooldownSec?: number;
   adminIpAllowlist?: string[] | string;
   routingFallbackUnitCost?: number;
+  payloadRules?: Record<string, unknown>;
+  downstreamRateLimit?: Record<string, unknown>;
+  channelAffinity?: Record<string, unknown>;
   proxyFirstByteTimeoutSec?: number;
   tokenRouterFailureCooldownMaxSec?: number;
   routingWeights?: RuntimeRoutingWeightsPayload;
   proxyErrorKeywords?: string[] | string;
   proxyEmptyContentFailEnabled?: boolean;
+  globalBlockedBrands?: string[];
+  globalAllowedModels?: string[];
+};
+
+export type RuntimeSettingsResponse = RuntimeSettingsPayload & {
+  proxyTokenMasked?: string;
+  serverChanKeyMasked?: string;
+  telegramBotTokenMasked?: string;
+  smtpPassMasked?: string;
+  currentAdminIp?: string;
+  serverTimeZone?: string;
+  proxyErrorKeywords?: string[];
+  adminIpAllowlist?: string[];
   globalBlockedBrands?: string[];
   globalAllowedModels?: string[];
 };
@@ -630,6 +646,27 @@ export type ProxyOpsAccountSnapshot = {
   } | null;
   recoverySignals: ProxyOpsRecoverySignal[];
   protectionSignals: ProxyOpsProtectionSignal[];
+  liveLoad: {
+    activeLeaseCount: number;
+    waitingCount: number;
+    saturatedChannels: number;
+    sessionScopedChannels: number;
+  };
+  dispatchSuppression: {
+    total: number;
+    reasons: Array<{
+      reason: 'selection_blocked' | 'pending_overload' | 'timeout' | 'auth_invalid' | 'hard_error' | 'soft_error';
+      count: number;
+    }>;
+    entries: Array<{
+      routeId: number;
+      modelName: string;
+      status: 'healthy' | 'degraded' | 'recovering' | 'failback_hold';
+      suppressionReason: 'selection_blocked' | 'pending_overload' | 'timeout' | 'auth_invalid' | 'hard_error' | 'soft_error' | null;
+      updatedAt: string;
+      holdUntil: string | null;
+    }>;
+  };
   opsScore: number;
 };
 
@@ -1146,9 +1183,9 @@ export const api = {
   changeAuthToken: (oldToken: string, newToken: string) => request('/api/settings/auth/change', {
     method: 'POST', body: JSON.stringify({ oldToken, newToken }),
   }),
-  getRuntimeSettings: () => request('/api/settings/runtime'),
+  getRuntimeSettings: () => request<RuntimeSettingsResponse>('/api/settings/runtime'),
   getBrandList: () => request('/api/settings/brand-list'),
-  updateRuntimeSettings: (data: RuntimeSettingsPayload) => request('/api/settings/runtime', {
+  updateRuntimeSettings: (data: RuntimeSettingsPayload) => request<RuntimeSettingsResponse>('/api/settings/runtime', {
     method: 'PUT',
     body: JSON.stringify(data),
   }),

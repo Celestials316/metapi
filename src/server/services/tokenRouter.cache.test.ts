@@ -60,7 +60,7 @@ describe('TokenRouter runtime cache', () => {
     delete process.env.DATA_DIR;
   });
 
-  it('keeps route snapshot inside TTL until explicit invalidation', async () => {
+  it('drops a stale cached route before dispatch when final fresh recheck no longer finds it', async () => {
     const site = await db.insert(schema.sites).values({
       name: 'cache-site',
       url: 'https://cache-site.example.com',
@@ -104,8 +104,8 @@ describe('TokenRouter runtime cache', () => {
     await db.delete(schema.routeChannels).where(eq(schema.routeChannels.routeId, route.id)).run();
     await db.delete(schema.tokenRoutes).where(eq(schema.tokenRoutes.id, route.id)).run();
 
-    const cachedSelection = await router.selectChannel('gpt-4o-mini');
-    expect(cachedSelection).toBeTruthy();
+    const staleSelection = await router.selectChannel('gpt-4o-mini');
+    expect(staleSelection).toBeNull();
 
     invalidateTokenRouterCache();
     const refreshedSelection = await router.selectChannel('gpt-4o-mini');

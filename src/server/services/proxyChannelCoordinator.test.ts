@@ -1,17 +1,29 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { config } from '../config.js';
 import {
+  ensureProxyChannelCoordinatorStateLoaded,
+  flushProxyChannelCoordinatorStatePersistence,
   proxyChannelCoordinator,
   resetProxyChannelCoordinatorState,
 } from './proxyChannelCoordinator.js';
 
 describe('proxyChannelCoordinator', () => {
+  let dataDir = '';
   const originalStickyEnabled = config.proxyStickySessionEnabled;
   const originalStickyTtlMs = config.proxyStickySessionTtlMs;
   const originalConcurrencyLimit = config.proxySessionChannelConcurrencyLimit;
   const originalQueueWaitMs = config.proxySessionChannelQueueWaitMs;
   const originalLeaseTtlMs = config.proxySessionChannelLeaseTtlMs;
   const originalLeaseKeepaliveMs = config.proxySessionChannelLeaseKeepaliveMs;
+
+  beforeAll(async () => {
+    dataDir = mkdtempSync(join(tmpdir(), 'metapi-sticky-continuity-'));
+    process.env.DATA_DIR = dataDir;
+    await import('../db/migrate.js');
+  });
 
   beforeEach(() => {
     vi.useFakeTimers();
@@ -35,6 +47,36 @@ describe('proxyChannelCoordinator', () => {
     vi.useRealTimers();
   });
 
+  afterAll(() => {
+    resetProxyChannelCoordinatorState();
+    delete process.env.DATA_DIR;
+    rmSync(dataDir, { recursive: true, force: true });
+  });
+
+  it('includes the continuity key when building sticky session bindings', () => {
+    const keyA = proxyChannelCoordinator.buildStickySessionKey({
+      clientKind: 'codex',
+      sessionId: 'turn-123',
+      requestedModel: 'gpt-5.2',
+      downstreamPath: '/v1/responses',
+      downstreamApiKeyId: 9,
+      continuityKey: 'resp-1',
+    } as never);
+    const keyB = proxyChannelCoordinator.buildStickySessionKey({
+      clientKind: 'codex',
+      sessionId: 'turn-123',
+      requestedModel: 'gpt-5.2',
+      downstreamPath: '/v1/responses',
+      downstreamApiKeyId: 9,
+      continuityKey: 'resp-2',
+    } as never);
+
+    expect(keyA).not.toBe(keyB);
+    expect(keyA).toContain('turn-123');
+    expect(keyA).toContain('resp-1');
+    expect(keyB).toContain('resp-2');
+  });
+
   it('stores sticky bindings for session-scoped channels and expires them by ttl', async () => {
     const key = proxyChannelCoordinator.buildStickySessionKey({
       clientKind: 'codex',
@@ -49,6 +91,25 @@ describe('proxyChannelCoordinator', () => {
 
     await vi.advanceTimersByTimeAsync(31_100);
     expect(proxyChannelCoordinator.getStickyChannelId(key)).toBeNull();
+  });
+
+  it('persists sticky bindings across a reset and reload while they remain fresh', async () => {
+    await ensureProxyChannelCoordinatorStateLoaded();
+    const key = proxyChannelCoordinator.buildStickySessionKey({
+      clientKind: 'codex',
+      sessionId: 'turn-persist',
+      requestedModel: 'gpt-5.2',
+      downstreamPath: '/v1/responses',
+      downstreamApiKeyId: 9,
+    });
+
+    proxyChannelCoordinator.bindStickyChannel(key, 84, JSON.stringify({ credentialMode: 'session' }));
+    await flushProxyChannelCoordinatorStatePersistence();
+
+    resetProxyChannelCoordinatorState();
+    await ensureProxyChannelCoordinatorStateLoaded();
+
+    expect(proxyChannelCoordinator.getStickyChannelId(key)).toBe(84);
   });
 
   it('does not store sticky bindings for apikey-only channels', () => {

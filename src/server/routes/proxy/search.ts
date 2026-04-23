@@ -18,6 +18,11 @@ import { fetchWithObservedFirstByte, getObservedResponseMeta } from '../../proxy
 import { getProxyMaxChannelRetries } from '../../services/proxyChannelRetry.js';
 import { runWithSiteApiEndpointPool, SiteApiEndpointRequestError } from '../../services/siteApiEndpointService.js';
 import {
+  clearChannelAffinityBinding,
+  recordChannelAffinitySuccess,
+  resolveChannelAffinityRequest,
+} from '../../services/channelAffinity.js';
+import {
   buildForcedChannelUnavailableMessage,
   canRetryChannelSelection,
   getTesterForcedChannelId,
@@ -73,17 +78,30 @@ export async function searchProxyRoute(app: FastifyInstance) {
       headers: request.headers as Record<string, unknown>,
       body,
     });
+    const channelAffinity = resolveChannelAffinityRequest({
+      config: config.channelAffinity,
+      requestedModel,
+      downstreamPath,
+      headers: request.headers as Record<string, unknown>,
+      body,
+      clientContext,
+      downstreamApiKeyId,
+    });
     const firstByteTimeoutMs = Math.max(0, Math.trunc((config.proxyFirstByteTimeoutSec || 0) * 1000));
     const excludeChannelIds: number[] = [];
     let retryCount = 0;
 
     while (retryCount <= getProxyMaxChannelRetries()) {
+      const affinityPreferredChannelId = retryCount === 0
+        ? (channelAffinity?.preferredChannelId ?? null)
+        : null;
       const selected = await selectProxyChannelForAttempt({
         requestedModel,
         downstreamPolicy,
         excludeChannelIds,
         retryCount,
         forcedChannelId,
+        affinityPreferredChannelId,
       });
 
       if (!selected) {
@@ -95,6 +113,30 @@ export async function searchProxyRoute(app: FastifyInstance) {
         return reply.code(503).send({
           error: { message: noChannelMessage, type: 'server_error' },
         });
+      }
+
+      const affinityRetryLocked = Boolean(
+        retryCount === 0
+        && affinityPreferredChannelId
+        && channelAffinity?.skipRetryOnFailure
+        && selected.channel.id === affinityPreferredChannelId
+      );
+      const canRetryCurrentSelection = () => canRetryChannelSelection(
+        retryCount,
+        forcedChannelId,
+        affinityRetryLocked,
+      );
+      const recordChannelAffinityIfSuccessful = () => recordChannelAffinitySuccess({
+        config: config.channelAffinity,
+        resolution: channelAffinity,
+        selectedChannelId: selected.channel.id,
+      });
+      if (
+        retryCount === 0
+        && affinityPreferredChannelId
+        && selected.channel.id !== affinityPreferredChannelId
+      ) {
+        clearChannelAffinityBinding(channelAffinity?.cacheKey, affinityPreferredChannelId);
       }
 
       excludeChannelIds.push(selected.channel.id);
@@ -148,6 +190,7 @@ export async function searchProxyRoute(app: FastifyInstance) {
         await recordTokenRouterEventBestEffort('record channel success', () => (
           tokenRouter.recordSuccess(selected.channel.id, latency, 0, upstreamModel, selected.account.id)
         ));
+        recordChannelAffinityIfSuccessful();
         recordDownstreamCostUsage(request, 0);
         logProxy(
           selected,
@@ -195,7 +238,7 @@ export async function searchProxyRoute(app: FastifyInstance) {
             detail: `HTTP ${status}`,
           });
         }
-        if ((status > 0 ? shouldRetryProxyRequest(status, errorText) : true) && canRetryChannelSelection(retryCount, forcedChannelId)) {
+        if ((status > 0 ? shouldRetryProxyRequest(status, errorText) : true) && canRetryCurrentSelection()) {
           retryCount += 1;
           continue;
         }

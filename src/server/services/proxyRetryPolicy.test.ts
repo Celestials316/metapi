@@ -9,6 +9,7 @@ describe('proxyRetryPolicy', () => {
     expect(shouldRetryProxyRequest(403, '<html><title>Attention Required</title> cf-ray=abc')).toBe(true);
     expect(shouldRetryProxyRequest(402, '{"error":{"message":"insufficient quota"}}')).toBe(true);
     expect(shouldRetryProxyRequest(401, '{"error":{"message":"token expired"}}')).toBe(true);
+    expect(shouldRetryProxyRequest(502, 'stream closed before response.completed')).toBe(true);
     expect(shouldRetryProxyRequest(400, 'Unsupported legacy protocol: /v1/chat/completions is not supported. Please use /v1/responses.')).toBe(true);
   });
 
@@ -39,6 +40,24 @@ describe('proxyRetryPolicy', () => {
     ).toBe(true);
   });
 
+  it('treats upstream processing errors as retryable without misclassifying them as pending overload', () => {
+    expect(
+      shouldRetryProxyRequest(500, '{"error":{"message":"An error occurred while processing your request"}}'),
+    ).toBe(true);
+    expect(
+      shouldRetryProxyRequest(429, '{"error":{"message":"processing error"}}'),
+    ).toBe(true);
+    expect(
+      shouldAbortSameSiteEndpointFallback(500, '{"error":{"message":"An error occurred while processing your request"}}'),
+    ).toBe(true);
+    expect(
+      shouldAbortSameSiteEndpointFallback(429, '{"error":{"message":"processing error"}}'),
+    ).toBe(true);
+    expect(
+      shouldAbortSameSiteEndpointFallback(429, '{"error":{"message":"Too many pending requests, please retry later"}}'),
+    ).toBe(false);
+  });
+
   it('aborts same-site endpoint fallback for taxonomy classes that are site-wide or request-wide', () => {
     expect(
       shouldAbortSameSiteEndpointFallback(429, '{"error":{"message":"rate limit exceeded"}}'),
@@ -60,6 +79,9 @@ describe('proxyRetryPolicy', () => {
     ).toBe(true);
     expect(
       shouldAbortSameSiteEndpointFallback(400, '{"error":{"message":"unsupported model: claude-3"}}'),
+    ).toBe(true);
+    expect(
+      shouldAbortSameSiteEndpointFallback(502, 'stream closed before response.completed'),
     ).toBe(true);
   });
 

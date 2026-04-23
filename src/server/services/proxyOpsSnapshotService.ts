@@ -3,6 +3,28 @@ import { db, schema } from '../db/index.js';
 import { formatUtcSqlDateTime } from './localTimeService.js';
 import { classifyProxyFailure, type ProxyFailureClass } from './proxyFailureTaxonomy.js';
 import { getProxyOpsState } from './proxyOpsSignals.js';
+import {
+  listAccountDispatchRuntimeSnapshots,
+  type AccountDispatchRuntimeStatus,
+  type AccountDispatchSuppressionReason,
+} from './accountDispatchRuntimeMemory.js';
+import { proxyChannelCoordinator } from './proxyChannelCoordinator.js';
+
+type ProxyOpsAccountLiveLoad = {
+  activeLeaseCount: number;
+  waitingCount: number;
+  saturatedChannels: number;
+  sessionScopedChannels: number;
+};
+
+type ProxyOpsAccountSuppressionEntry = {
+  routeId: number;
+  modelName: string;
+  status: AccountDispatchRuntimeStatus;
+  suppressionReason: AccountDispatchSuppressionReason | null;
+  updatedAt: string;
+  holdUntil: string | null;
+};
 
 export type ProxyOpsAccountSnapshot = {
   accountId: number;
@@ -39,6 +61,15 @@ export type ProxyOpsAccountSnapshot = {
   refresh: ReturnType<typeof getProxyOpsState>['refresh'];
   recoverySignals: ReturnType<typeof getProxyOpsState>['recoverySignals'];
   protectionSignals: ReturnType<typeof getProxyOpsState>['protectionSignals'];
+  liveLoad: ProxyOpsAccountLiveLoad;
+  dispatchSuppression: {
+    total: number;
+    reasons: Array<{
+      reason: AccountDispatchSuppressionReason;
+      count: number;
+    }>;
+    entries: ProxyOpsAccountSuppressionEntry[];
+  };
   opsScore: number;
 };
 
@@ -63,6 +94,11 @@ export type ProxyOpsSnapshot = {
 
 function round2(value: number): number {
   return Math.round(value * 100) / 100;
+}
+
+function toIsoDateTime(ms?: number | null): string | null {
+  if (!Number.isFinite(ms as number) || Number(ms) <= 0) return null;
+  return new Date(Number(ms)).toISOString();
 }
 
 export async function getProxyOpsSnapshot(input: {
@@ -122,6 +158,23 @@ export async function getProxyOpsSnapshot(input: {
     logsByAccount.set(accountId, list);
   }
 
+  const accountById = new Map<number, typeof schema.accounts.$inferSelect>(
+    accountRows.map((row) => [row.account.id, row.account]),
+  );
+  const channelLoadSnapshots = proxyChannelCoordinator.getChannelLoadSnapshots(channelRows.map((row) => {
+    const account = accountById.get(row.accountId);
+    return {
+      channelId: row.id,
+      accountExtraConfig: account?.extraConfig,
+      accountOauthProvider: account?.oauthProvider,
+    };
+  }));
+
+  const dispatchRuntimeByAccount = new Map<number, ReturnType<typeof listAccountDispatchRuntimeSnapshots>>();
+  for (const accountId of accountIds) {
+    dispatchRuntimeByAccount.set(accountId, listAccountDispatchRuntimeSnapshots({ accountId, nowMs: now.getTime() }));
+  }
+
   const globalFailureBuckets = new Map<ProxyFailureClass, { title: string; count: number }>();
 
   const allAccounts = accountRows.map((row): ProxyOpsAccountSnapshot => {
@@ -169,6 +222,38 @@ export async function getProxyOpsSnapshot(input: {
     const cooling = accountChannels.filter((item) => !!item.cooldownUntil).length;
     const degradedChannels = accountChannels.filter((item) => !!item.cooldownUntil || (item.consecutiveFailCount ?? 0) > 0 || (item.cooldownLevel ?? 0) > 0).length;
     const protectionSignals = opsState.protectionSignals || [];
+    const liveLoadSnapshots = accountChannels
+      .map((item) => channelLoadSnapshots.get(item.id))
+      .filter((item): item is NonNullable<typeof item> => !!item);
+    const liveLoad: ProxyOpsAccountLiveLoad = {
+      activeLeaseCount: liveLoadSnapshots.reduce((sum, item) => sum + item.activeLeaseCount, 0),
+      waitingCount: liveLoadSnapshots.reduce((sum, item) => sum + item.waitingCount, 0),
+      saturatedChannels: liveLoadSnapshots.filter((item) => item.saturated || item.waitingCount > 0).length,
+      sessionScopedChannels: liveLoadSnapshots.filter((item) => item.sessionScoped).length,
+    };
+    const dispatchRuntimeSnapshots = dispatchRuntimeByAccount.get(row.account.id) || [];
+    const suppressionEntries = dispatchRuntimeSnapshots
+      .filter((item) => !!item.suppressionReason)
+      .map((item): ProxyOpsAccountSuppressionEntry => ({
+        routeId: item.routeId,
+        modelName: item.modelName,
+        status: item.status,
+        suppressionReason: item.suppressionReason,
+        updatedAt: toIsoDateTime(item.updatedAtMs) || now.toISOString(),
+        holdUntil: toIsoDateTime(item.holdUntilMs),
+      }));
+    const suppressionReasonCounts = new Map<AccountDispatchSuppressionReason, number>();
+    for (const item of suppressionEntries) {
+      if (!item.suppressionReason) continue;
+      suppressionReasonCounts.set(item.suppressionReason, (suppressionReasonCounts.get(item.suppressionReason) || 0) + 1);
+    }
+    const dispatchSuppression = {
+      total: suppressionEntries.length,
+      reasons: Array.from(suppressionReasonCounts.entries())
+        .map(([reason, count]) => ({ reason, count }))
+        .sort((left, right) => right.count - left.count || left.reason.localeCompare(right.reason, 'en')),
+      entries: suppressionEntries,
+    };
 
     const failureBuckets = Array.from(perAccountBuckets.entries())
       .map(([className, bucket]) => ({ className, title: bucket.title, count: bucket.count }))
@@ -208,6 +293,8 @@ export async function getProxyOpsSnapshot(input: {
       refresh: opsState.refresh || null,
       recoverySignals: opsState.recoverySignals || [],
       protectionSignals,
+      liveLoad,
+      dispatchSuppression,
       opsScore,
     };
   }).sort((left, right) => left.opsScore - right.opsScore || right.proxy24h.failed - left.proxy24h.failed);

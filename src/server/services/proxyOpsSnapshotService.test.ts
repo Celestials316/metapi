@@ -6,11 +6,16 @@ import { formatUtcSqlDateTime } from './localTimeService.js';
 
 type DbModule = typeof import('../db/index.js');
 type ProxyOpsSnapshotModule = typeof import('./proxyOpsSnapshotService.js');
+type RuntimeMemoryModule = typeof import('./accountDispatchRuntimeMemory.js');
+type ProxyChannelCoordinatorModule = typeof import('./proxyChannelCoordinator.js');
 
 describe('proxyOpsSnapshotService', () => {
   let db: DbModule['db'];
   let schema: DbModule['schema'];
   let getProxyOpsSnapshot: ProxyOpsSnapshotModule['getProxyOpsSnapshot'];
+  let recordAccountDispatchFailure: RuntimeMemoryModule['recordAccountDispatchFailure'];
+  let resetAccountDispatchRuntimeMemory: RuntimeMemoryModule['resetAccountDispatchRuntimeMemory'];
+  let proxyChannelCoordinator: ProxyChannelCoordinatorModule['proxyChannelCoordinator'];
   let dataDir = '';
   let originalDataDir: string | undefined;
 
@@ -22,13 +27,19 @@ describe('proxyOpsSnapshotService', () => {
     await import('../db/migrate.js');
     const dbModule = await import('../db/index.js');
     const proxyOpsSnapshotModule = await import('./proxyOpsSnapshotService.js');
+    const runtimeMemoryModule = await import('./accountDispatchRuntimeMemory.js');
+    const proxyChannelCoordinatorModule = await import('./proxyChannelCoordinator.js');
 
     db = dbModule.db;
     schema = dbModule.schema;
     getProxyOpsSnapshot = proxyOpsSnapshotModule.getProxyOpsSnapshot;
+    recordAccountDispatchFailure = runtimeMemoryModule.recordAccountDispatchFailure;
+    resetAccountDispatchRuntimeMemory = runtimeMemoryModule.resetAccountDispatchRuntimeMemory;
+    proxyChannelCoordinator = proxyChannelCoordinatorModule.proxyChannelCoordinator;
   });
 
   beforeEach(async () => {
+    resetAccountDispatchRuntimeMemory();
     await db.delete(schema.proxyLogs).run();
     await db.delete(schema.routeChannels).run();
     await db.delete(schema.tokenRoutes).run();
@@ -120,11 +131,12 @@ describe('proxyOpsSnapshotService', () => {
       },
     ]).run();
 
+    const baseTime = Date.now();
     const timestamps = [
-      formatUtcSqlDateTime(new Date('2026-04-21T12:01:00.000Z')),
-      formatUtcSqlDateTime(new Date('2026-04-21T12:02:00.000Z')),
-      formatUtcSqlDateTime(new Date('2026-04-21T12:03:00.000Z')),
-      formatUtcSqlDateTime(new Date('2026-04-21T12:04:00.000Z')),
+      formatUtcSqlDateTime(new Date(baseTime - 4 * 60 * 1000)),
+      formatUtcSqlDateTime(new Date(baseTime - 3 * 60 * 1000)),
+      formatUtcSqlDateTime(new Date(baseTime - 2 * 60 * 1000)),
+      formatUtcSqlDateTime(new Date(baseTime - 1 * 60 * 1000)),
     ];
 
     await db.insert(schema.proxyLogs).values([
@@ -253,5 +265,95 @@ describe('proxyOpsSnapshotService', () => {
       retried: 1,
       failed: 0,
     });
+  });
+
+  it('includes live lease pressure and typed suppression reasons for account rows', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'proxy-ops-live-site',
+      url: 'https://proxy-ops-live.example.com',
+      platform: 'codex',
+      status: 'active',
+    }).returning().get();
+
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gpt-4o',
+      displayName: 'Live Route',
+      enabled: true,
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'session-user',
+      accessToken: 'session-token',
+      status: 'active',
+      extraConfig: JSON.stringify({ credentialMode: 'session' }),
+    }).returning().get();
+
+    const channel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: account.id,
+      enabled: true,
+      consecutiveFailCount: 0,
+      cooldownLevel: 0,
+      cooldownUntil: null,
+    }).returning().get();
+
+    const lease1 = await proxyChannelCoordinator.acquireChannelLease({
+      channelId: channel.id,
+      accountExtraConfig: account.extraConfig,
+      accountOauthProvider: account.oauthProvider,
+    });
+    const lease2 = await proxyChannelCoordinator.acquireChannelLease({
+      channelId: channel.id,
+      accountExtraConfig: account.extraConfig,
+      accountOauthProvider: account.oauthProvider,
+    });
+    const waitingLeasePromise = proxyChannelCoordinator.acquireChannelLease({
+      channelId: channel.id,
+      accountExtraConfig: account.extraConfig,
+      accountOauthProvider: account.oauthProvider,
+    });
+    await Promise.resolve();
+
+    recordAccountDispatchFailure({
+      routeId: route.id,
+      modelName: 'gpt-4o',
+      accountId: account.id,
+      kind: 'soft',
+      reason: 'pending_overload',
+      nowMs: Date.now() - 60 * 1000,
+    });
+
+    const snapshot = await getProxyOpsSnapshot({ accountId: account.id });
+
+    expect(snapshot.accounts[0]).toMatchObject({
+      accountId: account.id,
+      liveLoad: {
+        activeLeaseCount: 2,
+        waitingCount: 1,
+        saturatedChannels: 1,
+        sessionScopedChannels: 1,
+      },
+      dispatchSuppression: {
+        total: 1,
+        reasons: [
+          {
+            reason: 'pending_overload',
+            count: 1,
+          },
+        ],
+      },
+    });
+    expect(snapshot.accounts[0]?.dispatchSuppression.entries[0]).toMatchObject({
+      routeId: route.id,
+      modelName: 'gpt-4o',
+      status: 'degraded',
+      suppressionReason: 'pending_overload',
+    });
+
+    if (lease1.status === 'acquired') lease1.lease.release();
+    if (lease2.status === 'acquired') lease2.lease.release();
+    const waitingLease = await waitingLeasePromise;
+    if (waitingLease.status === 'acquired') waitingLease.lease.release();
   });
 });

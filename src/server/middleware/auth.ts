@@ -1,6 +1,10 @@
 import { isIP } from 'node:net';
 import { FastifyRequest, FastifyReply } from 'fastify';
 import { config } from '../config.js';
+import {
+  evaluateDownstreamRateLimit,
+  recordDownstreamRateLimitRequest,
+} from '../services/downstreamRateLimit.js';
 import { authorizeDownstreamToken, consumeManagedKeyRequest } from '../services/downstreamApiKeyService.js';
 import { EMPTY_DOWNSTREAM_ROUTING_POLICY, type DownstreamRoutingPolicy } from '../services/downstreamPolicyTypes.js';
 
@@ -9,6 +13,7 @@ export interface ProxyAuthContext {
   source: 'managed' | 'global';
   keyId: number | null;
   keyName: string;
+  keyGroupName: string | null;
   policy: DownstreamRoutingPolicy;
 }
 
@@ -158,7 +163,21 @@ export async function proxyAuthMiddleware(request: FastifyRequest, reply: Fastif
   }
 
   if (authResult.source === 'managed' && authResult.key) {
+    const rateLimitDecision = evaluateDownstreamRateLimit({
+      config: config.downstreamRateLimit,
+      keyId: authResult.key.id,
+      groupName: authResult.key.groupName,
+    });
+    if (!rateLimitDecision.allowed) {
+      reply.code(429).send({ error: rateLimitDecision.message });
+      return;
+    }
     await consumeManagedKeyRequest(authResult.key.id);
+    recordDownstreamRateLimitRequest({
+      config: config.downstreamRateLimit,
+      keyId: authResult.key.id,
+      groupName: authResult.key.groupName,
+    });
   }
 
   proxyAuthContextByRequest.set(request, {
@@ -166,6 +185,7 @@ export async function proxyAuthMiddleware(request: FastifyRequest, reply: Fastif
     source: authResult.source,
     keyId: authResult.key?.id ?? null,
     keyName: authResult.key?.name || 'global',
+    keyGroupName: authResult.key?.groupName || null,
     policy: authResult.policy || EMPTY_DOWNSTREAM_ROUTING_POLICY,
   });
 }

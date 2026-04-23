@@ -1,7 +1,7 @@
 import { classifyProxyFailure, type ProxyFailureClass } from './proxyFailureTaxonomy.js';
 
 export const RETRYABLE_TIMEOUT_PATTERNS: RegExp[] = [
-  /(request timed out|connection timed out|read timeout|first byte timeout|\btimed out\b)/i,
+  /(request timed out|connection timed out|read timeout|first byte timeout|\btimed out\b|stream closed before response\.completed|response\.incomplete)/i,
 ];
 
 const RETRYABLE_CHANNEL_COMPATIBILITY_PATTERNS: RegExp[] = [
@@ -23,6 +23,7 @@ const RETRYABLE_FAILURE_CLASSES = new Set<ProxyFailureClass>([
   'challenge_turnstile',
   'challenge_shield',
   'pending_overload',
+  'processing_error',
   'rate_limit',
   'quota_exceeded',
   'auth_invalid',
@@ -36,6 +37,7 @@ const SAME_SITE_ABORT_CLASSES = new Set<ProxyFailureClass>([
   'challenge_cloudflare',
   'challenge_turnstile',
   'challenge_shield',
+  'processing_error',
   'rate_limit',
   'quota_exceeded',
   'auth_invalid',

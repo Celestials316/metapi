@@ -46,6 +46,7 @@ describe('TokenRouter selection scoring', () => {
   let originalProxySessionChannelConcurrencyLimit: number;
   let originalProxySessionChannelQueueWaitMs: number;
   let originalTokenRouterPendingOverloadCooldownSec: number;
+  let originalTokenRouterTimeoutCooldownSec: number;
 
   const nextId = () => {
     idSeed += 1;
@@ -83,6 +84,7 @@ describe('TokenRouter selection scoring', () => {
     originalProxySessionChannelConcurrencyLimit = config.proxySessionChannelConcurrencyLimit;
     originalProxySessionChannelQueueWaitMs = config.proxySessionChannelQueueWaitMs;
     originalTokenRouterPendingOverloadCooldownSec = config.tokenRouterPendingOverloadCooldownSec;
+    originalTokenRouterTimeoutCooldownSec = config.tokenRouterTimeoutCooldownSec;
   });
 
   beforeEach(async () => {
@@ -92,6 +94,7 @@ describe('TokenRouter selection scoring', () => {
     config.proxySessionChannelConcurrencyLimit = originalProxySessionChannelConcurrencyLimit;
     config.proxySessionChannelQueueWaitMs = originalProxySessionChannelQueueWaitMs;
     config.tokenRouterPendingOverloadCooldownSec = originalTokenRouterPendingOverloadCooldownSec;
+    config.tokenRouterTimeoutCooldownSec = originalTokenRouterTimeoutCooldownSec;
     await db.delete(schema.accountDispatchPreferences).run();
     await db.delete(schema.routeChannels).run();
     await db.delete(schema.tokenRoutes).run();
@@ -112,6 +115,7 @@ describe('TokenRouter selection scoring', () => {
     config.proxySessionChannelConcurrencyLimit = originalProxySessionChannelConcurrencyLimit;
     config.proxySessionChannelQueueWaitMs = originalProxySessionChannelQueueWaitMs;
     config.tokenRouterPendingOverloadCooldownSec = originalTokenRouterPendingOverloadCooldownSec;
+    config.tokenRouterTimeoutCooldownSec = originalTokenRouterTimeoutCooldownSec;
     invalidateTokenRouterCache();
     resetAccountDispatchPreferenceCache();
     resetAccountDispatchRuntimeMemory();
@@ -254,6 +258,54 @@ describe('TokenRouter selection scoring', () => {
     invalidateTokenRouterCache();
 
     await expect(router.selectPreferredChannel('gpt-5.2', preferredChannel.id)).resolves.toBeNull();
+  });
+
+  it('rechecks cached general selections against fresh route state before final dispatch', async () => {
+    const route = await createRoute('gpt-5.4');
+    const site = await createSite('fresh-recheck-general-site');
+    const account = await createAccount(site.id, 'fresh-recheck-general-user');
+
+    const channel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: account.id,
+      tokenId: null,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+
+    const router = new TokenRouter();
+    expect((await router.selectChannel('gpt-5.4'))?.channel.id).toBe(channel.id);
+
+    await db.update(schema.routeChannels).set({
+      enabled: false,
+    }).where(eq(schema.routeChannels.id, channel.id)).run();
+
+    await expect(router.selectChannel('gpt-5.4')).resolves.toBeNull();
+  });
+
+  it('rechecks cached preferred channels against fresh cooldown state before dispatch', async () => {
+    const route = await createRoute('gpt-4.1');
+    const site = await createSite('fresh-recheck-preferred-site');
+    const account = await createAccount(site.id, 'fresh-recheck-preferred-user');
+
+    const preferredChannel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: account.id,
+      tokenId: null,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+
+    const router = new TokenRouter();
+    expect((await router.selectPreferredChannel('gpt-4.1', preferredChannel.id))?.channel.id).toBe(preferredChannel.id);
+
+    await db.update(schema.routeChannels).set({
+      cooldownUntil: new Date(Date.now() + 60_000).toISOString(),
+    }).where(eq(schema.routeChannels.id, preferredChannel.id)).run();
+
+    await expect(router.selectPreferredChannel('gpt-4.1', preferredChannel.id)).resolves.toBeNull();
   });
 
   it('honors force preference without falling back to other accounts', async () => {
@@ -411,6 +463,120 @@ describe('TokenRouter selection scoring', () => {
 
     await router.recordProbeSuccess(channelA.id, 120, 'gpt-5.4', accountA.id);
     expect((await router.selectChannel('gpt-5.4'))?.account.id).toBe(accountA.id);
+  });
+
+  it('automatically suppresses auth-invalid channels from normal selection until a recovery probe succeeds', async () => {
+    const route = await createRoute('gpt-5.4');
+    const site = await createSite('auth-invalid-site');
+    const account = await createAccount(site.id, 'auth-invalid-user');
+    const channel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: account.id,
+      tokenId: null,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+
+    const router = new TokenRouter();
+    expect((await router.selectChannel('gpt-5.4'))?.channel.id).toBe(channel.id);
+
+    await router.recordFailure(channel.id, {
+      status: 401,
+      errorText: 'invalid access token',
+      modelName: 'gpt-5.4',
+    }, account.id);
+
+    expect(getAccountDispatchRuntimeSnapshot(route.id, 'gpt-5.4', account.id)).toMatchObject({
+      status: 'degraded',
+      suppressionReason: 'auth_invalid',
+    });
+    await expect(router.selectChannel('gpt-5.4')).resolves.toBeNull();
+
+    await router.recordProbeSuccess(channel.id, 120, 'gpt-5.4', account.id);
+
+    expect(getAccountDispatchRuntimeSnapshot(route.id, 'gpt-5.4', account.id).status).toBe('recovering');
+    expect((await router.selectChannel('gpt-5.4'))?.channel.id).toBe(channel.id);
+  });
+
+  it('gates manual recovery probes by typed suppression reason', () => {
+    const shouldAttemptManualDispatchRecovery = (tokenRouterTestUtils as Record<string, unknown>).shouldAttemptManualDispatchRecovery as
+      | ((snapshot: Record<string, unknown>, nowMs?: number) => boolean)
+      | undefined;
+
+    expect(shouldAttemptManualDispatchRecovery).toBeTypeOf('function');
+    expect(shouldAttemptManualDispatchRecovery?.({
+      status: 'degraded',
+      degradedAtMs: 1_000,
+      lastFailureAtMs: 1_000,
+      suppressionReason: 'pending_overload',
+    }, 62_000)).toBe(true);
+    expect(shouldAttemptManualDispatchRecovery?.({
+      status: 'degraded',
+      degradedAtMs: 1_000,
+      lastFailureAtMs: 1_000,
+      suppressionReason: 'auth_invalid',
+    }, 300_000)).toBe(false);
+  });
+
+  it('keeps timeout-suppressed preferred accounts behind healthy peers until the timeout cooldown elapses', async () => {
+    config.tokenRouterTimeoutCooldownSec = 180;
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-04-22T12:00:00.000Z'));
+      const route = await createRoute('gpt-5.4');
+      const siteA = await createSite('timeout-prefer-a');
+      const siteB = await createSite('timeout-prefer-b');
+      const accountA = await createAccount(siteA.id, 'timeout-prefer-user-a');
+      const accountB = await createAccount(siteB.id, 'timeout-prefer-user-b');
+
+      const channelA = await db.insert(schema.routeChannels).values({
+        routeId: route.id,
+        accountId: accountA.id,
+        tokenId: null,
+        priority: 0,
+        weight: 10,
+        enabled: true,
+      }).returning().get();
+      await db.insert(schema.routeChannels).values({
+        routeId: route.id,
+        accountId: accountB.id,
+        tokenId: null,
+        priority: 0,
+        weight: 10,
+        enabled: true,
+      }).run();
+
+      await setAccountDispatchPreferenceMode(accountA.id, 'prefer');
+
+      const router = new TokenRouter();
+      expect((await router.selectChannel('gpt-5.4'))?.account.id).toBe(accountA.id);
+
+      await router.recordFailure(channelA.id, {
+        status: 502,
+        errorText: 'stream closed before response.completed',
+        modelName: 'gpt-5.4',
+      }, accountA.id);
+      await router.recordFailure(channelA.id, {
+        status: 502,
+        errorText: 'stream closed before response.completed',
+        modelName: 'gpt-5.4',
+      }, accountA.id);
+
+      expect(getAccountDispatchRuntimeSnapshot(route.id, 'gpt-5.4', accountA.id)).toMatchObject({
+        status: 'degraded',
+        suppressionReason: 'timeout',
+      });
+      expect((await router.selectChannel('gpt-5.4'))?.account.id).toBe(accountB.id);
+
+      vi.advanceTimersByTime(61_000);
+      expect((await router.selectChannel('gpt-5.4'))?.account.id).toBe(accountB.id);
+
+      vi.advanceTimersByTime(120_000);
+      expect((await router.selectChannel('gpt-5.4'))?.account.id).toBe(accountA.id);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('clears sibling credential-scoped pending overload state on normal success recovery', async () => {
@@ -2291,7 +2457,7 @@ describe('TokenRouter selection scoring', () => {
     const freeCandidate = decision.candidates.find((candidate) => candidate.channelId === channelFree.id);
 
     expect(preview?.channel.id).toBe(channelFree.id);
-    expect(busyCandidate?.reason || '').toContain('会话负载=');
+    expect(busyCandidate?.reason || '').toContain('账号预算已满');
     expect(busyCandidate?.reason || '').toContain('活跃=1/1');
     expect(busyCandidate?.reason || '').toContain('等待=1');
     expect((busyCandidate?.probability || 0)).toBeLessThan((freeCandidate?.probability || 0));
@@ -2302,5 +2468,82 @@ describe('TokenRouter selection scoring', () => {
     if (queuedLease.status === 'acquired') {
       queuedLease.lease.release();
     }
+  });
+
+  it('blocks sibling session-scoped channels from the same account when the credential budget is already full', async () => {
+    config.routingWeights = {
+      baseWeightFactor: 1,
+      valueScoreFactor: 0,
+      costWeight: 0,
+      balanceWeight: 0,
+      usageWeight: 0,
+    };
+    config.proxySessionChannelConcurrencyLimit = 1;
+    config.proxySessionChannelQueueWaitMs = 5_000;
+
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gpt-5.3',
+      routingStrategy: 'stable_first',
+      enabled: true,
+    }).returning().get();
+    const sessionExtraConfig = JSON.stringify({ credentialMode: 'session' });
+
+    const busySite = await createSite('credential-budget-busy');
+    const busyAccount = await createAccount(busySite.id, 'credential-budget-user-busy', {
+      extraConfig: sessionExtraConfig,
+    });
+    const busyTokenA = await createToken(busyAccount.id, 'credential-budget-token-a');
+    const busyTokenB = await createToken(busyAccount.id, 'credential-budget-token-b');
+    const busyChannelA = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: busyAccount.id,
+      tokenId: busyTokenA.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+    const busyChannelB = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: busyAccount.id,
+      tokenId: busyTokenB.id,
+      priority: 1,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+
+    const healthySite = await createSite('credential-budget-healthy');
+    const healthyAccount = await createAccount(healthySite.id, 'credential-budget-user-healthy', {
+      extraConfig: sessionExtraConfig,
+    });
+    const healthyToken = await createToken(healthyAccount.id, 'credential-budget-token-healthy');
+    const healthyChannel = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: healthyAccount.id,
+      tokenId: healthyToken.id,
+      priority: 10,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+
+    const activeLease = await proxyChannelCoordinator.acquireChannelLease({
+      channelId: busyChannelA.id,
+      accountExtraConfig: busyAccount.extraConfig,
+    });
+    expect(activeLease.status).toBe('acquired');
+    if (activeLease.status !== 'acquired') return;
+
+    const router = new TokenRouter();
+    const preview = await router.previewSelectedChannel('gpt-5.3');
+    const decision = await router.explainSelection('gpt-5.3');
+    const busyPrimaryCandidate = decision.candidates.find((candidate) => candidate.channelId === busyChannelA.id);
+    const busySiblingCandidate = decision.candidates.find((candidate) => candidate.channelId === busyChannelB.id);
+    const healthyCandidate = decision.candidates.find((candidate) => candidate.channelId === healthyChannel.id);
+
+    expect(preview?.channel.id).toBe(healthyChannel.id);
+    expect(busyPrimaryCandidate?.reason || '').toContain('账号预算已满');
+    expect(busySiblingCandidate?.reason || '').toContain('账号预算已满');
+    expect(healthyCandidate?.eligible).toBe(true);
+
+    activeLease.lease.release();
   });
 });

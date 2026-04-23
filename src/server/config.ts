@@ -1,5 +1,7 @@
 import 'dotenv/config';
 import type { FastifyServerOptions } from 'fastify';
+import { normalizeChannelAffinityConfig } from './services/channelAffinity.js';
+import { normalizeDownstreamRateLimitConfig } from './services/downstreamRateLimit.js';
 import { normalizePayloadRulesConfig } from './services/payloadRules.js';
 
 const DEFAULT_REQUEST_BODY_LIMIT = 20 * 1024 * 1024;
@@ -123,6 +125,7 @@ export function buildConfig(env: NodeJS.ProcessEnv) {
       parseNumber(env.TOKEN_ROUTER_FAILURE_COOLDOWN_MAX_SEC, TOKEN_ROUTER_FAILURE_COOLDOWN_MAX_SEC_CEILING),
     ) ?? TOKEN_ROUTER_FAILURE_COOLDOWN_MAX_SEC_CEILING,
     tokenRouterPendingOverloadCooldownSec: Math.max(1, Math.trunc(parseNumber(env.TOKEN_ROUTER_PENDING_OVERLOAD_COOLDOWN_SEC, 60))),
+    tokenRouterTimeoutCooldownSec: Math.max(1, Math.trunc(parseNumber(env.TOKEN_ROUTER_TIMEOUT_COOLDOWN_SEC, 180))),
     tokenRouterCacheTtlMs: Math.max(100, Math.trunc(parseNumber(env.TOKEN_ROUTER_CACHE_TTL_MS, 1_500))),
     proxyMaxChannelAttempts: Math.max(1, Math.trunc(parseNumber(env.PROXY_MAX_CHANNEL_ATTEMPTS, 3))),
     proxyStickySessionEnabled: parseBoolean(env.PROXY_STICKY_SESSION_ENABLED, true),
@@ -160,6 +163,8 @@ export function buildConfig(env: NodeJS.ProcessEnv) {
       userAgent: parseOptionalSecret(env.CODEX_HEADER_DEFAULTS_USER_AGENT),
       betaFeatures: parseOptionalSecret(env.CODEX_HEADER_DEFAULTS_BETA_FEATURES),
     },
+    channelAffinity: normalizeChannelAffinityConfig(parseJsonValue(env.CHANNEL_AFFINITY_JSON || env.CHANNEL_AFFINITY_RULES)),
+    downstreamRateLimit: normalizeDownstreamRateLimitConfig(parseJsonValue(env.DOWNSTREAM_RATE_LIMIT_JSON || env.DOWNSTREAM_RATE_LIMIT)),
     payloadRules: normalizePayloadRulesConfig(parseJsonValue(env.PAYLOAD_RULES_JSON || env.PAYLOAD_RULES)),
     routingWeights: {
       baseWeightFactor: parseNumber(env.BASE_WEIGHT_FACTOR, 0.5),

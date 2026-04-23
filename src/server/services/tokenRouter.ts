@@ -22,6 +22,7 @@ import {
 import {
   ensureAccountDispatchRuntimeStateLoaded,
   getAccountDispatchRuntimeSnapshot,
+  listAccountDispatchRuntimeSnapshots,
   recordAccountDispatchFailure,
   recordAccountDispatchProbeSuccess,
   recordAccountDispatchSelectionBlocked,
@@ -29,6 +30,7 @@ import {
 } from './accountDispatchRuntimeMemory.js';
 import { type DownstreamRoutingPolicy, EMPTY_DOWNSTREAM_ROUTING_POLICY } from './downstreamPolicyTypes.js';
 import { isUsableAccountToken } from './accountTokenService.js';
+import { getCredentialModeFromExtraConfig, hasOauthProvider } from './accountExtraConfig.js';
 import { getOauthInfoFromAccount } from './oauth/oauthAccount.js';
 import { getOauthRefreshBackoffReason } from './oauth/refreshGovernance.js';
 import { parseCodexQuotaResetHint } from './oauth/quota.js';
@@ -89,6 +91,7 @@ type SiteRuntimeFailureContext = {
   status?: number | null;
   errorText?: string | null;
   modelName?: string | null;
+  suppressionReason?: string | null;
 };
 
 type SiteRuntimeHealthState = {
@@ -425,18 +428,96 @@ function classifyManualDispatchFailureKind(context: SiteRuntimeFailureContext = 
   return 'soft';
 }
 
+function classifyAccountDispatchSuppressionReason(context: SiteRuntimeFailureContext = {}): string | null {
+  const status = typeof context.status === 'number' ? context.status : 0;
+  const errorText = (context.errorText || '').trim();
+  const failure = classifyProxyFailure({
+    status,
+    errorMessage: errorText,
+  });
+
+  if (failure.className === 'pending_overload') return 'pending_overload';
+  if (failure.className === 'timeout' || matchesAnyPattern(RETRYABLE_TIMEOUT_PATTERNS, errorText)) return 'timeout';
+  if (failure.className === 'auth_invalid' || status === 401 || status === 403) return 'auth_invalid';
+  if (failure.className === 'network' || failure.className === 'upstream_5xx' || failure.className === 'unknown') {
+    return 'soft_error';
+  }
+  if (status > 0 && status < 500) return 'hard_error';
+  if (status >= 500) return 'soft_error';
+  return null;
+}
+
 function shouldAttemptManualDispatchRecovery(
   snapshot: {
     status: 'healthy' | 'degraded' | 'recovering' | 'failback_hold';
     degradedAtMs: number | null;
     lastFailureAtMs: number | null;
+    suppressionReason?: string | null;
   },
   nowMs = Date.now(),
 ): boolean {
   if (snapshot.status !== 'degraded') return false;
   const anchorMs = snapshot.lastFailureAtMs ?? snapshot.degradedAtMs ?? 0;
   if (!Number.isFinite(anchorMs) || anchorMs <= 0) return false;
+  const suppressionReason = String(snapshot.suppressionReason || '').trim();
+  if (suppressionReason === 'auth_invalid' || suppressionReason === 'hard_error') return false;
+  if (suppressionReason === 'pending_overload') {
+    return (nowMs - anchorMs) >= Math.max(MANUAL_DISPATCH_DEGRADED_RETRY_MS, config.tokenRouterPendingOverloadCooldownSec * 1000);
+  }
+  if (suppressionReason === 'timeout') {
+    return (nowMs - anchorMs) >= Math.max(MANUAL_DISPATCH_DEGRADED_RETRY_MS, config.tokenRouterTimeoutCooldownSec * 1000);
+  }
   return (nowMs - anchorMs) >= MANUAL_DISPATCH_DEGRADED_RETRY_MS;
+}
+
+function findAccountDispatchRuntimeSnapshot(
+  routeId: number,
+  modelName: string,
+  accountId: number,
+  nowMs = Date.now(),
+) {
+  const normalizedModelName = String(modelName || '').trim().toLowerCase();
+  if (!normalizedModelName || !Number.isFinite(routeId) || !Number.isFinite(accountId)) return null;
+  return listAccountDispatchRuntimeSnapshots({ accountId, nowMs }).find((snapshot) => (
+    snapshot.routeId === routeId
+    && snapshot.accountId === accountId
+    && snapshot.modelName === normalizedModelName
+  )) ?? null;
+}
+
+function shouldTrackAutomaticDispatchRuntimeState(input: {
+  preferenceMode?: string | null;
+  runtimeModelName?: string | null;
+  suppressionReason?: string | null;
+  existingSnapshot?: { status: 'healthy' | 'degraded' | 'recovering' | 'failback_hold' } | null;
+}): boolean {
+  const runtimeModelName = String(input.runtimeModelName || '').trim();
+  if (!runtimeModelName) return false;
+  if (input.preferenceMode === 'prefer') return true;
+  const suppressionReason = String(input.suppressionReason || '').trim();
+  if (suppressionReason === 'auth_invalid' || suppressionReason === 'hard_error') return true;
+  return !!input.existingSnapshot && input.existingSnapshot.status !== 'healthy';
+}
+
+function resolveAccountDispatchSuppressionLabel(suppressionReason?: string | null): string {
+  const normalized = String(suppressionReason || '').trim();
+  switch (normalized) {
+    case 'auth_invalid':
+      return '鉴权失败，等待探活恢复';
+    case 'hard_error':
+      return '硬错误摘除中，等待探活恢复';
+    default:
+      return '等待探活恢复';
+  }
+}
+
+function isAutomaticallySuppressedForGeneralSelection(snapshot: {
+  status: 'healthy' | 'degraded' | 'recovering' | 'failback_hold';
+  suppressionReason?: string | null;
+} | null | undefined): boolean {
+  if (!snapshot || snapshot.status !== 'degraded') return false;
+  const suppressionReason = String(snapshot.suppressionReason || '').trim();
+  return suppressionReason === 'auth_invalid' || suppressionReason === 'hard_error';
 }
 
 function clampNumber(value: number, min: number, max: number): number {
@@ -1171,11 +1252,7 @@ function isCacheFresh(loadedAt: number, nowMs: number): boolean {
   return nowMs - loadedAt < resolveTokenRouterCacheTtlMs();
 }
 
-async function loadEnabledRoutes(nowMs = Date.now()): Promise<RouteRow[]> {
-  if (isCacheFresh(routeCacheSnapshot.loadedAt, nowMs)) {
-    return routeCacheSnapshot.routes;
-  }
-
+async function readEnabledRoutesSnapshot(): Promise<RouteRow[]> {
   const rawRoutes = await db.select().from(schema.tokenRoutes)
     .where(eq(schema.tokenRoutes.enabled, true))
     .all();
@@ -1194,11 +1271,19 @@ async function loadEnabledRoutes(nowMs = Date.now()): Promise<RouteRow[]> {
     }
     sourceIdsByRouteId.get(row.groupRouteId)!.push(row.sourceRouteId);
   }
-  const routes = rawRoutes.map((route) => ({
+  return rawRoutes.map((route) => ({
     ...route,
     routeMode: normalizeRouteMode(route.routeMode),
     sourceRouteIds: Array.from(new Set(sourceIdsByRouteId.get(route.id) ?? [])),
   }));
+}
+
+async function loadEnabledRoutes(nowMs = Date.now()): Promise<RouteRow[]> {
+  if (isCacheFresh(routeCacheSnapshot.loadedAt, nowMs)) {
+    return routeCacheSnapshot.routes;
+  }
+
+  const routes = await readEnabledRoutesSnapshot();
   routeCacheSnapshot = {
     loadedAt: nowMs,
     routes,
@@ -1206,13 +1291,7 @@ async function loadEnabledRoutes(nowMs = Date.now()): Promise<RouteRow[]> {
   return routes;
 }
 
-async function loadRouteMatch(route: RouteRow, nowMs = Date.now()): Promise<RouteMatch> {
-  const cached = routeMatchCache.get(route.id);
-  if (cached && isCacheFresh(cached.loadedAt, nowMs)) {
-    return cached.match;
-  }
-
-  const enabledRoutes = await loadEnabledRoutes(nowMs);
+async function buildRouteMatchFromEnabledRoutes(route: RouteRow, enabledRoutes: RouteRow[]): Promise<RouteMatch> {
   const routeIds = (() => {
     if (!isExplicitGroupRoute(route)) {
       return [route.id];
@@ -1276,12 +1355,29 @@ async function loadRouteMatch(route: RouteRow, nowMs = Date.now()): Promise<Rout
       : [],
   }));
 
-  const match = { route, channels: mapped };
+  return { route, channels: mapped };
+}
+
+async function loadRouteMatch(route: RouteRow, nowMs = Date.now()): Promise<RouteMatch> {
+  const cached = routeMatchCache.get(route.id);
+  if (cached && isCacheFresh(cached.loadedAt, nowMs)) {
+    return cached.match;
+  }
+
+  const enabledRoutes = await loadEnabledRoutes(nowMs);
+  const match = await buildRouteMatchFromEnabledRoutes(route, enabledRoutes);
   routeMatchCache.set(route.id, {
     loadedAt: nowMs,
     match,
   });
   return match;
+}
+
+async function loadRouteMatchFresh(routeId: number): Promise<RouteMatch | null> {
+  const enabledRoutes = await readEnabledRoutesSnapshot();
+  const route = enabledRoutes.find((item) => item.id === routeId) || null;
+  if (!route) return null;
+  return await buildRouteMatchFromEnabledRoutes(route, enabledRoutes);
 }
 
 function patchCachedChannel(channelId: number, apply: (channel: ChannelRow) => void): void {
@@ -1407,6 +1503,16 @@ type CandidateEligibilityOptions = {
   excludeAccountIds?: number[];
   nowIso?: string;
   downstreamPolicy?: DownstreamRoutingPolicy;
+  candidatePool?: RouteChannelCandidate[];
+  accountDispatchBudgetSnapshots?: Map<string, AccountDispatchBudgetSnapshot>;
+};
+
+type AccountDispatchBudgetSnapshot = {
+  scopeKey: string;
+  activeLeaseCount: number;
+  waitingCount: number;
+  concurrencyLimit: number;
+  saturated: boolean;
 };
 
 type CostSignal = {
@@ -1628,6 +1734,61 @@ function isOauthRouteUnitMemberCoolingDown(
   nowIso: string,
 ): boolean {
   return !!member.cooldownUntil && member.cooldownUntil > nowIso;
+}
+
+function isSessionScopedDirectCandidate(candidate: RouteChannelCandidate): boolean {
+  if (isOauthRouteUnitCandidate(candidate)) return false;
+  return getCredentialModeFromExtraConfig(candidate.account.extraConfig) === 'session'
+    || hasOauthProvider({
+      extraConfig: candidate.account.extraConfig,
+      oauthProvider: candidate.account.oauthProvider,
+    });
+}
+
+function getAccountDispatchBudgetScopeKey(candidate: RouteChannelCandidate): string | null {
+  if (!isSessionScopedDirectCandidate(candidate)) return null;
+  const accountId = Math.trunc(candidate.account.id || 0);
+  return accountId > 0 ? `account:${accountId}` : null;
+}
+
+function buildAccountDispatchBudgetSnapshots(
+  candidates: RouteChannelCandidate[],
+): Map<string, AccountDispatchBudgetSnapshot> {
+  const relevantCandidates = candidates.filter((candidate) => !!getAccountDispatchBudgetScopeKey(candidate));
+  if (relevantCandidates.length <= 0) return new Map<string, AccountDispatchBudgetSnapshot>();
+
+  const channelLoadSnapshots = proxyChannelCoordinator.getChannelLoadSnapshots(
+    relevantCandidates.map((candidate) => ({
+      channelId: candidate.channel.id,
+      accountExtraConfig: candidate.account.extraConfig,
+      accountOauthProvider: candidate.account.oauthProvider,
+    })),
+  );
+  const byScope = new Map<string, AccountDispatchBudgetSnapshot>();
+
+  for (const candidate of relevantCandidates) {
+    const scopeKey = getAccountDispatchBudgetScopeKey(candidate);
+    if (!scopeKey) continue;
+    const channelSnapshot = channelLoadSnapshots.get(candidate.channel.id);
+    if (!channelSnapshot || channelSnapshot.concurrencyLimit <= 0) continue;
+    const existing = byScope.get(scopeKey);
+    if (existing) {
+      existing.activeLeaseCount += channelSnapshot.activeLeaseCount;
+      existing.waitingCount += channelSnapshot.waitingCount;
+      existing.concurrencyLimit = Math.max(existing.concurrencyLimit, channelSnapshot.concurrencyLimit);
+      existing.saturated = existing.activeLeaseCount >= existing.concurrencyLimit;
+      continue;
+    }
+    byScope.set(scopeKey, {
+      scopeKey,
+      activeLeaseCount: channelSnapshot.activeLeaseCount,
+      waitingCount: channelSnapshot.waitingCount,
+      concurrencyLimit: channelSnapshot.concurrencyLimit,
+      saturated: channelSnapshot.activeLeaseCount >= channelSnapshot.concurrencyLimit,
+    });
+  }
+
+  return byScope;
 }
 
 function compareStableFirstCandidateOrder(left: RouteChannelCandidate, right: RouteChannelCandidate): number {
@@ -2114,6 +2275,7 @@ export class TokenRouter {
     const available: RouteChannelCandidate[] = [];
     const candidates: RouteDecisionCandidate[] = [];
     const candidateMap = new Map<number, RouteDecisionCandidate>();
+    const accountDispatchBudgetSnapshots = buildAccountDispatchBudgetSnapshots(match.channels);
 
     for (const row of match.channels) {
       const reasonParts = this.getCandidateEligibilityReasons(row, {
@@ -2122,6 +2284,8 @@ export class TokenRouter {
         excludeChannelIds,
         nowIso,
         downstreamPolicy,
+        candidatePool: match.channels,
+        accountDispatchBudgetSnapshots,
       });
 
       const recentlyFailed = routeStrategy !== 'round_robin'
@@ -2613,7 +2777,12 @@ export class TokenRouter {
         }).where(eq(schema.oauthRouteUnitMembers.id, memberRow.member.id)).run();
         recordSiteRuntimeSuccess(memberRow.account.siteId, latencyMs, modelName);
         const preference = await getAccountDispatchPreference(targetAccountId);
-        if (preference.mode === 'prefer' && runtimeModelName) {
+        const existingSnapshot = findAccountDispatchRuntimeSnapshot(route.id, runtimeModelName, targetAccountId, nowMs);
+        if (shouldTrackAutomaticDispatchRuntimeState({
+          preferenceMode: preference.mode,
+          runtimeModelName,
+          existingSnapshot,
+        })) {
           recordAccountDispatchSuccess(route.id, runtimeModelName, targetAccountId, nowMs);
         }
       } else {
@@ -2626,7 +2795,12 @@ export class TokenRouter {
         ? Math.trunc(actualAccountId!)
         : account.id;
       const preference = await getAccountDispatchPreference(targetAccountId);
-      if (preference.mode === 'prefer' && runtimeModelName) {
+      const existingSnapshot = findAccountDispatchRuntimeSnapshot(route.id, runtimeModelName, targetAccountId, nowMs);
+      if (shouldTrackAutomaticDispatchRuntimeState({
+        preferenceMode: preference.mode,
+        runtimeModelName,
+        existingSnapshot,
+      })) {
         recordAccountDispatchSuccess(route.id, runtimeModelName, targetAccountId, nowMs);
       }
     }
@@ -2746,7 +2920,12 @@ export class TokenRouter {
         }).where(eq(schema.oauthRouteUnitMembers.id, memberRow.member.id)).run();
         recordSiteRuntimeSuccess(memberRow.account.siteId, latencyMs, modelName);
         const preference = await getAccountDispatchPreference(targetAccountId);
-        if (preference.mode === 'prefer' && runtimeModelName) {
+        const existingSnapshot = findAccountDispatchRuntimeSnapshot(route.id, runtimeModelName, targetAccountId, nowMs);
+        if (shouldTrackAutomaticDispatchRuntimeState({
+          preferenceMode: preference.mode,
+          runtimeModelName,
+          existingSnapshot,
+        })) {
           recordAccountDispatchProbeSuccess(route.id, runtimeModelName, targetAccountId, nowMs);
         }
       } else {
@@ -2835,7 +3014,12 @@ export class TokenRouter {
       ? Math.trunc(actualAccountId!)
       : account.id;
     const preference = await getAccountDispatchPreference(targetAccountId);
-    if (preference.mode === 'prefer' && runtimeModelName) {
+    const existingSnapshot = findAccountDispatchRuntimeSnapshot(route.id, runtimeModelName, targetAccountId, nowMs);
+    if (shouldTrackAutomaticDispatchRuntimeState({
+      preferenceMode: preference.mode,
+      runtimeModelName,
+      existingSnapshot,
+    })) {
       recordAccountDispatchProbeSuccess(route.id, runtimeModelName, targetAccountId, nowMs);
     }
   }
@@ -2907,6 +3091,7 @@ export class TokenRouter {
       : (context ?? {});
     const runtimeModelName = String(normalizedContext.modelName || '').trim();
     const manualFailureKind = classifyManualDispatchFailureKind(normalizedContext);
+    const suppressionReason = classifyAccountDispatchSuppressionReason(normalizedContext);
     if (typeof ch.oauthRouteUnitId === 'number' && ch.oauthRouteUnitId > 0) {
       const targetAccountId = Number.isFinite(actualAccountId) && (actualAccountId ?? 0) > 0
         ? Math.trunc(actualAccountId!)
@@ -2964,12 +3149,19 @@ export class TokenRouter {
           recordSiteRuntimeFailure(memberRow.account.siteId, normalizedContext, nowMs);
         }
         const preference = await getAccountDispatchPreference(targetAccountId);
-        if (preference.mode === 'prefer' && runtimeModelName) {
+        const existingSnapshot = findAccountDispatchRuntimeSnapshot(route.id, runtimeModelName, targetAccountId, nowMs);
+        if (shouldTrackAutomaticDispatchRuntimeState({
+          preferenceMode: preference.mode,
+          runtimeModelName,
+          suppressionReason,
+          existingSnapshot,
+        })) {
           recordAccountDispatchFailure({
             routeId: route.id,
             modelName: runtimeModelName,
             accountId: targetAccountId,
             kind: manualFailureKind,
+            reason: suppressionReason,
             nowMs,
           });
         }
@@ -3032,12 +3224,19 @@ export class TokenRouter {
       ? Math.trunc(actualAccountId!)
       : account.id;
     const preference = await getAccountDispatchPreference(targetAccountId);
-    if (preference.mode === 'prefer' && runtimeModelName) {
+    const existingSnapshot = findAccountDispatchRuntimeSnapshot(route.id, runtimeModelName, targetAccountId, nowMs);
+    if (shouldTrackAutomaticDispatchRuntimeState({
+      preferenceMode: preference.mode,
+      runtimeModelName,
+      suppressionReason,
+      existingSnapshot,
+    })) {
       recordAccountDispatchFailure({
         routeId: route.id,
         modelName: runtimeModelName,
         accountId: targetAccountId,
         kind: manualFailureKind,
+        reason: suppressionReason,
         nowMs,
       });
     }
@@ -3068,6 +3267,7 @@ export class TokenRouter {
     },
   ): RouteChannelCandidate[] {
     const bypassSourceModelCheck = options.requestedByDisplayName;
+    const accountDispatchBudgetSnapshots = buildAccountDispatchBudgetSnapshots(match.channels);
     return match.channels.filter((candidate) => (
       this.getCandidateEligibilityReasons(candidate, {
         requestedModel,
@@ -3076,6 +3276,8 @@ export class TokenRouter {
         excludeAccountIds: options.excludeAccountIds,
         nowIso: options.nowIso,
         downstreamPolicy,
+        candidatePool: match.channels,
+        accountDispatchBudgetSnapshots,
       }).length === 0
     ));
   }
@@ -3285,6 +3487,7 @@ export class TokenRouter {
       : mappedModel;
     const nowIso = new Date().toISOString();
     const nowMs = Date.now();
+    const accountDispatchBudgetSnapshots = buildAccountDispatchBudgetSnapshots(match.channels);
 
     for (const candidate of match.channels) {
       if (excludeChannelIds.includes(candidate.channel.id)) continue;
@@ -3332,6 +3535,8 @@ export class TokenRouter {
         excludeChannelIds,
         nowIso,
         downstreamPolicy,
+        candidatePool: match.channels,
+        accountDispatchBudgetSnapshots,
       }).length > 0) {
         continue;
       }
@@ -3515,6 +3720,7 @@ export class TokenRouter {
 
     const nowIso = new Date().toISOString();
     const nowMs = Date.now();
+    const accountDispatchBudgetSnapshots = buildAccountDispatchBudgetSnapshots(match.channels);
     const available = match.channels.filter((candidate) => (
       this.getCandidateEligibilityReasons(candidate, {
         requestedModel,
@@ -3522,6 +3728,8 @@ export class TokenRouter {
         excludeChannelIds,
         nowIso,
         downstreamPolicy,
+        candidatePool: match.channels,
+        accountDispatchBudgetSnapshots,
       }).length === 0
     ));
 
@@ -3930,6 +4138,26 @@ export class TokenRouter {
       reasonParts.push('冷却中');
     }
 
+    const runtimeSuppressionModelName = String(candidate.channel.sourceModel || options.requestedModel || '').trim();
+    const runtimeSuppressionSnapshot = findAccountDispatchRuntimeSnapshot(
+      candidate.channel.routeId,
+      runtimeSuppressionModelName,
+      candidate.account.id,
+    );
+    if (isAutomaticallySuppressedForGeneralSelection(runtimeSuppressionSnapshot)) {
+      reasonParts.push(`自动禁用中（${resolveAccountDispatchSuppressionLabel(runtimeSuppressionSnapshot?.suppressionReason)})`);
+    }
+
+    const accountDispatchBudgetSnapshots = options.accountDispatchBudgetSnapshots
+      ?? buildAccountDispatchBudgetSnapshots(options.candidatePool ?? [candidate]);
+    const accountDispatchBudgetScopeKey = getAccountDispatchBudgetScopeKey(candidate);
+    if (accountDispatchBudgetScopeKey) {
+      const budgetSnapshot = accountDispatchBudgetSnapshots.get(accountDispatchBudgetScopeKey);
+      if (budgetSnapshot && budgetSnapshot.concurrencyLimit > 0 && budgetSnapshot.activeLeaseCount >= budgetSnapshot.concurrencyLimit) {
+        reasonParts.push(`账号预算已满（活跃=${budgetSnapshot.activeLeaseCount}/${budgetSnapshot.concurrencyLimit}，等待=${budgetSnapshot.waitingCount}）`);
+      }
+    }
+
     return reasonParts;
   }
 
@@ -4013,24 +4241,44 @@ export class TokenRouter {
     excludeAccountIds: number[] = [],
     preferredAccountId?: number | null,
   ): Promise<SelectedChannel | null> {
-    let dispatchCandidate = selected;
+    const finalNowIso = new Date().toISOString();
+    const finalNowMs = Date.now();
+    const freshMatch = await loadRouteMatchFresh(match.route.id);
+    if (!freshMatch) return null;
+    const freshSelected = freshMatch.channels.find((candidate) => candidate.channel.id === selected.channel.id);
+    if (!freshSelected) return null;
+    const finalRequestedByDisplayName = isRouteDisplayNameMatch(requestedModel, freshMatch.route.displayName);
+    const finalAccountDispatchBudgetSnapshots = buildAccountDispatchBudgetSnapshots(freshMatch.channels);
+    const finalEligibilityReasons = this.getCandidateEligibilityReasons(freshSelected, {
+      requestedModel,
+      bypassSourceModelCheck: finalRequestedByDisplayName,
+      excludeChannelIds,
+      excludeAccountIds,
+      nowIso: finalNowIso,
+      downstreamPolicy,
+      candidatePool: freshMatch.channels,
+      accountDispatchBudgetSnapshots: finalAccountDispatchBudgetSnapshots,
+    });
+    if (finalEligibilityReasons.length > 0) return null;
+
+    let dispatchCandidate = freshSelected;
     let resolvedRouteUnitMemberTokenValue: string | null = null;
-    if (isOauthRouteUnitCandidate(selected)) {
+    if (isOauthRouteUnitCandidate(freshSelected)) {
       const member = this.selectRouteUnitMember(
-        selected,
+        freshSelected,
         requestedModel,
         downstreamPolicy,
-        nowIso,
-        nowMs,
+        finalNowIso,
+        finalNowMs,
         excludeChannelIds,
         excludeAccountIds,
         preferredAccountId,
       );
-      if (!member || !selected.routeUnit) return null;
+      if (!member || !freshSelected.routeUnit) return null;
       resolvedRouteUnitMemberTokenValue = this.resolveRouteUnitMemberTokenValue(member);
-      dispatchCandidate = this.buildRouteUnitMemberDispatchCandidate(selected, member);
+      dispatchCandidate = this.buildRouteUnitMemberDispatchCandidate(freshSelected, member);
       if (recordSelection) {
-        await this.recordRouteUnitMemberSelection(selected.routeUnit.id, member.account.id);
+        await this.recordRouteUnitMemberSelection(freshSelected.routeUnit.id, member.account.id);
       }
     }
 
@@ -4046,22 +4294,22 @@ export class TokenRouter {
         updateStableFirstObservationProgress(stableFirstRotationKey, {
           usedObservation,
           selectedSiteId: dispatchCandidate.site.id,
-          nowMs,
+          nowMs: finalNowMs,
         });
       }
-      await this.recordChannelSelection(selected.channel.id);
+      await this.recordChannelSelection(freshSelected.channel.id);
     }
 
     const actualModel = resolveActualModelForSelectedChannel(
       requestedModel,
-      match.route,
+      freshMatch.route,
       mappedModel,
-      selected.channel.sourceModel,
+      freshSelected.channel.sourceModel,
     );
 
     return {
       ...dispatchCandidate,
-      channel: selected.channel,
+      channel: freshSelected.channel,
       tokenValue,
       tokenName: dispatchCandidate.token?.name || 'default',
       actualModel,
@@ -4361,5 +4609,6 @@ export const __tokenRouterTestUtils = {
   resolveMappedModel,
   getStableFirstRotationCacheSize: () => stableFirstLastSelectedSiteByKey.size,
   rememberStableFirstSiteSelectionForKey,
+  shouldAttemptManualDispatchRecovery,
 };
 

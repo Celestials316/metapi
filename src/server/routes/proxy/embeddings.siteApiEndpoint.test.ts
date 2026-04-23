@@ -3,11 +3,14 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { config } from '../../config.js';
+import { normalizeChannelAffinityConfig, resetChannelAffinityState } from '../../services/channelAffinity.js';
 
 const fetchMock = vi.fn();
 const fetchWithObservedFirstByteMock = vi.fn();
 const getObservedResponseMetaMock = vi.fn();
 const selectChannelMock = vi.fn();
+const selectPreferredChannelMock = vi.fn();
 const recordSuccessMock = vi.fn();
 const recordFailureMock = vi.fn();
 const refreshModelsAndRebuildRoutesMock = vi.fn();
@@ -33,6 +36,7 @@ vi.mock('../../proxy-core/firstByteTimeout.js', () => ({
 vi.mock('../../services/tokenRouter.js', () => ({
   tokenRouter: {
     selectChannel: (...args: unknown[]) => selectChannelMock(...args),
+    selectPreferredChannel: (...args: unknown[]) => selectPreferredChannelMock(...args),
     recordSuccess: (...args: unknown[]) => recordSuccessMock(...args),
     recordFailure: (...args: unknown[]) => recordFailureMock(...args),
   },
@@ -67,6 +71,7 @@ describe('/v1/embeddings usage source logging', () => {
   let db: DbModule['db'];
   let schema: DbModule['schema'];
   let dataDir = '';
+  const originalChannelAffinity = config.channelAffinity;
 
   beforeAll(async () => {
     dataDir = mkdtempSync(join(tmpdir(), 'metapi-embeddings-site-api-endpoint-'));
@@ -87,6 +92,7 @@ describe('/v1/embeddings usage source logging', () => {
     fetchWithObservedFirstByteMock.mockReset();
     getObservedResponseMetaMock.mockReset();
     selectChannelMock.mockReset();
+    selectPreferredChannelMock.mockReset();
     recordSuccessMock.mockReset();
     recordFailureMock.mockReset();
     refreshModelsAndRebuildRoutesMock.mockReset();
@@ -118,11 +124,158 @@ describe('/v1/embeddings usage source logging', () => {
     await db.delete(schema.accounts).run();
     await db.delete(schema.siteApiEndpoints).run();
     await db.delete(schema.sites).run();
+
+    resetChannelAffinityState();
+    config.channelAffinity = normalizeChannelAffinityConfig(undefined);
   });
 
   afterAll(async () => {
+    resetChannelAffinityState();
+    config.channelAffinity = originalChannelAffinity;
     await app.close();
     delete process.env.DATA_DIR;
+  });
+
+  it('reuses a recorded affinity binding for repeated embeddings requests', async () => {
+    config.channelAffinity = normalizeChannelAffinityConfig({
+      enabled: true,
+      rules: [
+        {
+          name: 'embeddings-input-affinity',
+          pathRegex: ['^/v1/embeddings$'],
+          keySources: [{ type: 'body_path', path: 'input' }],
+          ttlSeconds: 600,
+        },
+      ],
+    });
+
+    const site = await db.insert(schema.sites).values({
+      name: 'affinity-site',
+      url: 'https://console.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'affinity-user',
+      accessToken: '',
+      apiToken: 'sk-affinity',
+      status: 'active',
+      checkinEnabled: false,
+      extraConfig: JSON.stringify({ credentialMode: 'apikey' }),
+    }).returning().get();
+
+    const selected = {
+      channel: { id: 11, routeId: 22 },
+      site,
+      account,
+      tokenName: 'default',
+      tokenValue: 'sk-affinity',
+      actualModel: 'text-embedding-3-large',
+    };
+    selectChannelMock.mockResolvedValue(selected);
+    selectPreferredChannelMock.mockResolvedValue(selected);
+
+    fetchMock.mockImplementation(() => Promise.resolve(new Response(JSON.stringify({
+      object: 'list',
+      data: [{ object: 'embedding', embedding: [0.1, 0.2], index: 0 }],
+      model: 'text-embedding-3-large',
+      usage: { prompt_tokens: 1, total_tokens: 1 },
+    }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    })));
+
+    const firstResponse = await app.inject({
+      method: 'POST',
+      url: '/v1/embeddings',
+      headers: { authorization: 'Bearer ***' },
+      payload: { model: 'text-embedding-3-large', input: 'affinity embedding input' },
+    });
+    const secondResponse = await app.inject({
+      method: 'POST',
+      url: '/v1/embeddings',
+      headers: { authorization: 'Bearer ***' },
+      payload: { model: 'text-embedding-3-large', input: 'affinity embedding input' },
+    });
+
+    expect(firstResponse.statusCode).toBe(200);
+    expect(secondResponse.statusCode).toBe(200);
+    expect(selectChannelMock).toHaveBeenCalledTimes(1);
+    expect(selectPreferredChannelMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not fan out to another channel when an affinity-bound embeddings request enables skipRetryOnFailure', async () => {
+    config.channelAffinity = normalizeChannelAffinityConfig({
+      enabled: true,
+      rules: [
+        {
+          name: 'embeddings-input-affinity-skip-retry',
+          pathRegex: ['^/v1/embeddings$'],
+          keySources: [{ type: 'body_path', path: 'input' }],
+          ttlSeconds: 600,
+          skipRetryOnFailure: true,
+        },
+      ],
+    });
+
+    const site = await db.insert(schema.sites).values({
+      name: 'affinity-skip-site',
+      url: 'https://console.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'affinity-skip-user',
+      accessToken: '',
+      apiToken: 'sk-affinity-skip',
+      status: 'active',
+      checkinEnabled: false,
+      extraConfig: JSON.stringify({ credentialMode: 'apikey' }),
+    }).returning().get();
+
+    const selected = {
+      channel: { id: 21, routeId: 31 },
+      site,
+      account,
+      tokenName: 'default',
+      tokenValue: 'sk-affinity-skip',
+      actualModel: 'text-embedding-3-large',
+    };
+    selectChannelMock.mockResolvedValue(selected);
+    selectPreferredChannelMock.mockResolvedValue(selected);
+
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        object: 'list',
+        data: [{ object: 'embedding', embedding: [0.1, 0.2], index: 0 }],
+        model: 'text-embedding-3-large',
+        usage: { prompt_tokens: 1, total_tokens: 1 },
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response('retryable upstream failure', { status: 503 }));
+
+    const firstResponse = await app.inject({
+      method: 'POST',
+      url: '/v1/embeddings',
+      headers: { authorization: 'Bearer ***' },
+      payload: { model: 'text-embedding-3-large', input: 'affinity embedding input skip' },
+    });
+    const secondResponse = await app.inject({
+      method: 'POST',
+      url: '/v1/embeddings',
+      headers: { authorization: 'Bearer ***' },
+      payload: { model: 'text-embedding-3-large', input: 'affinity embedding input skip' },
+    });
+
+    expect(firstResponse.statusCode).toBe(200);
+    expect(secondResponse.statusCode).toBe(503);
+    expect(selectPreferredChannelMock).toHaveBeenCalledTimes(1);
   });
 
   it('stores usage source metadata on successful embedding logs', async () => {

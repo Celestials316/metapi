@@ -1,5 +1,6 @@
 import { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { fetch } from 'undici';
+import { config } from '../../config.js';
 import { tokenRouter } from '../../services/tokenRouter.js';
 import { reportProxyAllFailed, reportTokenExpired } from '../../services/alertService.js';
 import { isTokenExpiredError } from '../../services/alertRules.js';
@@ -17,6 +18,11 @@ import {
   resolveProxyVideoTaskSite,
   saveProxyVideoTask,
 } from '../../services/proxyVideoTaskStore.js';
+import {
+  clearChannelAffinityBinding,
+  recordChannelAffinitySuccess,
+  resolveChannelAffinityRequest,
+} from '../../services/channelAffinity.js';
 import { getProxyMaxChannelRetries } from '../../services/proxyChannelRetry.js';
 import {
   buildForcedChannelUnavailableMessage,
@@ -58,16 +64,29 @@ export async function videosProxyRoute(app: FastifyInstance) {
       headers: request.headers as Record<string, unknown>,
       clientIp: request.ip,
     });
+    const downstreamPath = '/v1/videos';
+    const affinityBody = jsonBody || Object.fromEntries(multipartForm?.entries?.() || []);
+    const channelAffinity = resolveChannelAffinityRequest({
+      config: config.channelAffinity,
+      requestedModel,
+      downstreamPath,
+      headers: request.headers as Record<string, unknown>,
+      body: affinityBody,
+    });
     const excludeChannelIds: number[] = [];
     let retryCount = 0;
 
     while (retryCount <= getProxyMaxChannelRetries()) {
+      const affinityPreferredChannelId = retryCount === 0
+        ? (channelAffinity?.preferredChannelId ?? null)
+        : null;
       const selected = await selectProxyChannelForAttempt({
         requestedModel,
         downstreamPolicy,
         excludeChannelIds,
         retryCount,
         forcedChannelId,
+        affinityPreferredChannelId,
       });
 
       if (!selected) {
@@ -79,6 +98,30 @@ export async function videosProxyRoute(app: FastifyInstance) {
         return reply.code(503).send({
           error: { message: noChannelMessage, type: 'server_error' },
         });
+      }
+
+      const affinityRetryLocked = Boolean(
+        retryCount === 0
+        && affinityPreferredChannelId
+        && channelAffinity?.skipRetryOnFailure
+        && selected.channel.id === affinityPreferredChannelId
+      );
+      const canRetryCurrentSelection = () => canRetryChannelSelection(
+        retryCount,
+        forcedChannelId,
+        affinityRetryLocked,
+      );
+      const recordChannelAffinityIfSuccessful = () => recordChannelAffinitySuccess({
+        config: config.channelAffinity,
+        resolution: channelAffinity,
+        selectedChannelId: selected.channel.id,
+      });
+      if (
+        retryCount === 0
+        && affinityPreferredChannelId
+        && selected.channel.id !== affinityPreferredChannelId
+      ) {
+        clearChannelAffinityBinding(channelAffinity?.cacheKey, affinityPreferredChannelId);
       }
 
       excludeChannelIds.push(selected.channel.id);
@@ -161,6 +204,7 @@ export async function videosProxyRoute(app: FastifyInstance) {
         await recordTokenRouterEventBestEffort('record channel success', () => (
           tokenRouter.recordSuccess(selected.channel.id, latency, estimatedCost, upstreamModel, selected.account.id)
         ));
+        recordChannelAffinityIfSuccessful();
         recordDownstreamCostUsage(request, estimatedCost);
         return reply.code(upstream.status).send(rewriteVideoResponsePublicId(data, mapping.publicId));
       } catch (error: any) {
@@ -179,7 +223,7 @@ export async function videosProxyRoute(app: FastifyInstance) {
             detail: `HTTP ${status}`,
           });
         }
-        if ((status > 0 ? shouldRetryProxyRequest(status, errorText) : true) && canRetryChannelSelection(retryCount, forcedChannelId)) {
+        if ((status > 0 ? shouldRetryProxyRequest(status, errorText) : true) && canRetryCurrentSelection()) {
           retryCount += 1;
           continue;
         }

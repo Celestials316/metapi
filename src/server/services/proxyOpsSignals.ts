@@ -4,7 +4,7 @@ import type { ProxyFailureClass } from './proxyFailureTaxonomy.js';
 export type ProxyOpsRecoverySignal = {
   channelId: number;
   modelName: string;
-  source: 'cooldown' | 'active';
+  source: 'cooldown' | 'active' | 'suppressed';
   status: 'supported' | 'unsupported' | 'inconclusive' | 'skipped' | 'failed';
   latencyMs: number | null;
   reason: string;
@@ -64,7 +64,13 @@ function normalizeRecoverySignal(raw: unknown): ProxyOpsRecoverySignal | null {
   if (!isRecord(raw)) return null;
   const channelId = Number(raw.channelId);
   const modelName = String(raw.modelName || '').trim();
-  const source = raw.source === 'cooldown' ? 'cooldown' : raw.source === 'active' ? 'active' : null;
+  const source = raw.source === 'cooldown'
+    ? 'cooldown'
+    : raw.source === 'active'
+      ? 'active'
+      : raw.source === 'suppressed'
+        ? 'suppressed'
+        : null;
   const status = ['supported', 'unsupported', 'inconclusive', 'skipped', 'failed'].includes(String(raw.status || ''))
     ? String(raw.status) as ProxyOpsRecoverySignal['status']
     : null;
