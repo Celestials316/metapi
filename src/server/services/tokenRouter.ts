@@ -1069,6 +1069,7 @@ function recordSiteRuntimeFailure(siteId: number, context: SiteRuntimeFailureCon
   if (modelState) {
     applyRuntimeHealthFailure(modelState, context, nowMs);
   }
+  bumpTokenRouterRuntimeEpoch(nowMs);
   scheduleSiteRuntimeHealthPersistence();
 }
 
@@ -1078,6 +1079,7 @@ function recordSiteRuntimeSuccess(siteId: number, latencyMs: number, modelName?:
   if (modelState) {
     applyRuntimeHealthSuccess(modelState, latencyMs, nowMs);
   }
+  bumpTokenRouterRuntimeEpoch(nowMs);
   scheduleSiteRuntimeHealthPersistence();
 }
 
@@ -1093,6 +1095,7 @@ export function resetSiteRuntimeHealthState(): void {
     siteRuntimeHealthSaveTimer = null;
   }
   siteRuntimeHealthPersistInFlight = null;
+  bumpTokenRouterRuntimeEpoch();
 }
 
 export async function flushSiteRuntimeHealthPersistence(): Promise<void> {
@@ -1240,6 +1243,13 @@ let routeCacheSnapshot: RouteCacheSnapshot = {
   loadedAt: 0,
   routes: [],
 };
+let tokenRouterRuntimeEpochVersion = 0;
+let tokenRouterRuntimeEpochUpdatedAtMs = 0;
+
+function bumpTokenRouterRuntimeEpoch(nowMs = Date.now()): void {
+  tokenRouterRuntimeEpochVersion += 1;
+  tokenRouterRuntimeEpochUpdatedAtMs = nowMs;
+}
 
 const routeMatchCache = new Map<number, RouteMatchCacheSnapshot>();
 
@@ -1440,6 +1450,37 @@ export function invalidateTokenRouterCache(): void {
   stableFirstLastSelectedSiteByKey.clear();
   stableFirstObservationProgressByKey.clear();
   stableFirstObservationSiteCooldownByKey.clear();
+  bumpTokenRouterRuntimeEpoch();
+}
+
+export function getTokenRouterEpochState(): {
+  routeCacheLoadedAt: number;
+  routeCount: number;
+  routeMatchCacheCount: number;
+  siteRuntimeHealthCount: number;
+  siteModelRuntimeHealthCount: number;
+  stableFirstSelectionCount: number;
+  stableFirstObservationProgressCount: number;
+  stableFirstObservationCooldownCount: number;
+  runtimeEpochVersion: number;
+  runtimeEpochUpdatedAtMs: number;
+} {
+  let siteModelRuntimeHealthCount = 0;
+  for (const modelStates of siteModelRuntimeHealthStates.values()) {
+    siteModelRuntimeHealthCount += modelStates.size;
+  }
+  return {
+    routeCacheLoadedAt: routeCacheSnapshot.loadedAt,
+    routeCount: routeCacheSnapshot.routes.length,
+    routeMatchCacheCount: routeMatchCache.size,
+    siteRuntimeHealthCount: siteRuntimeHealthStates.size,
+    siteModelRuntimeHealthCount,
+    stableFirstSelectionCount: stableFirstLastSelectedSiteByKey.size,
+    stableFirstObservationProgressCount: stableFirstObservationProgressByKey.size,
+    stableFirstObservationCooldownCount: stableFirstObservationSiteCooldownByKey.size,
+    runtimeEpochVersion: tokenRouterRuntimeEpochVersion,
+    runtimeEpochUpdatedAtMs: tokenRouterRuntimeEpochUpdatedAtMs,
+  };
 }
 
 function isSiteDisabled(status?: string | null): boolean {

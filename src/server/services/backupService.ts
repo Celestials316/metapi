@@ -4,6 +4,11 @@ import { db, schema } from '../db/index.js';
 import { requireInsertedRowId } from '../db/insertHelpers.js';
 import { upsertSetting } from '../db/upsertSetting.js';
 import { mergeAccountExtraConfig } from './accountExtraConfig.js';
+import {
+  flushAllRuntimeStatePersistence,
+  resetAllRuntimeStateCaches,
+  warmRuntimeStateCachesForImport,
+} from './runtimeStateMaintenance.js';
 import { getOauthInfoFromAccount } from './oauth/oauthAccount.js';
 import { PLATFORM_ALIASES, detectPlatformByUrlHint } from '../../shared/platformIdentity.js';
 
@@ -212,6 +217,13 @@ interface RuntimeStateSnapshot {
   checkinLogs: CheckinLogSnapshot[];
 }
 
+type BackupRemediationEntry = {
+  code: string;
+  level: 'info' | 'warning';
+  message: string;
+  details?: Record<string, unknown>;
+};
+
 interface BackupImportResult {
   allImported: boolean;
   sections: {
@@ -228,6 +240,19 @@ interface BackupImportResult {
     ignoredSections: string[];
   };
   warnings?: string[];
+  remediationReport?: {
+    total: number;
+    entries: BackupRemediationEntry[];
+  };
+}
+
+function buildBackupRemediationReport(entries: BackupRemediationEntry[]): BackupImportResult['remediationReport'] {
+  return entries.length > 0
+    ? {
+      total: entries.length,
+      entries,
+    }
+    : undefined;
 }
 
 const EXCLUDED_SETTING_KEYS = new Set<string>([
@@ -679,6 +704,7 @@ function buildAllApiHubV2AccountsSection(data: RawBackupData): {
   section: AccountsBackupSection;
   summary: NonNullable<BackupImportResult['summary']>;
   warnings: string[];
+  remediationEntries: BackupRemediationEntry[];
 } | null {
   const accountsContainer = isRecord(data.accounts) ? data.accounts : null;
   if (!accountsContainer || !Array.isArray(accountsContainer.accounts)) return null;
@@ -722,6 +748,7 @@ function buildAllApiHubV2AccountsSection(data: RawBackupData): {
   let nextAccountId = 1;
   let nextTokenId = 1;
   const warnings: string[] = [];
+  const remediationEntries: BackupRemediationEntry[] = [];
   const ignoredSections: string[] = [];
   let importedAccounts = 0;
   let importedProfiles = 0;
@@ -766,7 +793,20 @@ function buildAllApiHubV2AccountsSection(data: RawBackupData): {
   };
 
   const addIgnoredSection = (name: string, active: boolean) => {
-    if (active && !ignoredSections.includes(name)) ignoredSections.push(name);
+    if (active && !ignoredSections.includes(name)) {
+      ignoredSections.push(name);
+      remediationEntries.push({
+        code: 'legacy_section_ignored',
+        level: 'info',
+        message: `忽略旧备份附带区块 ${name}`,
+        details: { section: name },
+      });
+    }
+  };
+
+  const pushLegacyWarning = (entry: BackupRemediationEntry) => {
+    warnings.push(entry.message);
+    remediationEntries.push(entry);
   };
 
   addIgnoredSection('accounts.bookmarks', Array.isArray(accountsContainer.bookmarks) && accountsContainer.bookmarks.length > 0);
@@ -800,7 +840,12 @@ function buildAllApiHubV2AccountsSection(data: RawBackupData): {
     if (authType === 'cookie') {
       if (!cookieSession) {
         skippedAccounts += 1;
-        warnings.push(`跳过 ALL-API-Hub 账号 ${rawAccountId}：cookieAuth.sessionCookie 缺失`);
+        pushLegacyWarning({
+          code: 'legacy_account_missing_cookie_session',
+          level: 'warning',
+          message: `跳过 ALL-API-Hub 账号 ${rawAccountId}：cookieAuth.sessionCookie 缺失`,
+          details: { legacyAccountId: rawAccountId, authType: 'cookie' },
+        });
         continue;
       }
       accessToken = cookieSession;
@@ -808,7 +853,12 @@ function buildAllApiHubV2AccountsSection(data: RawBackupData): {
     } else if (authType === 'access_token') {
       if (!accessTokenCandidate) {
         skippedAccounts += 1;
-        warnings.push(`跳过 ALL-API-Hub 账号 ${rawAccountId}：access_token 缺失`);
+        pushLegacyWarning({
+          code: 'legacy_account_missing_access_token',
+          level: 'warning',
+          message: `跳过 ALL-API-Hub 账号 ${rawAccountId}：access_token 缺失`,
+          details: { legacyAccountId: rawAccountId, authType: 'access_token' },
+        });
         continue;
       }
       if (isDirectApiPlatform) {
@@ -821,7 +871,12 @@ function buildAllApiHubV2AccountsSection(data: RawBackupData): {
       }
     } else {
       skippedAccounts += 1;
-      warnings.push(`跳过 ALL-API-Hub 账号 ${rawAccountId}：authType=${authType || 'unknown'} 不支持离线迁移`);
+      pushLegacyWarning({
+        code: 'legacy_account_unsupported_auth_type',
+        level: 'warning',
+        message: `跳过 ALL-API-Hub 账号 ${rawAccountId}：authType=${authType || 'unknown'} 不支持离线迁移`,
+        details: { legacyAccountId: rawAccountId, authType: authType || 'unknown' },
+      });
       continue;
     }
 
@@ -834,7 +889,12 @@ function buildAllApiHubV2AccountsSection(data: RawBackupData): {
     });
     if (!siteId) {
       skippedAccounts += 1;
-      warnings.push(`跳过 ALL-API-Hub 账号 ${rawAccountId}：site_url 无效`);
+      pushLegacyWarning({
+        code: 'legacy_account_invalid_site_url',
+        level: 'warning',
+        message: `跳过 ALL-API-Hub 账号 ${rawAccountId}：site_url 无效`,
+        details: { legacyAccountId: rawAccountId },
+      });
       continue;
     }
 
@@ -894,7 +954,13 @@ function buildAllApiHubV2AccountsSection(data: RawBackupData): {
     const baseUrl = normalizeOriginUrl(asString(profile.baseUrl));
     const apiKey = asString(profile.apiKey);
     if (!baseUrl || !apiKey) {
-      warnings.push(`跳过 ALL-API-Hub API 凭据 ${asString(profile.id) || asString(profile.name) || 'unknown'}：baseUrl 或 apiKey 缺失`);
+      const profileId = asString(profile.id) || asString(profile.name) || 'unknown';
+      pushLegacyWarning({
+        code: 'legacy_profile_missing_base_url_or_api_key',
+        level: 'warning',
+        message: `跳过 ALL-API-Hub API 凭据 ${profileId}：baseUrl 或 apiKey 缺失`,
+        details: { legacyProfileId: profileId },
+      });
       continue;
     }
 
@@ -955,6 +1021,7 @@ function buildAllApiHubV2AccountsSection(data: RawBackupData): {
       ignoredSections,
     },
     warnings,
+    remediationEntries,
   };
 }
 
@@ -1384,6 +1451,7 @@ async function exportPreferencesSection(): Promise<PreferencesBackupSection> {
 }
 
 export async function exportBackup(type: BackupExportType): Promise<BackupV2> {
+  await flushAllRuntimeStatePersistence();
   const now = Date.now();
   if (type === 'accounts') {
     return {
@@ -1451,21 +1519,51 @@ function coerceAccountsSection(input: unknown): AccountsBackupSection | null {
   };
 }
 
-function coercePreferencesSection(input: unknown): PreferencesBackupSection | null {
-  if (!isRecord(input)) return null;
+function coercePreferencesSectionWithMetadata(input: unknown): {
+  section: PreferencesBackupSection | null;
+  remediationEntries: BackupRemediationEntry[];
+} {
+  if (!isRecord(input)) {
+    return {
+      section: null,
+      remediationEntries: [],
+    };
+  }
   const settingsRaw = input.settings;
-  if (!Array.isArray(settingsRaw)) return null;
+  if (!Array.isArray(settingsRaw)) {
+    return {
+      section: null,
+      remediationEntries: [],
+    };
+  }
 
+  const remediationEntries: BackupRemediationEntry[] = [];
   const settings = settingsRaw
     .map((row) => {
       if (!isRecord(row)) return null;
       const key = typeof row.key === 'string' ? row.key.trim() : '';
-      if (!key || EXCLUDED_SETTING_KEYS.has(key)) return null;
+      if (!key) return null;
+      if (EXCLUDED_SETTING_KEYS.has(key)) {
+        remediationEntries.push({
+          code: 'runtime_database_setting_excluded',
+          level: 'info',
+          message: `导入时忽略环境绑定设置 ${key}`,
+          details: { key },
+        });
+        return null;
+      }
       return { key, value: row.value };
     })
     .filter((row): row is { key: string; value: unknown } => !!row);
 
-  return { settings };
+  return {
+    section: { settings },
+    remediationEntries,
+  };
+}
+
+function coercePreferencesSection(input: unknown): PreferencesBackupSection | null {
+  return coercePreferencesSectionWithMetadata(input).section;
 }
 
 function detectAccountsSection(data: RawBackupData): AccountsBackupSection | null {
@@ -1491,35 +1589,61 @@ function detectAccountsSection(data: RawBackupData): AccountsBackupSection | nul
   return null;
 }
 
-function detectPreferencesSection(data: RawBackupData): PreferencesBackupSection | null {
-  const rootMatch = coercePreferencesSection(data);
-  if (rootMatch) return rootMatch;
+function detectPreferencesSectionMetadata(data: RawBackupData): {
+  section: PreferencesBackupSection | null;
+  remediationEntries: BackupRemediationEntry[];
+} {
+  const rootMatch = coercePreferencesSectionWithMetadata(data);
+  if (rootMatch.section) return rootMatch;
 
   if ('preferences' in data) {
-    const nested = coercePreferencesSection(data.preferences);
-    if (nested) return nested;
+    const nested = coercePreferencesSectionWithMetadata(data.preferences);
+    if (nested.section) return nested;
   }
 
   if (isRecord(data.data) && 'preferences' in data.data) {
-    const legacyNested = coercePreferencesSection((data.data as Record<string, unknown>).preferences);
-    if (legacyNested) return legacyNested;
+    const legacyNested = coercePreferencesSectionWithMetadata((data.data as Record<string, unknown>).preferences);
+    if (legacyNested.section) return legacyNested;
   }
 
   const refFormat = buildPreferencesSectionFromRefBackup(data);
-  if (refFormat) return refFormat;
+  if (refFormat) {
+    return {
+      section: refFormat,
+      remediationEntries: [],
+    };
+  }
 
-  return null;
+  return {
+    section: null,
+    remediationEntries: [],
+  };
+}
+
+function detectPreferencesSection(data: RawBackupData): PreferencesBackupSection | null {
+  return detectPreferencesSectionMetadata(data).section;
 }
 
 function detectImportMetadata(data: RawBackupData): {
   summary?: BackupImportResult['summary'];
   warnings?: string[];
+  remediationReport?: BackupImportResult['remediationReport'];
 } {
   const allApiHubV2 = buildAllApiHubV2AccountsSection(data);
-  if (!allApiHubV2) return {};
+  const preferencesMetadata = detectPreferencesSectionMetadata(data);
+  const remediationEntries = [
+    ...(allApiHubV2?.remediationEntries || []),
+    ...preferencesMetadata.remediationEntries,
+  ];
+  if (!allApiHubV2) {
+    return {
+      remediationReport: buildBackupRemediationReport(remediationEntries),
+    };
+  }
   return {
     summary: allApiHubV2.summary,
     warnings: allApiHubV2.warnings.length > 0 ? allApiHubV2.warnings : undefined,
+    remediationReport: buildBackupRemediationReport(remediationEntries),
   };
 }
 
@@ -1884,6 +2008,8 @@ export async function importBackup(data: RawBackupData): Promise<BackupImportRes
     throw new Error('导入数据中没有可识别的账号或设置数据');
   }
 
+  await flushAllRuntimeStatePersistence();
+
   let accountsImported = false;
   let preferencesImported = false;
   let appliedSettings: Array<{ key: string; value: unknown }> = [];
@@ -1904,6 +2030,13 @@ export async function importBackup(data: RawBackupData): Promise<BackupImportRes
     preferencesImported = true;
   }
 
+  resetAllRuntimeStateCaches();
+  if (accountsImported && accountsSection) {
+    await warmRuntimeStateCachesForImport({
+      siteIds: accountsSection.sites.map((site) => site.id),
+    });
+  }
+
   return {
     allImported: (!accountsRequested || accountsImported) && (!preferencesRequested || preferencesImported),
     sections: {
@@ -1913,6 +2046,7 @@ export async function importBackup(data: RawBackupData): Promise<BackupImportRes
     appliedSettings,
     summary: importMetadata.summary,
     warnings: importMetadata.warnings,
+    remediationReport: importMetadata.remediationReport,
   };
 }
 

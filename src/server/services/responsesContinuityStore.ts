@@ -447,6 +447,22 @@ export function listStoredStickyChannelBindings(nowMs = Date.now()): StoredStick
     .sort((left, right) => right.updatedAtMs - left.updatedAtMs);
 }
 
+export function getResponsesContinuityEpochState(nowMs = Date.now()): {
+  sessionAnchorCount: number;
+  stickyBindingCount: number;
+  mutationVersion: number;
+  loadedAtMs: number;
+  dirty: boolean;
+} {
+  return {
+    sessionAnchorCount: listStoredSessionResponseAnchors(nowMs).length,
+    stickyBindingCount: listStoredStickyChannelBindings(nowMs).length,
+    mutationVersion: responsesContinuityMutationVersion,
+    loadedAtMs: responsesContinuityLoadedAtMs,
+    dirty: responsesContinuityDirty,
+  };
+}
+
 export function resetResponsesContinuityStore(): void {
   if (responsesContinuitySaveTimer) {
     clearTimeout(responsesContinuitySaveTimer);

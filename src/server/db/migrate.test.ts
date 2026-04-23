@@ -370,6 +370,53 @@ describe('sqlite migrate bootstrap', () => {
     sqlite.close();
   });
 
+  it('records remediation entries when backfilling missing migration records', async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'metapi-migrate-backfill-report-'));
+    process.env.DATA_DIR = dataDir;
+    vi.resetModules();
+
+    const migrateModule = await import('./migrate.js');
+    const { __migrateTestUtils } = migrateModule;
+
+    const sqlite = new Database(':memory:');
+    sqlite.exec('CREATE TABLE "__drizzle_migrations" (id integer primary key autoincrement, hash text not null, created_at numeric);');
+
+    const tempMigrationsDir = mkdtempSync(join(tmpdir(), 'metapi-migration-files-backfill-report-'));
+    mkdirSync(join(tempMigrationsDir, 'meta'), { recursive: true });
+    writeFileSync(
+      join(tempMigrationsDir, 'meta', '_journal.json'),
+      JSON.stringify({
+        entries: [
+          {
+            tag: '0007_account_token_group',
+            when: 1772577897848,
+          },
+        ],
+      }),
+    );
+    writeFileSync(
+      join(tempMigrationsDir, '0007_account_token_group.sql'),
+      'CREATE TABLE IF NOT EXISTS `account_tokens` (`id` integer PRIMARY KEY AUTOINCREMENT NOT NULL, `token_group` text);',
+    );
+
+    __migrateTestUtils.resetLastSqliteBootstrapRemediationReport();
+    const recoveredCount = __migrateTestUtils.backfillMissingRecordedMigrations(sqlite, tempMigrationsDir);
+
+    expect(recoveredCount).toBe(1);
+    expect(__migrateTestUtils.getLastSqliteBootstrapRemediationReport()).toEqual({
+      total: 1,
+      entries: [
+        expect.objectContaining({
+          code: 'missing_migration_records_backfilled',
+          level: 'warning',
+          details: expect.objectContaining({ recoveredCount: 1 }),
+        }),
+      ],
+    });
+
+    sqlite.close();
+  });
+
   it('replays missing migrations before marking a duplicate-column migration as applied', async () => {
     const dataDir = mkdtempSync(join(tmpdir(), 'metapi-migrate-partial-journal-'));
     const dbPath = join(dataDir, 'hub.db');

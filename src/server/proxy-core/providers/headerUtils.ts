@@ -1,4 +1,4 @@
-import { pbkdf2Sync, randomUUID } from 'node:crypto';
+import { createHash, pbkdf2Sync, randomUUID } from 'node:crypto';
 
 const CODEX_CLIENT_VERSION = '0.101.0';
 const CODEX_DEFAULT_USER_AGENT = 'codex_cli_rs/0.101.0 (Mac OS 26.0.1; arm64) Apple_Terminal/464';
@@ -63,6 +63,39 @@ export function uuidFromSeed(seed: string): string {
     hex.slice(16, 20),
     hex.slice(20, 32),
   ].join('-');
+}
+
+function buildCanonicalContinuityValue(value: unknown): string {
+  if (value === null) return 'null';
+  if (typeof value === 'string') return JSON.stringify(value);
+  if (typeof value === 'number') return Number.isFinite(value) ? String(value) : 'null';
+  if (typeof value === 'boolean') return value ? 'true' : 'false';
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => buildCanonicalContinuityValue(item)).join(',')}]`;
+  }
+  if (!value || typeof value !== 'object') return 'null';
+  const entries = Object.entries(value as Record<string, unknown>)
+    .filter(([key, entryValue]) => entryValue !== undefined && key !== 'previous_response_id' && key !== 'stream')
+    .sort(([left], [right]) => left.localeCompare(right));
+  return `{${entries
+    .map(([key, entryValue]) => `${JSON.stringify(key)}:${buildCanonicalContinuityValue(entryValue)}`)
+    .join(',')}}`;
+}
+
+export function buildContentContinuitySeed(input: {
+  requestedModel?: string | null;
+  downstreamPath?: string | null;
+  body?: unknown;
+}): string | null {
+  const requestedModel = String(input.requestedModel || '').trim().toLowerCase();
+  const downstreamPath = String(input.downstreamPath || '').trim().toLowerCase();
+  if (!requestedModel || !downstreamPath) return null;
+  const canonicalBody = buildCanonicalContinuityValue(input.body ?? null);
+  if (!canonicalBody || canonicalBody === 'null' || canonicalBody === '{}') return null;
+  const digest = createHash('sha256')
+    .update(`${requestedModel}\n${downstreamPath}\n${canonicalBody}`)
+    .digest('hex');
+  return `responses:sha256:${digest}`;
 }
 
 export function mergeClaudeBetaHeader(

@@ -4,6 +4,15 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { asc, eq } from 'drizzle-orm';
 
+const flushAllRuntimeStatePersistenceMock = vi.fn(async () => undefined);
+const resetAllRuntimeStateCachesMock = vi.fn();
+
+vi.mock('./runtimeStateMaintenance.js', () => ({
+  flushAllRuntimeStatePersistence: (...args: unknown[]) => flushAllRuntimeStatePersistenceMock(...args),
+  resetAllRuntimeStateCaches: (...args: unknown[]) => resetAllRuntimeStateCachesMock(...args),
+  warmRuntimeStateCachesForImport: vi.fn(async () => undefined),
+}));
+
 type DbModule = typeof import('../db/index.js');
 type BackupServiceModule = typeof import('./backupService.js');
 
@@ -27,6 +36,8 @@ describe('backupService', () => {
   });
 
   beforeEach(async () => {
+    flushAllRuntimeStatePersistenceMock.mockClear();
+    resetAllRuntimeStateCachesMock.mockClear();
     await db.delete(schema.routeChannels).run();
     await db.delete(schema.routeGroupSources).run();
     await db.delete(schema.tokenRoutes).run();
@@ -50,7 +61,25 @@ describe('backupService', () => {
     delete process.env.DATA_DIR;
   });
 
-  it('exports backup-owned config in v2.1 backups and still roundtrips core connection fields', async () => {
+  it('flushes runtime state before exporting backup snapshots and importing backup data', async () => {
+    flushAllRuntimeStatePersistenceMock.mockResolvedValue(undefined);
+    const exported = await backupService.exportBackup('preferences');
+    expect(flushAllRuntimeStatePersistenceMock).toHaveBeenCalledTimes(1);
+    expect(exported.version).toBe('2.1');
+
+    flushAllRuntimeStatePersistenceMock.mockClear();
+    const result = await backupService.importBackup({
+      version: '2.1',
+      timestamp: Date.now(),
+      type: 'preferences',
+      preferences: { settings: [] },
+    } as any);
+    expect(flushAllRuntimeStatePersistenceMock).toHaveBeenCalledTimes(1);
+    expect(resetAllRuntimeStateCachesMock).toHaveBeenCalledTimes(1);
+    expect(result.sections.preferences).toBe(true);
+  });
+
+  it('round-trips v2.1 backup payloads with config arrays and runtime restoration', async () => {
     const now = new Date().toISOString();
     const site = await db.insert(schema.sites).values({
       name: 'roundtrip-site',
@@ -356,6 +385,26 @@ describe('backupService', () => {
     expect(result.appliedSettings).toEqual([
       { key: 'routing_fallback_unit_cost', value: 0.25 },
     ]);
+    expect(result.remediationReport).toEqual({
+      total: 3,
+      entries: expect.arrayContaining([
+        expect.objectContaining({
+          code: 'runtime_database_setting_excluded',
+          level: 'info',
+          details: expect.objectContaining({ key: 'db_type' }),
+        }),
+        expect.objectContaining({
+          code: 'runtime_database_setting_excluded',
+          level: 'info',
+          details: expect.objectContaining({ key: 'db_url' }),
+        }),
+        expect.objectContaining({
+          code: 'runtime_database_setting_excluded',
+          level: 'info',
+          details: expect.objectContaining({ key: 'db_ssl' }),
+        }),
+      ]),
+    });
 
     const settingsRows = await db.select().from(schema.settings).all();
     const savedKeys = settingsRows.map((row) => row.key);
@@ -1364,6 +1413,26 @@ describe('backupService', () => {
           expect.stringContaining('skipped-empty-account'),
         ]),
       );
+      expect(result.remediationReport).toEqual(expect.objectContaining({
+        total: expect.any(Number),
+        entries: expect.arrayContaining([
+          expect.objectContaining({
+            code: 'legacy_section_ignored',
+            level: 'info',
+            details: expect.objectContaining({ section: 'accounts.bookmarks' }),
+          }),
+          expect.objectContaining({
+            code: 'legacy_account_unsupported_auth_type',
+            level: 'warning',
+            details: expect.objectContaining({ legacyAccountId: 'skipped-none-account' }),
+          }),
+          expect.objectContaining({
+            code: 'legacy_account_missing_access_token',
+            level: 'warning',
+            details: expect.objectContaining({ legacyAccountId: 'skipped-empty-account' }),
+          }),
+        ]),
+      }));
 
       const sites = await db.select().from(schema.sites).all();
       const accounts = await db.select().from(schema.accounts).all();

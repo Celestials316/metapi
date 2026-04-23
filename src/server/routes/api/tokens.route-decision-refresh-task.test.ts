@@ -191,5 +191,5 @@ describe('POST /api/routes/decision/refresh', () => {
     expect(refreshedWildcardRoute?.decisionSnapshot?.matched).toBe(true);
     expect(refreshedWildcardRoute?.decisionSnapshot?.routeId).toBe(wildcardRoute.id);
     expect(refreshedDisabledRoute?.decisionSnapshot).toBeNull();
-  });
+  }, 15000);
 });

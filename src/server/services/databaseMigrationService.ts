@@ -7,6 +7,7 @@ import {
   type RuntimeSchemaClient,
   type RuntimeSchemaDialect,
 } from '../db/runtimeSchemaBootstrap.js';
+import { flushAllRuntimeStatePersistence } from './runtimeStateMaintenance.js';
 
 export type MigrationDialect = RuntimeSchemaDialect;
 
@@ -51,6 +52,13 @@ type BackupSnapshot = {
   };
 };
 
+type DatabaseMigrationRemediationEntry = {
+  code: string;
+  level: 'info' | 'warning';
+  message: string;
+  details?: Record<string, unknown>;
+};
+
 export interface DatabaseMigrationSummary {
   dialect: MigrationDialect;
   connection: string;
@@ -77,6 +85,10 @@ export interface DatabaseMigrationSummary {
     events: number;
     settings: number;
   };
+  remediationReport: {
+    total: number;
+    entries: DatabaseMigrationRemediationEntry[];
+  };
 }
 
 type SqlClient = RuntimeSchemaClient;
@@ -89,6 +101,23 @@ interface InsertStatement {
 
 const DIALECTS: MigrationDialect[] = ['sqlite', 'mysql', 'postgres'];
 const RUNTIME_DATABASE_SETTING_KEYS = new Set(['db_type', 'db_url', 'db_ssl']);
+
+function buildDatabaseMigrationRemediationReport(snapshot: BackupSnapshot): DatabaseMigrationSummary['remediationReport'] {
+  const entries: DatabaseMigrationRemediationEntry[] = snapshot.preferences.settings
+    .filter((row) => RUNTIME_DATABASE_SETTING_KEYS.has(row.key))
+    .map((row) => ({
+      code: 'runtime_database_setting_excluded',
+      level: 'info',
+      message: `迁移时忽略环境绑定设置 ${row.key}`,
+      details: { key: row.key },
+    }));
+
+  return {
+    total: entries.length,
+    entries,
+  };
+}
+
 type SchemaContractShape = {
   tables: Record<string, {
     columns: Record<string, {
@@ -154,6 +183,7 @@ function serializeColumnValue(
 function toJsonString(value: unknown): string {
   return JSON.stringify(value ?? null);
 }
+
 
 function assertDialectUrl(dialect: MigrationDialect, connectionString: string): void {
   if (dialect === 'sqlite') return;
@@ -785,6 +815,7 @@ export async function bootstrapRuntimeDatabaseSchema(input: Pick<NormalizedDatab
 
 export async function migrateCurrentDatabase(input: DatabaseMigrationInput): Promise<DatabaseMigrationSummary> {
   const normalized = normalizeMigrationInput(input);
+  await flushAllRuntimeStatePersistence();
   const snapshot = await toBackupSnapshot();
   const client = await createClient(normalized);
 
@@ -834,8 +865,10 @@ export async function migrateCurrentDatabase(input: DatabaseMigrationInput): Pro
       settings: snapshot.preferences.settings.length,
       routeGroupSources: snapshot.accounts.routeGroupSources.length,
     },
+    remediationReport: buildDatabaseMigrationRemediationReport(snapshot),
   };
 }
+
 
 export async function testDatabaseConnection(input: DatabaseMigrationInput): Promise<{ dialect: MigrationDialect; connection: string }> {
   const normalized = normalizeMigrationInput(input);

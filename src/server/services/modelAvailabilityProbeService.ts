@@ -2,6 +2,7 @@ import { and, asc, eq } from 'drizzle-orm';
 import { config } from '../config.js';
 import { db, schema } from '../db/index.js';
 import { startBackgroundTask } from './backgroundTaskService.js';
+import { mergeAccountExtraConfigWithRetry } from './accountExtraConfig.js';
 import { isUsableAccountToken, ACCOUNT_TOKEN_VALUE_STATUS_READY } from './accountTokenService.js';
 import { probeRuntimeModel } from './runtimeModelProbe.js';
 import { recordProxyOpsModelProbeSummary } from './proxyOpsSignals.js';
@@ -65,8 +66,22 @@ export type ModelAvailabilityProbeExecutionResult = {
   };
 };
 
+type ProbeLeaseRuntime = {
+  ownerId: string;
+  startedAt: string;
+  expiresAt: string;
+};
+
+type ProbeRuntimeState = {
+  lease: ProbeLeaseRuntime | null;
+};
+
 let probeSchedulerTimer: ReturnType<typeof setInterval> | null = null;
-const probeAccountLeases = new Set<number>();
+let probeLeaseOwnerSeq = 0;
+const MODEL_PROBE_LEASE_TTL_MS = Math.max(
+  60_000,
+  config.modelAvailabilityProbeTimeoutMs * Math.max(4, config.modelAvailabilityProbeConcurrency * 2),
+);
 
 async function mapWithConcurrency<T, R>(
   items: T[],
@@ -205,15 +220,95 @@ async function loadProbeTargetsForAccount(context: ProbeAccountContext): Promise
   return targets;
 }
 
-function tryAcquireProbeAccountLease(accountId: number): boolean {
-  if (!Number.isFinite(accountId) || accountId <= 0) return false;
-  if (probeAccountLeases.has(accountId)) return false;
-  probeAccountLeases.add(accountId);
-  return true;
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
 }
 
-function releaseProbeAccountLease(accountId: number): void {
-  probeAccountLeases.delete(accountId);
+function normalizeIsoDateTime(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? new Date(parsed).toISOString() : null;
+}
+
+function readProbeRuntimeState(extraConfig: Record<string, unknown>): ProbeRuntimeState {
+  const rawRuntime = extraConfig.modelAvailabilityProbeRuntime;
+  if (!isRecord(rawRuntime)) {
+    return { lease: null };
+  }
+  const rawLease = rawRuntime.lease;
+  if (!isRecord(rawLease)) {
+    return { lease: null };
+  }
+  const ownerId = typeof rawLease.ownerId === 'string' ? rawLease.ownerId.trim() : '';
+  const startedAt = normalizeIsoDateTime(rawLease.startedAt);
+  const expiresAt = normalizeIsoDateTime(rawLease.expiresAt);
+  if (!ownerId || !startedAt || !expiresAt) {
+    return { lease: null };
+  }
+  return {
+    lease: {
+      ownerId,
+      startedAt,
+      expiresAt,
+    },
+  };
+}
+
+function isProbeLeaseActive(runtime: ProbeRuntimeState, nowMs = Date.now()): boolean {
+  if (!runtime.lease) return false;
+  const expiresAtMs = Date.parse(runtime.lease.expiresAt);
+  return Number.isFinite(expiresAtMs) && expiresAtMs > nowMs;
+}
+
+function buildProbeLeaseOwnerId(): string {
+  probeLeaseOwnerSeq += 1;
+  return `pid:${process.pid}:model-probe:${Date.now()}:${probeLeaseOwnerSeq}`;
+}
+
+async function tryAcquireProbeAccountLease(accountId: number): Promise<string | null> {
+  if (!Number.isFinite(accountId) || accountId <= 0) return null;
+  const ownerId = buildProbeLeaseOwnerId();
+  const nowMs = Date.now();
+  const startedAt = new Date(nowMs).toISOString();
+  const expiresAt = new Date(nowMs + MODEL_PROBE_LEASE_TTL_MS).toISOString();
+  return await mergeAccountExtraConfigWithRetry(accountId, async (current) => {
+    const runtime = readProbeRuntimeState(current);
+    if (isProbeLeaseActive(runtime, nowMs)) {
+      return null;
+    }
+    return {
+      patch: {
+        modelAvailabilityProbeRuntime: {
+          lease: {
+            ownerId,
+            startedAt,
+            expiresAt,
+          },
+        },
+      },
+      result: ownerId,
+    };
+  });
+}
+
+async function releaseProbeAccountLease(accountId: number, ownerId: string | null | undefined): Promise<void> {
+  if (!Number.isFinite(accountId) || accountId <= 0 || !ownerId) return;
+  try {
+    await mergeAccountExtraConfigWithRetry(accountId, async (current) => {
+      const runtime = readProbeRuntimeState(current);
+      if (!runtime.lease || runtime.lease.ownerId !== ownerId) {
+        return null;
+      }
+      return {
+        patch: {
+          modelAvailabilityProbeRuntime: {
+            lease: null,
+          },
+        },
+        result: true,
+      };
+    });
+  } catch {}
 }
 
 function buildSkippedProbeAccountResult(input: {
@@ -273,7 +368,8 @@ export async function executeModelAvailabilityProbe(input: {
     if (!context) {
       continue;
     }
-    if (!tryAcquireProbeAccountLease(accountId)) {
+    const leaseOwnerId = await tryAcquireProbeAccountLease(accountId);
+    if (!leaseOwnerId) {
       results.push(buildSkippedProbeAccountResult({
         accountId,
         siteId: context.site.id,
@@ -374,7 +470,7 @@ export async function executeModelAvailabilityProbe(input: {
         message: accountResult.message,
       });
     } finally {
-      releaseProbeAccountLease(accountId);
+      await releaseProbeAccountLease(accountId, leaseOwnerId);
     }
   }
 
@@ -456,5 +552,5 @@ export function stopModelAvailabilityProbeScheduler() {
 }
 
 export function __resetModelAvailabilityProbeExecutionStateForTests(): void {
-  probeAccountLeases.clear();
+  probeLeaseOwnerSeq = 0;
 }

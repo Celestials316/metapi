@@ -504,4 +504,110 @@ describe('modelAvailabilityProbeService', () => {
       message: 'model availability probe already running for account',
     });
   });
+
+  it('skips probing when the persisted account runtime lease is still active', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'remote-lease-site',
+      url: 'https://remote-lease.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'remote-lease-user',
+      accessToken: '',
+      apiToken: 'sk-remote-lease',
+      status: 'active',
+      extraConfig: JSON.stringify({
+        credentialMode: 'apikey',
+        modelAvailabilityProbeRuntime: {
+          lease: {
+            ownerId: 'remote-owner',
+            startedAt: new Date().toISOString(),
+            expiresAt: new Date(Date.now() + 60_000).toISOString(),
+          },
+        },
+      }),
+    }).returning().get();
+
+    await db.insert(schema.modelAvailability).values({
+      accountId: account.id,
+      modelName: 'gpt-remote-leased',
+      available: true,
+      checkedAt: '2026-03-20T00:00:00.000Z',
+    }).run();
+
+    const result = await executeModelAvailabilityProbe({
+      accountId: account.id,
+      rebuildRoutes: false,
+    });
+
+    expect(result.summary).toMatchObject({
+      totalAccounts: 1,
+      skipped: 1,
+      scanned: 0,
+    });
+    expect(result.results[0]).toMatchObject({
+      accountId: account.id,
+      siteId: site.id,
+      status: 'skipped',
+      message: 'model availability probe already running for account',
+    });
+    expect(dispatchRuntimeRequestMock).not.toHaveBeenCalled();
+  });
+
+  it('reclaims an expired persisted account runtime lease before probing', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'expired-lease-site',
+      url: 'https://expired-lease.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'expired-lease-user',
+      accessToken: '',
+      apiToken: 'sk-expired-lease',
+      status: 'active',
+      extraConfig: JSON.stringify({
+        credentialMode: 'apikey',
+        modelAvailabilityProbeRuntime: {
+          lease: {
+            ownerId: 'stale-owner',
+            startedAt: new Date(Date.now() - 120_000).toISOString(),
+            expiresAt: new Date(Date.now() - 60_000).toISOString(),
+          },
+        },
+      }),
+    }).returning().get();
+
+    await db.insert(schema.modelAvailability).values({
+      accountId: account.id,
+      modelName: 'gpt-expired-leased',
+      available: false,
+      checkedAt: '2026-03-20T00:00:00.000Z',
+    }).run();
+
+    const result = await executeModelAvailabilityProbe({
+      accountId: account.id,
+      rebuildRoutes: false,
+    });
+
+    expect(result.summary).toMatchObject({
+      totalAccounts: 1,
+      skipped: 0,
+      scanned: 1,
+      supported: 1,
+      updatedRows: 1,
+    });
+    expect(dispatchRuntimeRequestMock).toHaveBeenCalledTimes(1);
+
+    const refreshedAccount = await db.select().from(schema.accounts)
+      .where(eq(schema.accounts.id, account.id))
+      .get();
+    const parsedExtraConfig = JSON.parse(String(refreshedAccount?.extraConfig || '{}')) as Record<string, any>;
+    expect(parsedExtraConfig.modelAvailabilityProbeRuntime?.lease ?? null).toBeNull();
+  });
 });

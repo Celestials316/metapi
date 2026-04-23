@@ -67,6 +67,7 @@ type RuntimeSettings = {
   routeFailureCooldownMaxUnit: RouteCooldownUnit;
   routingWeights: RoutingWeights;
   systemProxyUrl: string;
+  systemProxyUrlMasked?: string;
   proxyErrorKeywords: string[];
   proxyEmptyContentFailEnabled: boolean;
   proxyTokenMasked?: string;
@@ -516,7 +517,8 @@ export default function Settings() {
           ...defaultWeights,
           ...(runtimeInfo.routingWeights || {}),
         },
-        systemProxyUrl: typeof runtimeInfo.systemProxyUrl === 'string' ? runtimeInfo.systemProxyUrl : '',
+        systemProxyUrl: runtimeInfo.systemProxyUrlMasked ? '' : (typeof runtimeInfo.systemProxyUrl === 'string' ? runtimeInfo.systemProxyUrl : ''),
+        systemProxyUrlMasked: runtimeInfo.systemProxyUrlMasked || '',
         proxyErrorKeywords: Array.isArray(runtimeInfo.proxyErrorKeywords)
           ? runtimeInfo.proxyErrorKeywords.filter((item: unknown) => typeof item === 'string')
           : [],
@@ -652,14 +654,15 @@ export default function Settings() {
   const saveSystemProxy = async () => {
     setSavingSystemProxy(true);
     try {
-      const res = await api.updateRuntimeSettings({
-        systemProxyUrl: runtime.systemProxyUrl.trim(),
-      });
+      const nextSystemProxyUrl = runtime.systemProxyUrl.trim();
+      const payload = runtime.systemProxyUrlMasked && !nextSystemProxyUrl
+        ? {}
+        : { systemProxyUrl: nextSystemProxyUrl };
+      const res = await api.updateRuntimeSettings(payload);
       setRuntime((prev) => ({
         ...prev,
-        systemProxyUrl: typeof res?.systemProxyUrl === 'string'
-          ? res.systemProxyUrl
-          : prev.systemProxyUrl,
+        systemProxyUrl: '',
+        systemProxyUrlMasked: res.systemProxyUrlMasked || prev.systemProxyUrlMasked || '',
       }));
       toast.success('系统代理已保存');
     } catch (err: any) {
@@ -1214,6 +1217,11 @@ export default function Settings() {
             placeholder="系统代理 URL（可选，如 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080）"
             style={{ ...inputStyle, fontFamily: 'var(--font-mono)', marginBottom: 10 }}
           />
+          {!runtime.systemProxyUrl && runtime.systemProxyUrlMasked ? (
+            <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 10 }}>
+              已配置：{runtime.systemProxyUrlMasked}；留空保存会保持不变，输入新代理 URL 可覆盖。
+            </div>
+          ) : null}
           <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
             <button onClick={saveSystemProxy} disabled={savingSystemProxy} className="btn btn-primary">
               {savingSystemProxy ? <><span className="spinner spinner-sm" style={{ borderTopColor: 'white', borderColor: 'rgba(255,255,255,0.3)' }} /> 保存中...</> : '保存系统代理'}

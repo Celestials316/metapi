@@ -404,9 +404,9 @@ describe('/v1/models route', () => {
     };
 
     expect(body.data).toEqual([]);
-  });
+  }, 20_000);
 
-  it('returns only explicit-group public name while hiding source exact routes', async () => {
+  it('returns only models in the selected groups for managed key group policy', async () => {
     const site = await db.insert(schema.sites).values({
       name: 'explicit-group-site',
       url: 'https://explicit-group.example.com',

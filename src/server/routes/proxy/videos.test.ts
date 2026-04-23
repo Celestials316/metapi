@@ -19,6 +19,7 @@ const getProxyVideoTaskByPublicIdMock = vi.fn();
 const deleteProxyVideoTaskByPublicIdMock = vi.fn();
 const refreshProxyVideoTaskSnapshotMock = vi.fn();
 const resolveProxyVideoTaskSiteMock = vi.fn();
+const resolveProxyVideoTaskCredentialMock = vi.fn();
 let siteApiEndpointRows: Array<Record<string, unknown>> = [];
 
 vi.mock('undici', async () => {
@@ -68,6 +69,7 @@ vi.mock('../../services/proxyVideoTaskStore.js', () => ({
   deleteProxyVideoTaskByPublicId: (...args: unknown[]) => deleteProxyVideoTaskByPublicIdMock(...args),
   refreshProxyVideoTaskSnapshot: (...args: unknown[]) => refreshProxyVideoTaskSnapshotMock(...args),
   resolveProxyVideoTaskSite: (...args: unknown[]) => resolveProxyVideoTaskSiteMock(...args),
+  resolveProxyVideoTaskCredential: (...args: unknown[]) => resolveProxyVideoTaskCredentialMock(...args),
 }));
 
 vi.mock('../../db/index.js', () => ({
@@ -140,6 +142,7 @@ describe('/v1/videos routes', () => {
     deleteProxyVideoTaskByPublicIdMock.mockReset();
     refreshProxyVideoTaskSnapshotMock.mockReset();
     resolveProxyVideoTaskSiteMock.mockReset();
+    resolveProxyVideoTaskCredentialMock.mockReset();
     siteApiEndpointRows = [];
     shouldRetryProxyRequestMock.mockReturnValue(false);
     resetChannelAffinityState();
@@ -442,6 +445,47 @@ describe('/v1/videos routes', () => {
       object: 'video',
       status: 'running',
     });
+  });
+
+  it('uses the current resolved credential instead of the stored task token when polling a mapped video task', async () => {
+    resolveProxyVideoTaskSiteMock.mockResolvedValue(null);
+    getProxyVideoTaskByPublicIdMock.mockResolvedValue({
+      publicId: 'vid_local_credential',
+      upstreamVideoId: 'vid_upstream_credential',
+      siteUrl: 'https://upstream.example.com',
+      tokenValue: 'sk-stored-legacy',
+      requestedModel: 'sora-2',
+      actualModel: 'sora-2',
+      channelId: 11,
+      accountId: 33,
+      statusSnapshot: null,
+      upstreamResponseMeta: null,
+      lastUpstreamStatus: null,
+      lastPolledAt: null,
+    });
+    resolveProxyVideoTaskCredentialMock.mockResolvedValue('sk-current-runtime');
+    fetchMock.mockImplementation(async (_url: string, init?: RequestInit) => {
+      expect((init?.headers as Record<string, string>)?.Authorization).toBe('Bearer sk-current-runtime');
+      return new Response(JSON.stringify({
+        id: 'vid_upstream_credential',
+        object: 'video',
+        status: 'processing',
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/v1/videos/vid_local_credential',
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(resolveProxyVideoTaskCredentialMock).toHaveBeenCalledWith(33);
+    expect(refreshProxyVideoTaskSnapshotMock).toHaveBeenCalledWith('vid_local_credential', expect.objectContaining({
+      lastUpstreamStatus: 200,
+    }));
   });
 
   it('re-resolves account-backed video tasks through the site api endpoint pool on GET', async () => {

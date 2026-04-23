@@ -34,6 +34,18 @@ type RecoveryMigration = RecoveryMigrationRecord & {
   statements: string[];
 };
 
+type SqliteBootstrapRemediationEntry = {
+  code: string;
+  level: 'info' | 'warning';
+  message: string;
+  details?: Record<string, unknown>;
+};
+
+type SqliteBootstrapRemediationReport = {
+  total: number;
+  entries: SqliteBootstrapRemediationEntry[];
+};
+
 type SqliteMigrationRecoveryLoopInput = {
   runMigrate: () => void;
   recoverDuplicateColumnMigrationError: (error: unknown) => DuplicateColumnRecoveryResult | null;
@@ -51,6 +63,7 @@ type LegacySiteRow = {
 
 const VERIFIED_BOOTSTRAP_TAG = '0012_account_token_value_status';
 const SQLITE_MIGRATION_RECOVERY_RETRY_BUDGET = 64;
+let lastSqliteBootstrapRemediationEntries: SqliteBootstrapRemediationEntry[] = [];
 const VERIFIED_SCHEMA_MARKERS: SchemaMarker[] = [
   { table: 'sites' },
   { table: 'settings' },
@@ -84,6 +97,23 @@ const VERIFIED_SCHEMA_MARKERS: SchemaMarker[] = [
   { table: 'proxy_logs', column: 'is_stream' },
   { table: 'proxy_logs', column: 'first_byte_latency_ms' },
 ];
+
+function resetLastSqliteBootstrapRemediationReport(): void {
+  lastSqliteBootstrapRemediationEntries = [];
+}
+
+function recordSqliteBootstrapRemediation(entry: SqliteBootstrapRemediationEntry): void {
+  lastSqliteBootstrapRemediationEntries.push(entry);
+}
+
+function getLastSqliteBootstrapRemediationReport(): SqliteBootstrapRemediationReport | undefined {
+  return lastSqliteBootstrapRemediationEntries.length > 0
+    ? {
+      total: lastSqliteBootstrapRemediationEntries.length,
+      entries: [...lastSqliteBootstrapRemediationEntries],
+    }
+    : undefined;
+}
 
 
 function resolveSqliteDbPath(): string {
@@ -435,6 +465,12 @@ function backfillMissingRecordedMigrations(sqlite: Database.Database, migrations
 
   if (recoveredCount > 0) {
     console.warn(`[db] Backfilled ${recoveredCount} missing drizzle migration record(s).`);
+    recordSqliteBootstrapRemediation({
+      code: 'missing_migration_records_backfilled',
+      level: 'warning',
+      message: `[db] Backfilled ${recoveredCount} missing drizzle migration record(s).`,
+      details: { recoveredCount },
+    });
   }
 
   return recoveredCount;
@@ -466,6 +502,12 @@ function recoverDuplicateColumnMigrationError(
   const recoveredCount = recoverMigrationSequence(sqlite, migrationsFolder, matchedMigration.tag);
   if (recoveredCount > 0) {
     console.warn(`[db] Recovered duplicate-column migration sequence through ${matchedMigration.tag}.`);
+    recordSqliteBootstrapRemediation({
+      code: 'duplicate_column_migration_recovered',
+      level: 'warning',
+      message: `[db] Recovered duplicate-column migration sequence through ${matchedMigration.tag}.`,
+      details: { tag: matchedMigration.tag, recoveredCount },
+    });
   }
   return {
     tag: matchedMigration.tag,
@@ -630,6 +672,12 @@ function deduplicateLegacySitesForUniqueIndex(sqlite: Database.Database): boolea
   transaction();
   if (siteIdMapping.size > 0) {
     console.warn(`[db] Deduplicated ${siteIdMapping.size} legacy site entries before applying sites_platform_url_unique.`);
+    recordSqliteBootstrapRemediation({
+      code: 'legacy_duplicate_sites_deduplicated',
+      level: 'warning',
+      message: `[db] Deduplicated ${siteIdMapping.size} legacy site entries before applying sites_platform_url_unique.`,
+      details: { deduplicatedSiteCount: siteIdMapping.size },
+    });
   }
   return siteIdMapping.size > 0;
 }
@@ -647,7 +695,10 @@ export const __migrateTestUtils = {
   tryRecoverDuplicateColumnMigrationError,
   isSitesPlatformUrlUniqueConflictError,
   deduplicateLegacySitesForUniqueIndex,
+  backfillMissingRecordedMigrations,
   runSqliteMigrationRecoveryLoop,
+  getLastSqliteBootstrapRemediationReport,
+  resetLastSqliteBootstrapRemediationReport,
   sqliteMigrationRecoveryRetryBudget: SQLITE_MIGRATION_RECOVERY_RETRY_BUDGET,
 };
 
@@ -675,10 +726,20 @@ function bootstrapLegacyDrizzleMigrations(sqlite: Database.Database, migrationsF
 
   applyBootstrap(records);
   console.log('[db] Bootstrapped drizzle migration journal for existing SQLite schema.');
+  recordSqliteBootstrapRemediation({
+    code: 'legacy_migration_journal_bootstrapped',
+    level: 'info',
+    message: '[db] Bootstrapped drizzle migration journal for existing SQLite schema.',
+    details: {
+      recordCount: records.length,
+      throughTag: VERIFIED_BOOTSTRAP_TAG,
+    },
+  });
   return true;
 }
 
 export function runSqliteMigrations(): void {
+  resetLastSqliteBootstrapRemediationReport();
   const dbPath = resolveSqliteDbPath();
   const migrationsFolder = resolveMigrationsFolder();
   if (dbPath !== ':memory:') {

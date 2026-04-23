@@ -117,6 +117,73 @@ describe('NotificationSettings', () => {
     }
   });
 
+  it('loads masked webhook and bark urls without resubmitting them when left unchanged', async () => {
+    apiMock.getRuntimeSettings.mockResolvedValue({
+      webhookUrl: '',
+      barkUrl: '',
+      webhookUrlMasked: 'https://notify.example.com/****',
+      barkUrlMasked: 'https://api.day.app/****',
+      webhookEnabled: true,
+      barkEnabled: true,
+      serverChanEnabled: false,
+      telegramEnabled: true,
+      telegramApiBaseUrl: 'https://api.telegram.org',
+      telegramChatId: '-1001234567890',
+      telegramBotTokenMasked: '1234****token',
+      telegramUseSystemProxy: false,
+      smtpEnabled: false,
+      smtpHost: '',
+      smtpPort: 587,
+      smtpSecure: false,
+      smtpUser: '',
+      smtpFrom: '',
+      smtpTo: '',
+      notifyCooldownSec: 300,
+    });
+    apiMock.updateRuntimeSettings.mockResolvedValue({
+      success: true,
+      webhookUrlMasked: 'https://notify.example.com/****',
+      barkUrlMasked: 'https://api.day.app/****',
+      telegramBotTokenMasked: '1234****token',
+    });
+
+    let root!: WebTestRenderer;
+    try {
+      await act(async () => {
+        root = create(
+          <MemoryRouter>
+            <ToastProvider>
+              <NotificationSettings />
+            </ToastProvider>
+          </MemoryRouter>,
+        );
+      });
+      await flushMicrotasks();
+
+      expect(collectText(root.root)).toContain('已配置：https://notify.example.com/****');
+      expect(collectText(root.root)).toContain('已配置：https://api.day.app/****');
+
+      const saveButton = root.root.find((node) => (
+        node.type === 'button'
+        && typeof node.props.onClick === 'function'
+        && collectText(node).includes('保存通知设置')
+      ));
+      await act(async () => {
+        saveButton.props.onClick();
+      });
+      await flushMicrotasks();
+
+      expect(apiMock.updateRuntimeSettings).toHaveBeenCalledWith(expect.not.objectContaining({
+        webhookUrl: expect.anything(),
+      }));
+      expect(apiMock.updateRuntimeSettings).toHaveBeenCalledWith(expect.not.objectContaining({
+        barkUrl: expect.anything(),
+      }));
+    } finally {
+      root?.unmount();
+    }
+  });
+
   it('loads and saves telegram use system proxy toggle', async () => {
     apiMock.getRuntimeSettings.mockResolvedValue({
       webhookUrl: '',

@@ -82,6 +82,13 @@ describe('settings and auth events', () => {
       successCount: 0,
       group: {},
     };
+    (config as any).channelAffinity = {
+      enabled: false,
+      switchOnSuccess: true,
+      maxEntries: 100000,
+      defaultTtlSeconds: 3600,
+      rules: [],
+    };
     (config as any).proxyFirstByteTimeoutSec = 0;
     (config as any).tokenRouterFailureCooldownMaxSec = 30 * 24 * 60 * 60;
     (config as any).disableCrossProtocolFallback = false;
@@ -96,6 +103,42 @@ describe('settings and auth events', () => {
   afterAll(async () => {
     await app.close();
     delete process.env.DATA_DIR;
+  });
+
+  it('masks configured notification and system proxy urls in runtime settings responses and ignores unchanged masked submissions', async () => {
+    config.webhookUrl = 'https://notify.example.com/path/secret-token';
+    config.barkUrl = 'https://api.day.app/device-token';
+    config.systemProxyUrl = 'http://alice:secret@proxy.example.com:7890';
+
+    const runtimeResponse = await app.inject({
+      method: 'GET',
+      url: '/api/settings/runtime',
+    });
+
+    expect(runtimeResponse.statusCode).toBe(200);
+    expect(runtimeResponse.json()).toMatchObject({
+      webhookUrl: '',
+      barkUrl: '',
+      systemProxyUrl: '',
+      webhookUrlMasked: 'https://notify.example.com/****',
+      barkUrlMasked: 'https://api.day.app/****',
+      systemProxyUrlMasked: 'http://proxy.example.com:7890/****',
+    });
+
+    const updateResponse = await app.inject({
+      method: 'PUT',
+      url: '/api/settings/runtime',
+      payload: {
+        webhookUrl: 'https://notify.example.com/****',
+        barkUrl: 'https://api.day.app/****',
+        systemProxyUrl: 'http://proxy.example.com:7890/****',
+      },
+    });
+
+    expect(updateResponse.statusCode).toBe(200);
+    expect(config.webhookUrl).toBe('https://notify.example.com/path/secret-token');
+    expect(config.barkUrl).toBe('https://api.day.app/device-token');
+    expect(config.systemProxyUrl).toBe('http://alice:secret@proxy.example.com:7890');
   });
 
   it('appends event when runtime settings are updated', async () => {
@@ -310,6 +353,45 @@ describe('settings and auth events', () => {
   });
 
   it('applies payload rules, downstream rate-limit, and channel affinity immediately after backup import', async () => {
+    const { normalizeChannelAffinityConfig, recordChannelAffinitySuccess, resolveChannelAffinityRequest } = await import('../../services/channelAffinity.js');
+
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gpt-5.4',
+      enabled: true,
+      decisionSnapshot: JSON.stringify({ channelIds: [11] }),
+      decisionRefreshedAt: '2026-04-23T10:00:00.000Z',
+    }).returning().get();
+
+    const seededAffinity = normalizeChannelAffinityConfig({
+      enabled: true,
+      rules: [{
+        name: 'responses-prompt-cache',
+        pathRegex: ['^/v1/responses$'],
+        modelRegex: ['^gpt-5'],
+        keySources: [{ type: 'body_path', path: 'prompt_cache_key' }],
+      }],
+    });
+    (config as any).channelAffinity = seededAffinity;
+    const seededResolution = resolveChannelAffinityRequest({
+      config: seededAffinity,
+      requestedModel: 'gpt-5.4',
+      downstreamPath: '/v1/responses',
+      headers: {},
+      body: { prompt_cache_key: 'import-affinity-seed' },
+    });
+    recordChannelAffinitySuccess({
+      config: seededAffinity,
+      resolution: seededResolution,
+      selectedChannelId: 11,
+    });
+    expect(resolveChannelAffinityRequest({
+      config: seededAffinity,
+      requestedModel: 'gpt-5.4',
+      downstreamPath: '/v1/responses',
+      headers: {},
+      body: { prompt_cache_key: 'import-affinity-seed' },
+    })?.preferredChannelId).toBe(11);
+
     const importResponse = await app.inject({
       method: 'POST',
       url: '/api/settings/backup/import',
@@ -319,6 +401,16 @@ describe('settings and auth events', () => {
           type: 'preferences',
           preferences: {
             settings: [
+              {
+                key: 'routing_weights',
+                value: {
+                  baseWeightFactor: 0.45,
+                  valueScoreFactor: 0.55,
+                  costWeight: 1,
+                  balanceWeight: 0.2,
+                  usageWeight: 0.1,
+                },
+              },
               {
                 key: 'payload_rules',
                 value: {
@@ -403,6 +495,94 @@ describe('settings and auth events', () => {
         skipRetryOnFailure: true,
       }],
     });
+
+    const refreshedRoute = await db.select().from(schema.tokenRoutes).where(eq(schema.tokenRoutes.id, route.id)).get();
+    expect(refreshedRoute?.decisionSnapshot).toBeNull();
+    expect(refreshedRoute?.decisionRefreshedAt).toBeNull();
+    expect(resolveChannelAffinityRequest({
+      config: (config as any).channelAffinity,
+      requestedModel: 'gpt-5.4',
+      downstreamPath: '/v1/responses',
+      headers: {},
+      body: { prompt_cache_key: 'import-affinity-seed' },
+    })?.preferredChannelId).toBeNull();
+  });
+
+  it('clears route decision snapshots and affinity bindings when routing-derived runtime settings change', async () => {
+    const { normalizeChannelAffinityConfig, recordChannelAffinitySuccess, resolveChannelAffinityRequest } = await import('../../services/channelAffinity.js');
+
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gpt-5.4',
+      enabled: true,
+      decisionSnapshot: JSON.stringify({ channelIds: [12] }),
+      decisionRefreshedAt: '2026-04-23T11:00:00.000Z',
+    }).returning().get();
+
+    const seededAffinity = normalizeChannelAffinityConfig({
+      enabled: true,
+      rules: [{
+        name: 'responses-prompt-cache',
+        pathRegex: ['^/v1/responses$'],
+        modelRegex: ['^gpt-5'],
+        keySources: [{ type: 'body_path', path: 'prompt_cache_key' }],
+      }],
+    });
+    (config as any).channelAffinity = seededAffinity;
+    const seededResolution = resolveChannelAffinityRequest({
+      config: seededAffinity,
+      requestedModel: 'gpt-5.4',
+      downstreamPath: '/v1/responses',
+      headers: {},
+      body: { prompt_cache_key: 'runtime-affinity-seed' },
+    });
+    recordChannelAffinitySuccess({
+      config: seededAffinity,
+      resolution: seededResolution,
+      selectedChannelId: 12,
+    });
+    expect(resolveChannelAffinityRequest({
+      config: seededAffinity,
+      requestedModel: 'gpt-5.4',
+      downstreamPath: '/v1/responses',
+      headers: {},
+      body: { prompt_cache_key: 'runtime-affinity-seed' },
+    })?.preferredChannelId).toBe(12);
+
+    const updateResponse = await app.inject({
+      method: 'PUT',
+      url: '/api/settings/runtime',
+      payload: {
+        routingWeights: {
+          baseWeightFactor: 0.5,
+          valueScoreFactor: 0.5,
+          costWeight: 1,
+          balanceWeight: 0.1,
+          usageWeight: 0.1,
+        },
+        channelAffinity: {
+          enabled: true,
+          rules: [{
+            name: 'responses-prompt-cache',
+            pathRegex: ['^/v1/responses$'],
+            modelRegex: ['^gpt-5'],
+            keySources: [{ type: 'body_path', path: 'prompt_cache_key' }],
+            ttlSeconds: 900,
+          }],
+        },
+      },
+    });
+
+    expect(updateResponse.statusCode).toBe(200);
+    const refreshedRoute = await db.select().from(schema.tokenRoutes).where(eq(schema.tokenRoutes.id, route.id)).get();
+    expect(refreshedRoute?.decisionSnapshot).toBeNull();
+    expect(refreshedRoute?.decisionRefreshedAt).toBeNull();
+    expect(resolveChannelAffinityRequest({
+      config: (config as any).channelAffinity,
+      requestedModel: 'gpt-5.4',
+      downstreamPath: '/v1/responses',
+      headers: {},
+      body: { prompt_cache_key: 'runtime-affinity-seed' },
+    })?.preferredChannelId).toBeNull();
   });
 
   it('persists proxy debug runtime settings from runtime settings', async () => {
@@ -950,7 +1130,7 @@ describe('settings and auth events', () => {
     expect(runtime.disableCrossProtocolFallback).toBe(true);
   });
 
-  it('persists and returns system proxy url from runtime settings', async () => {
+  it('persists and returns masked system proxy url from runtime settings', async () => {
     const updateResponse = await app.inject({
       method: 'PUT',
       url: '/api/settings/runtime',
@@ -960,8 +1140,9 @@ describe('settings and auth events', () => {
     });
 
     expect(updateResponse.statusCode).toBe(200);
-    const updated = updateResponse.json() as { systemProxyUrl?: string };
-    expect(updated.systemProxyUrl).toBe('http://127.0.0.1:7890');
+    const updated = updateResponse.json() as { systemProxyUrl?: string; systemProxyUrlMasked?: string };
+    expect(updated.systemProxyUrl).toBe('');
+    expect(updated.systemProxyUrlMasked).toBe('http://127.0.0.1:7890/****');
     expect(config.systemProxyUrl).toBe('http://127.0.0.1:7890');
 
     const saved = await db.select().from(schema.settings).where(eq(schema.settings.key, 'system_proxy_url')).get();
@@ -973,8 +1154,9 @@ describe('settings and auth events', () => {
       url: '/api/settings/runtime',
     });
     expect(getResponse.statusCode).toBe(200);
-    const runtime = getResponse.json() as { systemProxyUrl?: string };
-    expect(runtime.systemProxyUrl).toBe('http://127.0.0.1:7890');
+    const runtime = getResponse.json() as { systemProxyUrl?: string; systemProxyUrlMasked?: string };
+    expect(runtime.systemProxyUrl).toBe('');
+    expect(runtime.systemProxyUrlMasked).toBe('http://127.0.0.1:7890/****');
   });
 
   it('splits proxy error keywords on newlines and commas when saving runtime settings', async () => {

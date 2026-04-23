@@ -528,6 +528,91 @@ describe('responses proxy codex oauth refresh', () => {
     expect(forwardedBody.prompt_cache_key).toBe('codex-cache-123');
   });
 
+  it('reuses a sticky channel for repeated codex responses requests even without an explicit downstream session', async () => {
+    const selected = {
+      channel: { id: 11, routeId: 22 },
+      site: { name: 'codex-site', url: 'https://chatgpt.com/backend-api/codex', platform: 'codex' },
+      account: {
+        id: 33,
+        username: 'codex-user-a@example.com',
+        extraConfig: JSON.stringify({
+          credentialMode: 'session',
+          oauth: {
+            provider: 'codex',
+            accountId: 'chatgpt-account-123',
+            email: 'codex-user-a@example.com',
+            planType: 'plus',
+          },
+        }),
+      },
+      tokenName: 'default',
+      tokenValue: 'expired-access-token',
+      actualModel: 'gpt-5.2-codex',
+    };
+
+    selectChannelMock.mockReturnValue(selected);
+    selectPreferredChannelMock.mockReturnValue(selected);
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        id: 'resp_codex_seed_repeat_1',
+        object: 'response',
+        model: 'gpt-5.2-codex',
+        status: 'completed',
+        output_text: 'seed sticky continuity without session',
+        usage: { input_tokens: 4, output_tokens: 2, total_tokens: 6 },
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        id: 'resp_codex_seed_repeat_2',
+        object: 'response',
+        model: 'gpt-5.2-codex',
+        status: 'completed',
+        output_text: 'second turn reused sticky channel without session',
+        usage: { input_tokens: 4, output_tokens: 2, total_tokens: 6 },
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }));
+
+    const payload = {
+      model: 'gpt-5.2-codex',
+      input: 'repeat this exact codex request without session',
+    };
+
+    const firstResponse = await app.inject({
+      method: 'POST',
+      url: '/v1/responses',
+      headers: {
+        'user-agent': 'CodexClient/1.0',
+      },
+      payload,
+    });
+    expect(firstResponse.statusCode).toBe(200);
+    expect(selectPreferredChannelMock).not.toHaveBeenCalled();
+
+    const secondResponse = await app.inject({
+      method: 'POST',
+      url: '/v1/responses',
+      headers: {
+        'user-agent': 'CodexClient/1.0',
+      },
+      payload,
+    });
+
+    expect(secondResponse.statusCode).toBe(200);
+    expect(selectPreferredChannelMock).toHaveBeenCalledTimes(1);
+    expect(selectPreferredChannelMock.mock.calls[0]?.[0]).toBe('gpt-5.2-codex');
+    expect(selectPreferredChannelMock.mock.calls[0]?.[1]).toBe(11);
+
+    const [, firstOptions] = fetchMock.mock.calls[0] as [string, any];
+    const [, secondOptions] = fetchMock.mock.calls[1] as [string, any];
+    expect(String(firstOptions.headers.Session_id || firstOptions.headers.session_id || '')).toMatch(/^[0-9a-f-]{36}$/i);
+    expect(String(secondOptions.headers.Session_id || secondOptions.headers.session_id || '')).toMatch(/^[0-9a-f-]{36}$/i);
+    expect(secondOptions.headers.Conversation_id || secondOptions.headers.conversation_id).toBeUndefined();
+  });
+
   it('reuses a recorded channel-affinity binding for repeated prompt_cache_key requests', async () => {
     config.channelAffinity = normalizeChannelAffinityConfig({
       enabled: true,

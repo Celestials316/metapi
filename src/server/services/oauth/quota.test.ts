@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildQuotaSnapshotFromOauthInfo,
+  CODEX_QUOTA_PROBE_MODEL,
   parseCodexQuotaResetHint,
 } from './quota.js';
 
@@ -88,6 +89,10 @@ describe('oauth quota snapshot helpers', () => {
         },
       },
     });
+  });
+
+  it('uses the current codex quota probe model', () => {
+    expect(CODEX_QUOTA_PROBE_MODEL).toBe('gpt-5.2-codex');
   });
 
   it('parses codex usage_limit_reached reset hints', () => {

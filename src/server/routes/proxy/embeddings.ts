@@ -20,6 +20,7 @@ import { insertProxyLog } from '../../services/proxyLogStore.js';
 import { fetchWithObservedFirstByte, getObservedResponseMeta } from '../../proxy-core/firstByteTimeout.js';
 import { getProxyMaxChannelRetries } from '../../services/proxyChannelRetry.js';
 import { runWithSiteApiEndpointPool, SiteApiEndpointRequestError } from '../../services/siteApiEndpointService.js';
+import { readSiteApiEndpointResponseText } from './upstreamResponseBody.js';
 import {
   clearChannelAffinityBinding,
   recordChannelAffinitySuccess,
@@ -135,19 +136,9 @@ export async function embeddingsProxyRoute(app: FastifyInstance) {
           );
           const observedFirstByteLatencyMs = getObservedResponseMeta(response)?.firstByteLatencyMs ?? null;
           const status = response.status;
-          let responseText = '';
-          try {
-            responseText = await response.text();
-          } catch (error) {
-            if (!response.ok) {
-              throw new SiteApiEndpointRequestError('unknown error', {
-                status,
-                firstByteLatencyMs: observedFirstByteLatencyMs,
-                cause: error,
-              });
-            }
-            throw error;
-          }
+          const responseText = await readSiteApiEndpointResponseText(response, {
+            firstByteLatencyMs: observedFirstByteLatencyMs,
+          });
           if (!response.ok) {
             throw new SiteApiEndpointRequestError(responseText || 'unknown error', {
               status,

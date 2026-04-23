@@ -459,4 +459,25 @@ describe('executeEndpointFlow', () => {
       expect(result.rawErrText).toContain('provider overloaded');
     }
   });
+
+  it('returns an explicit too-large error instead of falling back to unknown error when reading the upstream body exceeds the limit', async () => {
+    fetchMock.mockResolvedValueOnce(toUndiciResponse(new Response('abcdefghijk', {
+      status: 502,
+      headers: { 'content-type': 'text/plain; charset=utf-8' },
+    })));
+
+    const result = await executeEndpointFlow({
+      siteUrl: 'https://example.com',
+      endpointCandidates: ['responses'],
+      buildRequest: () => requestFor('/v1/responses'),
+      upstreamResponseBodyLimitBytes: 8,
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.status).toBe(502);
+      expect(result.errText).toContain('Upstream response too large');
+      expect(result.rawErrText).toBe('Upstream response too large');
+    }
+  });
 });

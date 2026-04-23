@@ -71,6 +71,13 @@ const DEFAULT_CHANNEL_AFFINITY_CONFIG: ChannelAffinityConfig = {
 };
 
 const channelAffinityCache = new Map<string, ChannelAffinityCacheEntry>();
+let channelAffinityMutationVersion = 0;
+let channelAffinityLastUpdatedAtMs = 0;
+
+function bumpChannelAffinityEpoch(nowMs = Date.now()): void {
+  channelAffinityMutationVersion += 1;
+  channelAffinityLastUpdatedAtMs = nowMs;
+}
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
@@ -293,6 +300,7 @@ function pruneChannelAffinityCache(maxEntries: number): void {
 
 export function resetChannelAffinityState(): void {
   channelAffinityCache.clear();
+  bumpChannelAffinityEpoch();
 }
 
 export function clearChannelAffinityBinding(cacheKey?: string | null, expectedChannelId?: number | null): void {
@@ -305,6 +313,7 @@ export function clearChannelAffinityBinding(cacheKey?: string | null, expectedCh
     return;
   }
   channelAffinityCache.delete(normalizedCacheKey);
+  bumpChannelAffinityEpoch();
 }
 
 export function listChannelAffinityBindings(nowMs = Date.now()): ChannelAffinityBindingSnapshot[] {
@@ -324,6 +333,18 @@ export function listChannelAffinityBindings(nowMs = Date.now()): ChannelAffinity
   return snapshots.sort((left, right) => right.updatedAtMs - left.updatedAtMs);
 }
 
+export function getChannelAffinityEpochState(nowMs = Date.now()): {
+  bindingCount: number;
+  mutationVersion: number;
+  lastUpdatedAtMs: number;
+} {
+  return {
+    bindingCount: listChannelAffinityBindings(nowMs).length,
+    mutationVersion: channelAffinityMutationVersion,
+    lastUpdatedAtMs: channelAffinityLastUpdatedAtMs,
+  };
+}
+
 export function clearChannelAffinityBindingsByChannelIds(channelIds: number[]): number {
   const normalizedChannelIds = new Set(
     (Array.isArray(channelIds) ? channelIds : [])
@@ -336,6 +357,9 @@ export function clearChannelAffinityBindingsByChannelIds(channelIds: number[]): 
     if (!normalizedChannelIds.has(entry.channelId)) continue;
     channelAffinityCache.delete(cacheKey);
     cleared += 1;
+  }
+  if (cleared > 0) {
+    bumpChannelAffinityEpoch();
   }
   return cleared;
 }
@@ -392,9 +416,11 @@ export function recordChannelAffinitySuccess(input: {
   }
 
   pruneChannelAffinityCache(config.maxEntries);
+  const nowMs = Date.now();
   channelAffinityCache.set(resolution.cacheKey, {
     channelId: selectedChannelId,
-    expiresAtMs: Date.now() + (Math.max(1, resolution.ttlSeconds) * 1000),
-    updatedAtMs: Date.now(),
+    expiresAtMs: nowMs + (Math.max(1, resolution.ttlSeconds) * 1000),
+    updatedAtMs: nowMs,
   });
+  bumpChannelAffinityEpoch(nowMs);
 }

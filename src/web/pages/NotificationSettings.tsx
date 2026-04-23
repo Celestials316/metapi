@@ -6,6 +6,8 @@ import { tr } from '../i18n.js';
 type RuntimeSettings = {
     webhookUrl: string;
     barkUrl: string;
+    webhookUrlMasked?: string;
+    barkUrlMasked?: string;
     webhookEnabled: boolean;
     barkEnabled: boolean;
     serverChanEnabled: boolean;
@@ -74,8 +76,10 @@ export default function NotificationSettings() {
         try {
             const runtimeInfo = await api.getRuntimeSettings();
             setRuntime({
-                webhookUrl: runtimeInfo.webhookUrl || '',
-                barkUrl: runtimeInfo.barkUrl || '',
+                webhookUrl: runtimeInfo.webhookUrlMasked ? '' : (runtimeInfo.webhookUrl || ''),
+                barkUrl: runtimeInfo.barkUrlMasked ? '' : (runtimeInfo.barkUrl || ''),
+                webhookUrlMasked: runtimeInfo.webhookUrlMasked || '',
+                barkUrlMasked: runtimeInfo.barkUrlMasked || '',
                 webhookEnabled: runtimeInfo.webhookEnabled ?? true,
                 barkEnabled: runtimeInfo.barkEnabled ?? true,
                 serverChanEnabled: !!runtimeInfo.serverChanEnabled,
@@ -113,8 +117,6 @@ export default function NotificationSettings() {
         setSavingNotify(true);
         try {
             const payload: RuntimeSettingsPayload = {
-                webhookUrl: runtime.webhookUrl,
-                barkUrl: runtime.barkUrl,
                 webhookEnabled: runtime.webhookEnabled,
                 barkEnabled: runtime.barkEnabled,
                 serverChanEnabled: runtime.serverChanEnabled,
@@ -132,6 +134,10 @@ export default function NotificationSettings() {
                 smtpTo: runtime.smtpTo,
                 notifyCooldownSec: Math.max(0, Math.trunc(Number(runtime.notifyCooldownSec) || 0)),
             };
+            const nextWebhookUrl = runtime.webhookUrl.trim();
+            const nextBarkUrl = runtime.barkUrl.trim();
+            if (nextWebhookUrl || !runtime.webhookUrlMasked) payload.webhookUrl = nextWebhookUrl;
+            if (nextBarkUrl || !runtime.barkUrlMasked) payload.barkUrl = nextBarkUrl;
             if (serverChanKey.trim()) payload.serverChanKey = serverChanKey.trim();
             if (telegramBotToken.trim()) payload.telegramBotToken = telegramBotToken.trim();
             if (smtpPass.trim()) payload.smtpPass = smtpPass.trim();
@@ -139,6 +145,10 @@ export default function NotificationSettings() {
             const res = await api.updateRuntimeSettings(payload);
             setRuntime((prev) => ({
                 ...prev,
+                webhookUrl: '',
+                barkUrl: '',
+                webhookUrlMasked: res.webhookUrlMasked || '',
+                barkUrlMasked: res.barkUrlMasked || '',
                 serverChanKeyMasked: res.serverChanKeyMasked || prev.serverChanKeyMasked,
                 telegramBotTokenMasked: res.telegramBotTokenMasked || prev.telegramBotTokenMasked,
                 smtpPassMasked: res.smtpPassMasked || prev.smtpPassMasked,
@@ -259,6 +269,11 @@ export default function NotificationSettings() {
                                 style={inputStyle}
                                 disabled={!runtime.webhookEnabled}
                             />
+                            {!runtime.webhookUrl && runtime.webhookUrlMasked ? (
+                                <div style={{ marginTop: 8, fontSize: 12, color: 'var(--color-text-muted)' }}>
+                                    已配置：{runtime.webhookUrlMasked}；留空保存会保持不变，输入新 URL 可覆盖。
+                                </div>
+                            ) : null}
                         </div>
                         <div style={{ opacity: runtime.barkEnabled ? 1 : 0.6, transition: 'opacity 0.2s' }}>
                             <div style={{ fontSize: 13, fontWeight: 500, marginBottom: 8, color: 'var(--color-text-secondary)' }}>Bark URL</div>
@@ -269,6 +284,11 @@ export default function NotificationSettings() {
                                 style={inputStyle}
                                 disabled={!runtime.barkEnabled}
                             />
+                            {!runtime.barkUrl && runtime.barkUrlMasked ? (
+                                <div style={{ marginTop: 8, fontSize: 12, color: 'var(--color-text-muted)' }}>
+                                    已配置：{runtime.barkUrlMasked}；留空保存会保持不变，输入新 URL 可覆盖。
+                                </div>
+                            ) : null}
                         </div>
                     </div>
                 </div>

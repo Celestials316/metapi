@@ -55,7 +55,7 @@ describe('modelPricingService', () => {
 
   it('calculates per-call cost when quota type is call-based', () => {
     const model: PricingModel = {
-      modelName: 'gpt-image-1',
+      modelName: 'gpt-image-2',
       quotaType: 1,
       modelRatio: 1,
       completionRatio: 1,

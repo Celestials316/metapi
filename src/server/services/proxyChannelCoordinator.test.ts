@@ -77,6 +77,20 @@ describe('proxyChannelCoordinator', () => {
     expect(keyB).toContain('resp-2');
   });
 
+  it('allows content-derived synthetic session ids to participate in sticky bindings', () => {
+    const key = proxyChannelCoordinator.buildStickySessionKey({
+      clientKind: 'codex',
+      sessionId: 'content-seed:responses:sha256:abc123',
+      requestedModel: 'gpt-5.2',
+      downstreamPath: '/v1/responses',
+      downstreamApiKeyId: 9,
+      continuityKey: 'responses:sha256:abc123',
+    } as never);
+
+    expect(key).toContain('content-seed:responses:sha256:abc123');
+    expect(key).toContain('responses:sha256:abc123');
+  });
+
   it('stores sticky bindings for session-scoped channels and expires them by ttl', async () => {
     const key = proxyChannelCoordinator.buildStickySessionKey({
       clientKind: 'codex',

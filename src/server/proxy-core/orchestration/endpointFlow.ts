@@ -1,7 +1,7 @@
 import { fetch } from 'undici';
 import { config } from '../../config.js';
 import { mapPayloadStatusCode } from '../../services/payloadRules.js';
-import { readRuntimeResponseText } from '../executors/types.js';
+import { describeRuntimeResponseReadError, readRuntimeResponseText } from '../executors/types.js';
 import { fetchWithObservedFirstByte, isObservedFirstByteTimeoutResponse } from '../firstByteTimeout.js';
 import { withSiteProxyRequestInit } from '../../services/siteProxy.js';
 import {
@@ -68,6 +68,7 @@ export type EndpointFlowResult =
 export type ExecuteEndpointFlowInput = {
   siteUrl: string;
   proxyUrl?: string | null;
+  upstreamResponseBodyLimitBytes?: number;
   disableCrossProtocolFallback?: boolean;
   endpointCandidates: UpstreamEndpoint[];
   buildRequest: (endpoint: UpstreamEndpoint, endpointIndex: number) => BuiltEndpointRequest;
@@ -184,7 +185,9 @@ export async function executeEndpointFlow(input: ExecuteEndpointFlowInput): Prom
       };
     }
 
-    let rawErrText = await readRuntimeResponseText(response).catch(() => 'unknown error');
+    let rawErrText = await readRuntimeResponseText(response, {
+      maxBytes: input.upstreamResponseBodyLimitBytes,
+    }).catch((error) => describeRuntimeResponseReadError(error));
     const baseContext: EndpointAttemptContext = {
       endpointIndex,
       endpointCount,

@@ -1,6 +1,13 @@
 import { eq } from 'drizzle-orm';
 import { db, schema } from '../db/index.js';
+import { getPreferredAccountToken, isMaskedTokenValue } from './accountTokenService.js';
+import {
+  requiresManagedAccountTokens,
+  supportsDirectAccountRoutingConnection,
+} from './accountExtraConfig.js';
 import { formatUtcSqlDateTime } from './localTimeService.js';
+import { sanitizeNonSecretSnapshot } from './nonSecretSnapshot.js';
+import { getOauthInfoFromAccount } from './oauth/oauthAccount.js';
 
 export type SaveProxyVideoTaskInput = {
   publicId?: string;
@@ -54,8 +61,8 @@ export async function saveProxyVideoTask(input: SaveProxyVideoTaskInput): Promis
     actualModel: input.actualModel,
     channelId: input.channelId,
     accountId: input.accountId,
-    statusSnapshot: input.statusSnapshot === undefined ? null : JSON.stringify(input.statusSnapshot),
-    upstreamResponseMeta: input.upstreamResponseMeta === undefined ? null : JSON.stringify(input.upstreamResponseMeta),
+    statusSnapshot: input.statusSnapshot === undefined ? null : JSON.stringify(sanitizeNonSecretSnapshot(input.statusSnapshot)),
+    upstreamResponseMeta: input.upstreamResponseMeta === undefined ? null : JSON.stringify(sanitizeNonSecretSnapshot(input.upstreamResponseMeta)),
     lastUpstreamStatus: input.lastUpstreamStatus ?? null,
     lastPolledAt: input.lastPolledAt ?? (input.lastUpstreamStatus == null ? null : now),
     createdAt: now,
@@ -101,6 +108,50 @@ export async function resolveProxyVideoTaskSite(accountId: number | null): Promi
   return row?.sites ?? null;
 }
 
+function asTrimmedCredential(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  if (isMaskedTokenValue(trimmed)) return null;
+  return trimmed;
+}
+
+function resolveDirectAccountCredential(account: typeof schema.accounts.$inferSelect): string | null {
+  const oauth = getOauthInfoFromAccount(account);
+  return oauth
+    ? asTrimmedCredential(account.accessToken)
+    : asTrimmedCredential(account.apiToken);
+}
+
+export async function resolveProxyVideoTaskCredential(accountId: number | null): Promise<string | null> {
+  if (!Number.isFinite(accountId) || !accountId || accountId <= 0) {
+    return null;
+  }
+
+  const account = await db.select()
+    .from(schema.accounts)
+    .where(eq(schema.accounts.id, accountId))
+    .get();
+  if (!account) return null;
+
+  if (requiresManagedAccountTokens(account)) {
+    const preferredToken = await getPreferredAccountToken(account.id);
+    const tokenValue = asTrimmedCredential(preferredToken?.token);
+    if (tokenValue) {
+      return tokenValue;
+    }
+  }
+
+  if (supportsDirectAccountRoutingConnection(account)) {
+    const directCredential = resolveDirectAccountCredential(account);
+    if (directCredential) {
+      return directCredential;
+    }
+  }
+
+  return null;
+}
+
 export async function deleteProxyVideoTaskByPublicId(publicId: string): Promise<void> {
   await db.delete(schema.proxyVideoTasks)
     .where(eq(schema.proxyVideoTasks.publicId, publicId))
@@ -119,8 +170,8 @@ export async function refreshProxyVideoTaskSnapshot(
   const now = formatUtcSqlDateTime(new Date());
   await db.update(schema.proxyVideoTasks)
     .set({
-      statusSnapshot: input.statusSnapshot === undefined ? null : JSON.stringify(input.statusSnapshot),
-      upstreamResponseMeta: input.upstreamResponseMeta === undefined ? null : JSON.stringify(input.upstreamResponseMeta),
+      statusSnapshot: input.statusSnapshot === undefined ? null : JSON.stringify(sanitizeNonSecretSnapshot(input.statusSnapshot)),
+      upstreamResponseMeta: input.upstreamResponseMeta === undefined ? null : JSON.stringify(sanitizeNonSecretSnapshot(input.upstreamResponseMeta)),
       lastUpstreamStatus: input.lastUpstreamStatus ?? null,
       lastPolledAt: input.lastPolledAt ?? now,
       updatedAt: now,
@@ -141,4 +192,7 @@ function parseJsonColumn(value: unknown): unknown | null {
 
 export const __proxyVideoTaskStoreTestUtils = {
   parseJsonColumn,
+  asTrimmedCredential,
+  resolveDirectAccountCredential,
+  sanitizeSnapshot: sanitizeNonSecretSnapshot,
 };

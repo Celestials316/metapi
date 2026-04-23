@@ -6,6 +6,12 @@ import {
   normalizeMigrationInput,
 } from './databaseMigrationService.js';
 
+const flushAllRuntimeStatePersistenceMock = vi.fn(async () => undefined);
+
+vi.mock('./runtimeStateMaintenance.js', () => ({
+  flushAllRuntimeStatePersistence: (...args: unknown[]) => flushAllRuntimeStatePersistenceMock(...args),
+}));
+
 function cloneContract<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
@@ -915,7 +921,11 @@ describe('databaseMigrationService', () => {
     vi.resetModules();
 
     const rowsByTable = {
-      settings: [],
+      settings: [
+        { key: 'db_type', value: JSON.stringify('sqlite') },
+        { key: 'db_url', value: JSON.stringify(':memory:') },
+        { key: 'db_ssl', value: JSON.stringify(false) },
+      ],
       sites: [],
       siteAnnouncements: [{
         id: 11,
@@ -982,6 +992,26 @@ describe('databaseMigrationService', () => {
       });
 
       expect(summary.rows.siteAnnouncements).toBe(1);
+      expect(summary.remediationReport).toEqual({
+        total: 3,
+        entries: expect.arrayContaining([
+          expect.objectContaining({
+            code: 'runtime_database_setting_excluded',
+            level: 'info',
+            details: expect.objectContaining({ key: 'db_type' }),
+          }),
+          expect.objectContaining({
+            code: 'runtime_database_setting_excluded',
+            level: 'info',
+            details: expect.objectContaining({ key: 'db_url' }),
+          }),
+          expect.objectContaining({
+            code: 'runtime_database_setting_excluded',
+            level: 'info',
+            details: expect.objectContaining({ key: 'db_ssl' }),
+          }),
+        ]),
+      });
       expect(client.begin).toHaveBeenCalledTimes(1);
       expect(client.commit).toHaveBeenCalledTimes(1);
       expect(client.close).toHaveBeenCalledTimes(1);

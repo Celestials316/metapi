@@ -47,6 +47,35 @@ export type RuntimeExecutor = {
   dispatch(input: RuntimeDispatchInput): Promise<RuntimeResponse>;
 };
 
+export const DEFAULT_UPSTREAM_RESPONSE_BODY_LIMIT_BYTES = 2 << 20;
+const UPSTREAM_RESPONSE_TOO_LARGE_MESSAGE = 'Upstream response too large';
+
+export type RuntimeResponseReadOptions = {
+  maxBytes?: number;
+};
+
+export class RuntimeResponseBodyTooLargeError extends Error {
+  readonly maxBytes: number;
+
+  constructor(maxBytes: number, message = UPSTREAM_RESPONSE_TOO_LARGE_MESSAGE) {
+    super(message);
+    this.name = 'RuntimeResponseBodyTooLargeError';
+    this.maxBytes = maxBytes;
+  }
+}
+
+export function isRuntimeResponseBodyTooLargeError(error: unknown): error is RuntimeResponseBodyTooLargeError {
+  return error instanceof RuntimeResponseBodyTooLargeError
+    || (typeof error === 'object' && error !== null && (error as { name?: unknown }).name === 'RuntimeResponseBodyTooLargeError');
+}
+
+export function describeRuntimeResponseReadError(error: unknown, fallback = 'unknown error'): string {
+  if (isRuntimeResponseBodyTooLargeError(error)) {
+    return error.message || UPSTREAM_RESPONSE_TOO_LARGE_MESSAGE;
+  }
+  return fallback;
+}
+
 export function asTrimmedString(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
 }
@@ -170,22 +199,45 @@ function decodeRuntimeResponseStream(
 
 export async function readRuntimeResponseText(
   response: RuntimeResponse,
+  options: RuntimeResponseReadOptions = {},
 ): Promise<string> {
-  const contentEncoding = typeof response.headers?.get === 'function'
-    ? response.headers.get('content-encoding')
-    : null;
-  if (!hasZstdContentEncoding(contentEncoding)) {
-    return typeof response.text === 'function'
-      ? response.text().catch(() => '')
-      : '';
+  const reader = getRuntimeResponseReader(response);
+  if (!reader) {
+    if (typeof response.text === 'function') {
+      try {
+        return await response.text();
+      } catch {
+        return '';
+      }
+    }
+    return '';
   }
 
-  const rawBuffer = Buffer.from(await response.arrayBuffer());
+  const maxBytes = Number.isFinite(Number(options.maxBytes)) && Number(options.maxBytes) > 0
+    ? Math.trunc(Number(options.maxBytes))
+    : DEFAULT_UPSTREAM_RESPONSE_BODY_LIMIT_BYTES;
+  const chunks: Buffer[] = [];
+  let totalBytes = 0;
+
   try {
-    return decodeRuntimeResponseBuffer(rawBuffer, contentEncoding).toString('utf8');
-  } catch {
-    return looksLikeZstdFrame(rawBuffer) ? '' : rawBuffer.toString('utf8');
+    while (true) {
+      const nextChunk = await reader.read();
+      if (nextChunk.done) break;
+      const chunk = Buffer.from(nextChunk.value || []);
+      totalBytes += chunk.byteLength;
+      if (totalBytes > maxBytes) {
+        await reader.cancel(UPSTREAM_RESPONSE_TOO_LARGE_MESSAGE).catch(() => undefined);
+        throw new RuntimeResponseBodyTooLargeError(maxBytes);
+      }
+      chunks.push(chunk);
+    }
+  } finally {
+    try {
+      reader.releaseLock();
+    } catch {}
   }
+
+  return Buffer.concat(chunks, totalBytes).toString('utf8');
 }
 
 function asNodeReadableStream(
@@ -312,12 +364,23 @@ export function getRuntimeResponseReader(
 
 export async function materializeErrorResponse(
   response: RuntimeResponse,
+  options: RuntimeResponseReadOptions = {},
 ): Promise<RuntimeResponse> {
   if (response.ok) return response;
-  const text = await readRuntimeResponseText(response);
+  let text = '';
+  let bodyReadTooLarge = false;
+  try {
+    text = await readRuntimeResponseText(response, options);
+  } catch (error) {
+    text = describeRuntimeResponseReadError(error, '');
+    bodyReadTooLarge = isRuntimeResponseBodyTooLargeError(error);
+  }
   const headers = new Headers(response.headers);
   headers.delete('content-encoding');
   headers.delete('content-length');
+  if (bodyReadTooLarge) {
+    headers.set('content-type', 'text/plain; charset=utf-8');
+  }
   return new Response(text, {
     status: response.status,
     headers,

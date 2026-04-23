@@ -128,6 +128,56 @@ describe('Settings system proxy', () => {
     }
   });
 
+  it('keeps masked system proxy hidden and does not resubmit it unchanged', async () => {
+    apiMock.getRuntimeSettings.mockResolvedValue({
+      checkinCron: '0 8 * * *',
+      balanceRefreshCron: '0 * * * *',
+      logCleanupCron: '0 6 * * *',
+      logCleanupUsageLogsEnabled: false,
+      logCleanupProgramLogsEnabled: false,
+      logCleanupRetentionDays: 30,
+      routingFallbackUnitCost: 1,
+      routingWeights: {},
+      adminIpAllowlist: [],
+      systemProxyUrl: '',
+      systemProxyUrlMasked: 'http://proxy.example.com:7890/****',
+    });
+    apiMock.updateRuntimeSettings.mockResolvedValue({
+      success: true,
+      systemProxyUrlMasked: 'http://proxy.example.com:7890/****',
+    });
+
+    let root!: WebTestRenderer;
+    try {
+      await act(async () => {
+        root = create(
+          <MemoryRouter>
+            <ToastProvider>
+              <Settings />
+            </ToastProvider>
+          </MemoryRouter>,
+        );
+      });
+      await flushMicrotasks();
+
+      expect(collectText(root.root)).toContain('已配置：http://proxy.example.com:7890/****');
+
+      const saveButton = root.root.find((node) => (
+        node.type === 'button'
+        && typeof node.props.onClick === 'function'
+        && collectText(node).trim() === '保存系统代理'
+      ));
+      await act(async () => {
+        saveButton.props.onClick();
+      });
+      await flushMicrotasks();
+
+      expect(apiMock.updateRuntimeSettings).toHaveBeenCalledWith({});
+    } finally {
+      root?.unmount();
+    }
+  });
+
   it('tests system proxy from settings', async () => {
     let root!: WebTestRenderer;
     try {

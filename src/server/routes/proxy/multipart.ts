@@ -4,6 +4,29 @@ type MultipartAwareFastify = FastifyInstance & {
   __metapiMultipartParserRegistered?: boolean;
 };
 
+export const DEFAULT_MULTIPART_FILE_PART_LIMIT_BYTES = 20 << 20;
+
+export class MultipartFilePartTooLargeError extends Error {
+  readonly fieldName: string;
+  readonly maxBytes: number;
+  readonly actualBytes: number;
+
+  constructor(fieldName: string, maxBytes: number, actualBytes: number) {
+    super(`multipart field "${fieldName}" is too large (max ${formatBinaryMiB(maxBytes)})`);
+    this.name = 'MultipartFilePartTooLargeError';
+    this.fieldName = fieldName;
+    this.maxBytes = maxBytes;
+    this.actualBytes = actualBytes;
+  }
+}
+
+function formatBinaryMiB(bytes: number): string {
+  if (bytes > 0 && bytes % (1 << 20) === 0) {
+    return `${bytes >> 20} MiB`;
+  }
+  return `${bytes} bytes`;
+}
+
 function getContentType(request: FastifyRequest): string {
   return typeof request.headers['content-type'] === 'string'
     ? request.headers['content-type']
@@ -37,6 +60,46 @@ export async function parseMultipartFormData(request: FastifyRequest): Promise<F
     },
   });
   return response.formData();
+}
+
+function shouldValidateMultipartField(
+  key: string,
+  options?: {
+    fieldNames?: string[];
+    fieldPrefixes?: string[];
+  },
+): boolean {
+  const fieldNames = options?.fieldNames || [];
+  const fieldPrefixes = options?.fieldPrefixes || [];
+  if (fieldNames.length === 0 && fieldPrefixes.length === 0) return true;
+  if (fieldNames.includes(key)) return true;
+  return fieldPrefixes.some((prefix) => key.startsWith(prefix));
+}
+
+export function isMultipartFilePartTooLargeError(error: unknown): error is MultipartFilePartTooLargeError {
+  return error instanceof MultipartFilePartTooLargeError;
+}
+
+export function assertMultipartFilePartSizeLimit(
+  formData: FormData | null,
+  options?: {
+    maxBytes?: number;
+    fieldNames?: string[];
+    fieldPrefixes?: string[];
+  },
+): void {
+  if (!formData) return;
+  const maxBytes = options?.maxBytes ?? DEFAULT_MULTIPART_FILE_PART_LIMIT_BYTES;
+  for (const [key, value] of formData.entries()) {
+    if (!shouldValidateMultipartField(key, options) || typeof value === 'string') {
+      continue;
+    }
+    const fileLike = value as unknown as File & { size?: number };
+    const size = typeof fileLike.size === 'number' && Number.isFinite(fileLike.size) ? fileLike.size : 0;
+    if (size > maxBytes) {
+      throw new MultipartFilePartTooLargeError(key, maxBytes, size);
+    }
+  }
 }
 
 export function cloneFormDataWithOverrides(

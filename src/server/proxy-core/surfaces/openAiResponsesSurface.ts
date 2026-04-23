@@ -66,6 +66,7 @@ import {
   shouldFallbackCompactResponsesToResponses,
 } from '../capabilities/responsesCompact.js';
 import { detectDownstreamClientContext } from '../downstreamClientContext.js';
+import { buildContentContinuitySeed } from '../providers/headerUtils.js';
 import {
   clearChannelAffinityBinding,
   recordChannelAffinitySuccess,
@@ -398,13 +399,21 @@ export async function handleOpenAiResponsesSurfaceRequest(
       || requestEnvelope.parsed.normalizedBody.previous_response_id
       || '',
     ).trim();
-    const rememberedPreviousResponseId = downstreamSessionId
-      ? getCodexSessionResponseId(downstreamSessionId)
+    const contentContinuitySeed = (!downstreamSessionId && !explicitPreviousResponseId)
+      ? buildContentContinuitySeed({
+        requestedModel,
+        downstreamPath,
+        body: requestEnvelope.parsed.normalizedBody,
+      })
       : null;
-    const stickyContinuityKey = explicitPreviousResponseId || rememberedPreviousResponseId || null;
+    const continuitySessionId = downstreamSessionId || (contentContinuitySeed ? `content-seed:${contentContinuitySeed}` : '');
+    const rememberedPreviousResponseId = continuitySessionId
+      ? getCodexSessionResponseId(continuitySessionId)
+      : null;
+    const stickyContinuityKey = explicitPreviousResponseId || rememberedPreviousResponseId || contentContinuitySeed || null;
     const stickySessionKey = buildSurfaceStickySessionKey({
       clientContext,
-      sessionId: downstreamSessionId || null,
+      sessionId: continuitySessionId || null,
       continuityKey: stickyContinuityKey,
       requestedModel,
       downstreamPath,
@@ -520,15 +529,16 @@ export async function handleOpenAiResponsesSurfaceRequest(
       const isCodexSite = String(selected.site.platform || '').trim().toLowerCase() === 'codex';
       const isCodexClient = clientContext.clientKind === 'codex';
       const isCodexCompatibleRequest = isCodexSite || isCodexClient;
-      const trustedResponsesSessionStoreKey = downstreamSessionId
+      const trustedResponsesSessionStoreKey = continuitySessionId
         ? buildCodexSessionResponseStoreKey({
-          sessionId: downstreamSessionId,
+          sessionId: continuitySessionId,
           siteId: selected.site.id,
           accountId: selected.account.id,
           channelId: selected.channel.id,
         })
-        : '';
+        : null;
       const owner = getProxyResourceOwner(request);
+
       let normalizedResponsesBody: Record<string, unknown> = {
         ...requestEnvelope.parsed.normalizedBody,
         model: modelName,
@@ -668,7 +678,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
             downstreamHeaders: requestHeaders,
             downstreamClientKind: clientContext.clientKind,
             providerHeaders: buildProviderHeaders(),
-            codexSessionCacheKey: trustedResponsesSessionStoreKey || undefined,
+            codexSessionCacheKey: downstreamSessionId ? (trustedResponsesSessionStoreKey || undefined) : undefined,
             codexExplicitSessionId: downstreamSessionId || undefined,
           });
           const upstreamPath = (
@@ -702,6 +712,9 @@ export async function handleOpenAiResponsesSurfaceRequest(
             return baseDispatchRequest(endpointRequest, targetUrl);
           }
           const sessionId = getResponsesSessionHeaderValue(endpointRequest.headers);
+          if (!downstreamSessionId) {
+            return baseDispatchRequest(endpointRequest, targetUrl);
+          }
           return runCodexHttpSessionTask(
             trustedResponsesSessionStoreKey || sessionId,
             () => baseDispatchRequest(endpointRequest, targetUrl),
@@ -886,7 +899,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
 
       const startTime = Date.now();
       const leaseResult = await acquireSurfaceChannelLease({
-        stickySessionKey,
+        stickySessionKey: downstreamSessionId ? stickySessionKey : null,
         selected,
       });
       if (leaseResult.status === 'timeout') {

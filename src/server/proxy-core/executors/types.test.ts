@@ -32,6 +32,17 @@ describe('readRuntimeResponseText', () => {
 
     await expect(readRuntimeResponseText(response)).resolves.toBe(payload);
   });
+
+  it('fails with an explicit too-large error when the upstream body exceeds the byte limit', async () => {
+    const response = new Response('abcdefghijk', {
+      status: 502,
+      headers: {
+        'content-type': 'text/plain; charset=utf-8',
+      },
+    });
+
+    await expect(readRuntimeResponseText(response, { maxBytes: 8 })).rejects.toThrow('Upstream response too large');
+  });
 });
 
 describe('materializeErrorResponse', () => {
@@ -52,6 +63,22 @@ describe('materializeErrorResponse', () => {
     expect(materialized.headers.get('content-encoding')).toBeNull();
     expect(materialized.headers.get('content-length')).toBeNull();
     expect(materialized.headers.get('content-type')).toBe('application/json; charset=utf-8');
+  });
+
+  it('materializes an explicit too-large error body when the upstream payload exceeds the byte limit', async () => {
+    const response = new Response('abcdefghijk', {
+      status: 502,
+      headers: {
+        'content-type': 'text/plain; charset=utf-8',
+      },
+    });
+
+    const materialized = await materializeErrorResponse(response, { maxBytes: 8 });
+
+    await expect(materialized.text()).resolves.toBe('Upstream response too large');
+    expect(materialized.status).toBe(502);
+    expect(materialized.headers.get('content-encoding')).toBeNull();
+    expect(materialized.headers.get('content-length')).toBeNull();
   });
 });
 

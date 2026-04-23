@@ -1,10 +1,10 @@
-import { eq, inArray } from 'drizzle-orm';
+import { eq, inArray, isNotNull } from 'drizzle-orm';
 import { db, schema } from '../db/index.js';
-import { formatUtcSqlDateTime } from './localTimeService.js';
+import { sanitizeNonSecretSnapshot } from './nonSecretSnapshot.js';
 
 function serializeSnapshot(snapshot: unknown): string | null {
   if (snapshot == null) return null;
-  return JSON.stringify(snapshot);
+  return JSON.stringify(sanitizeNonSecretSnapshot(snapshot));
 }
 
 export function parseRouteDecisionSnapshot(value: unknown): unknown | null {
@@ -18,13 +18,14 @@ export function parseRouteDecisionSnapshot(value: unknown): unknown | null {
 }
 
 export async function saveRouteDecisionSnapshot(routeId: number, snapshot: unknown): Promise<void> {
-  const refreshedAt = formatUtcSqlDateTime(new Date());
+  const normalizedRouteId = Math.trunc(Number(routeId) || 0);
+  if (normalizedRouteId <= 0) return;
   await db.update(schema.tokenRoutes)
     .set({
       decisionSnapshot: serializeSnapshot(snapshot),
-      decisionRefreshedAt: refreshedAt,
+      decisionRefreshedAt: new Date().toISOString(),
     })
-    .where(eq(schema.tokenRoutes.id, routeId))
+    .where(eq(schema.tokenRoutes.id, normalizedRouteId))
     .run();
 }
 
@@ -32,6 +33,32 @@ export async function saveRouteDecisionSnapshots(entries: Array<{ routeId: numbe
   for (const entry of entries) {
     await saveRouteDecisionSnapshot(entry.routeId, entry.snapshot);
   }
+}
+
+export async function getRouteDecisionSnapshotEpochState(): Promise<{
+  snapshotCount: number;
+  latestRefreshedAt: string | null;
+}> {
+  const rows = await db.select({
+    decisionRefreshedAt: schema.tokenRoutes.decisionRefreshedAt,
+  })
+    .from(schema.tokenRoutes)
+    .where(isNotNull(schema.tokenRoutes.decisionSnapshot))
+    .all();
+
+  let latestRefreshedAt: string | null = null;
+  for (const row of rows) {
+    const value = String(row.decisionRefreshedAt || '').trim();
+    if (!value) continue;
+    if (!latestRefreshedAt || value > latestRefreshedAt) {
+      latestRefreshedAt = value;
+    }
+  }
+
+  return {
+    snapshotCount: rows.length,
+    latestRefreshedAt,
+  };
 }
 
 export async function clearRouteDecisionSnapshot(routeId: number): Promise<void> {
@@ -63,3 +90,7 @@ export async function clearAllRouteDecisionSnapshots(): Promise<void> {
     })
     .run();
 }
+
+export const __routeDecisionSnapshotStoreTestUtils = {
+  serializeSnapshot,
+};

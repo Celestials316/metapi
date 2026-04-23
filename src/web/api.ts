@@ -427,6 +427,9 @@ export type RuntimeSettingsResponse = RuntimeSettingsPayload & {
   serverChanKeyMasked?: string;
   telegramBotTokenMasked?: string;
   smtpPassMasked?: string;
+  webhookUrlMasked?: string;
+  barkUrlMasked?: string;
+  systemProxyUrlMasked?: string;
   currentAdminIp?: string;
   serverTimeZone?: string;
   proxyErrorKeywords?: string[];

@@ -283,6 +283,32 @@ describe('/v1/search route', () => {
     });
   });
 
+  it('returns an explicit too-large upstream error when the search response body exceeds the default limit', async () => {
+    fetchMock.mockResolvedValue(new Response('a'.repeat((2 << 20) + 16), {
+      status: 503,
+      headers: { 'content-type': 'text/plain; charset=utf-8' },
+    }));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/search',
+      headers: {
+        authorization: 'Bearer sk-demo',
+      },
+      payload: {
+        query: 'axonhub',
+      },
+    });
+
+    expect(response.statusCode).toBe(503);
+    expect(response.json()).toMatchObject({
+      error: {
+        message: 'Upstream response too large',
+        type: 'upstream_error',
+      },
+    });
+  });
+
   it('keeps returning a successful search response when channel success bookkeeping fails', async () => {
     fetchMock.mockResolvedValue(new Response(JSON.stringify({
       object: 'search.result',

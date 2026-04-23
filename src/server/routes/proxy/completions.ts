@@ -27,6 +27,11 @@ import { fetchWithObservedFirstByte, getObservedResponseMeta } from '../../proxy
 import { getProxyMaxChannelRetries } from '../../services/proxyChannelRetry.js';
 import { runWithSiteApiEndpointPool, SiteApiEndpointRequestError } from '../../services/siteApiEndpointService.js';
 import {
+  describeUpstreamResponseReadError,
+  readProxyUpstreamResponseText,
+  readSiteApiEndpointResponseText,
+} from './upstreamResponseBody.js';
+import {
   buildForcedChannelUnavailableMessage,
   canRetryChannelSelection,
   getTesterForcedChannelId,
@@ -145,7 +150,9 @@ export async function completionsProxyRoute(app: FastifyInstance) {
           );
           const observedFirstByteLatencyMs = getObservedResponseMeta(response)?.firstByteLatencyMs ?? null;
           if (!response.ok) {
-            const errText = await response.text().catch(() => 'unknown error');
+            const errText = await readSiteApiEndpointResponseText(response, {
+              firstByteLatencyMs: observedFirstByteLatencyMs,
+            });
             throw new SiteApiEndpointRequestError(errText || 'unknown error', {
               status: response.status,
               rawErrText: errText || null,
@@ -261,7 +268,18 @@ export async function completionsProxyRoute(app: FastifyInstance) {
           return;
         }
 
-        const rawText = await upstream.text();
+        let rawText = '';
+        try {
+          rawText = await readProxyUpstreamResponseText(upstream);
+        } catch (error) {
+          const errText = describeUpstreamResponseReadError(error);
+          throw new SiteApiEndpointRequestError(errText, {
+            status: 502,
+            rawErrText: errText,
+            firstByteLatencyMs,
+            cause: error,
+          });
+        }
         let data: any = rawText;
         try {
           data = JSON.parse(rawText);

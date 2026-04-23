@@ -11,7 +11,14 @@ import { withSiteRecordProxyRequestInit } from '../../services/siteProxy.js';
 import { getProxyUrlFromExtraConfig } from '../../services/accountExtraConfig.js';
 import { composeProxyLogMessage } from './logPathMeta.js';
 import { formatUtcSqlDateTime } from '../../services/localTimeService.js';
-import { cloneFormDataWithOverrides, ensureMultipartBufferParser, parseMultipartFormData } from './multipart.js';
+import {
+  assertMultipartFilePartSizeLimit,
+  cloneFormDataWithOverrides,
+  DEFAULT_MULTIPART_FILE_PART_LIMIT_BYTES,
+  ensureMultipartBufferParser,
+  isMultipartFilePartTooLargeError,
+  parseMultipartFormData,
+} from './multipart.js';
 import { getProxyAuthContext } from '../../middleware/auth.js';
 import { buildUpstreamUrl } from './upstreamUrl.js';
 import { detectDownstreamClientContext, type DownstreamClientContext } from '../../proxy-core/downstreamClientContext.js';
@@ -19,6 +26,7 @@ import { insertProxyLog } from '../../services/proxyLogStore.js';
 import { fetchWithObservedFirstByte, getObservedResponseMeta } from '../../proxy-core/firstByteTimeout.js';
 import { getProxyMaxChannelRetries } from '../../services/proxyChannelRetry.js';
 import { runWithSiteApiEndpointPool, SiteApiEndpointRequestError } from '../../services/siteApiEndpointService.js';
+import { readSiteApiEndpointResponseText } from './upstreamResponseBody.js';
 import {
   clearChannelAffinityBinding,
   recordChannelAffinitySuccess,
@@ -36,7 +44,7 @@ export async function imagesProxyRoute(app: FastifyInstance) {
 
   app.post('/v1/images/generations', async (request: FastifyRequest, reply: FastifyReply) => {
     const body = request.body as any;
-    const requestedModel = body?.model || 'gpt-image-1';
+    const requestedModel = body?.model || 'gpt-image-2';
     if (!await ensureModelAllowedForDownstreamKey(request, reply, requestedModel)) return;
     const downstreamPolicy = getDownstreamRoutingPolicy(request);
     const forcedChannelId = getTesterForcedChannelId({
@@ -136,7 +144,9 @@ export async function imagesProxyRoute(app: FastifyInstance) {
             },
           );
           const observedFirstByteLatencyMs = getObservedResponseMeta(response)?.firstByteLatencyMs ?? null;
-          const responseText = await response.text();
+          const responseText = await readSiteApiEndpointResponseText(response, {
+            firstByteLatencyMs: observedFirstByteLatencyMs,
+          });
           if (!response.ok) {
             throw new SiteApiEndpointRequestError(responseText || 'unknown error', {
               status: response.status,
@@ -273,12 +283,29 @@ export async function imagesProxyRoute(app: FastifyInstance) {
 
   app.post('/v1/images/edits', async (request: FastifyRequest, reply: FastifyReply) => {
     const multipartForm = await parseMultipartFormData(request);
+    try {
+      assertMultipartFilePartSizeLimit(multipartForm, {
+        maxBytes: DEFAULT_MULTIPART_FILE_PART_LIMIT_BYTES,
+        fieldNames: ['image', 'mask'],
+        fieldPrefixes: ['image['],
+      });
+    } catch (error) {
+      if (isMultipartFilePartTooLargeError(error)) {
+        return reply.code(400).send({
+          error: {
+            message: error.message,
+            type: 'invalid_request_error',
+          },
+        });
+      }
+      throw error;
+    }
     const jsonBody = (!multipartForm && request.body && typeof request.body === 'object')
       ? request.body as Record<string, unknown>
       : null;
     const requestedModel = typeof multipartForm?.get('model') === 'string'
       ? String(multipartForm.get('model')).trim()
-      : (typeof jsonBody?.model === 'string' ? jsonBody.model.trim() : '') || 'gpt-image-1';
+      : (typeof jsonBody?.model === 'string' ? jsonBody.model.trim() : '') || 'gpt-image-2';
 
     if (!await ensureModelAllowedForDownstreamKey(request, reply, requestedModel)) return;
     const downstreamPolicy = getDownstreamRoutingPolicy(request);
@@ -395,7 +422,9 @@ export async function imagesProxyRoute(app: FastifyInstance) {
             },
           );
           const observedFirstByteLatencyMs = getObservedResponseMeta(response)?.firstByteLatencyMs ?? null;
-          const responseText = await response.text();
+          const responseText = await readSiteApiEndpointResponseText(response, {
+            firstByteLatencyMs: observedFirstByteLatencyMs,
+          });
           if (!response.ok) {
             throw new SiteApiEndpointRequestError(responseText || 'unknown error', {
               status: response.status,

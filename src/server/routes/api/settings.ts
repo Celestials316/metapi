@@ -41,7 +41,9 @@ import { performFactoryReset } from '../../services/factoryResetService.js';
 import { normalizeLogCleanupRetentionDays } from '../../shared/logCleanupRetentionDays.js';
 import { normalizeDownstreamRateLimitConfig } from '../../services/downstreamRateLimit.js';
 import { normalizePayloadRulesConfig } from '../../services/payloadRules.js';
-import { normalizeChannelAffinityConfig } from '../../services/channelAffinity.js';
+import { normalizeChannelAffinityConfig, resetChannelAffinityState } from '../../services/channelAffinity.js';
+import { clearAllRouteDecisionSnapshots } from '../../services/routeDecisionSnapshotStore.js';
+import { invalidateTokenRouterCache } from '../../services/tokenRouter.js';
 import { stopProxyLogRetentionService } from '../../services/proxyLogRetentionService.js';
 import { extractNestedErrorMessages } from '../../services/errorMessageService.js';
 import {
@@ -159,6 +161,25 @@ function maskSecret(value: string): string {
   return `${value.slice(0, 4)}****${value.slice(-4)}`;
 }
 
+function maskSensitiveUrl(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) return '';
+  try {
+    const parsed = new URL(trimmed);
+    return `${parsed.protocol}//${parsed.host}/****`;
+  } catch {
+    return maskSecret(trimmed);
+  }
+}
+
+function resolveMaskedUrlSubmission(value: unknown, currentValue: string): string | undefined {
+  if (value === undefined) return undefined;
+  const trimmed = String(value || '').trim();
+  if (trimmed && currentValue && trimmed === maskSensitiveUrl(currentValue)) {
+    return currentValue;
+  }
+  return trimmed;
+}
 
 
 async function appendSettingsEvent(input: {
@@ -322,6 +343,33 @@ function isValidTelegramMessageThreadId(raw: string): boolean {
   return /^[1-9]\d*$/.test(raw);
 }
 
+const ROUTING_DERIVED_RUNTIME_SETTING_KEYS = new Set([
+  'routing_weights',
+  'routing_fallback_unit_cost',
+  'payload_rules',
+  'downstream_rate_limit',
+]);
+
+async function invalidateRoutingDerivedRuntimeState(keys: Iterable<string>): Promise<void> {
+  const normalizedKeys = new Set(
+    Array.from(keys)
+      .map((key) => String(key || '').trim())
+      .filter((key) => key.length > 0),
+  );
+  if (normalizedKeys.size <= 0) return;
+
+  if (normalizedKeys.has('channel_affinity')) {
+    resetChannelAffinityState();
+  }
+
+  if (!Array.from(normalizedKeys).some((key) => ROUTING_DERIVED_RUNTIME_SETTING_KEYS.has(key))) {
+    return;
+  }
+
+  invalidateTokenRouterCache();
+  await clearAllRouteDecisionSnapshots();
+}
+
 function applyImportedSettingToRuntime(key: string, value: unknown) {
   switch (key) {
     case 'checkin_cron': {
@@ -401,6 +449,7 @@ function applyImportedSettingToRuntime(key: string, value: unknown) {
     case 'system_proxy_url': {
       if (typeof value !== 'string') return;
       config.systemProxyUrl = normalizeSiteProxyUrl(value) || '';
+      invalidateSiteProxyCache();
       return;
     }
     case 'model_availability_probe_enabled': {
@@ -752,8 +801,10 @@ function getRuntimeSettingsResponse(currentAdminIp = '') {
     proxyFirstByteTimeoutSec: config.proxyFirstByteTimeoutSec,
     tokenRouterFailureCooldownMaxSec: config.tokenRouterFailureCooldownMaxSec,
     routingWeights: config.routingWeights,
-    webhookUrl: config.webhookUrl,
-    barkUrl: config.barkUrl,
+    webhookUrl: '',
+    barkUrl: '',
+    webhookUrlMasked: maskSensitiveUrl(config.webhookUrl),
+    barkUrlMasked: maskSensitiveUrl(config.barkUrl),
     webhookEnabled: config.webhookEnabled,
     barkEnabled: config.barkEnabled,
     serverChanEnabled: config.serverChanEnabled,
@@ -776,7 +827,8 @@ function getRuntimeSettingsResponse(currentAdminIp = '') {
     adminIpAllowlist: config.adminIpAllowlist,
     currentAdminIp,
     serverTimeZone: getResolvedTimeZone(),
-    systemProxyUrl: config.systemProxyUrl,
+    systemProxyUrl: '',
+    systemProxyUrlMasked: maskSensitiveUrl(config.systemProxyUrl),
     proxyErrorKeywords: config.proxyErrorKeywords,
     proxyEmptyContentFailEnabled: config.proxyEmptyContentFailEnabled,
     proxyTokenMasked: maskSecret(config.proxyToken),
@@ -922,11 +974,13 @@ export async function settingsRoutes(app: FastifyInstance) {
 
     const body = parsedBody.data as RuntimeSettingsBody;
     const changedLabels: string[] = [];
+    const routingDerivedInvalidationKeys = new Set<string>();
     const currentRequestIp = extractClientIp(request.ip, request.headers['x-forwarded-for']);
 
     const webhookTouched = body.webhookUrl !== undefined || body.webhookEnabled !== undefined;
-    const nextWebhookUrl = body.webhookUrl !== undefined
-      ? String(body.webhookUrl || '').trim()
+    const requestedWebhookUrl = resolveMaskedUrlSubmission(body.webhookUrl, config.webhookUrl);
+    const nextWebhookUrl = requestedWebhookUrl !== undefined
+      ? requestedWebhookUrl
       : config.webhookUrl;
     const nextWebhookEnabled = body.webhookEnabled !== undefined
       ? !!body.webhookEnabled
@@ -941,8 +995,9 @@ export async function settingsRoutes(app: FastifyInstance) {
     }
 
     const barkTouched = body.barkUrl !== undefined || body.barkEnabled !== undefined;
-    const nextBarkUrl = body.barkUrl !== undefined
-      ? String(body.barkUrl || '').trim()
+    const requestedBarkUrl = resolveMaskedUrlSubmission(body.barkUrl, config.barkUrl);
+    const nextBarkUrl = requestedBarkUrl !== undefined
+      ? requestedBarkUrl
       : config.barkUrl;
     const nextBarkEnabled = body.barkEnabled !== undefined
       ? !!body.barkEnabled
@@ -1138,7 +1193,7 @@ export async function settingsRoutes(app: FastifyInstance) {
     }
 
     if (body.systemProxyUrl !== undefined) {
-      const rawSystemProxyUrl = String(body.systemProxyUrl || '').trim();
+      const rawSystemProxyUrl = resolveMaskedUrlSubmission(body.systemProxyUrl, config.systemProxyUrl) ?? '';
       const normalizedSystemProxyUrl = rawSystemProxyUrl
         ? normalizeSiteProxyUrl(rawSystemProxyUrl)
         : '';
@@ -1490,10 +1545,10 @@ export async function settingsRoutes(app: FastifyInstance) {
     }
 
     if (body.webhookUrl !== undefined) {
-      if (String(body.webhookUrl || '').trim() !== config.webhookUrl) {
+      if (nextWebhookUrl !== config.webhookUrl) {
         changedLabels.push('Webhook 地址');
       }
-      config.webhookUrl = String(body.webhookUrl || '').trim();
+      config.webhookUrl = nextWebhookUrl;
       upsertSetting('webhook_url', config.webhookUrl);
     }
 
@@ -1506,10 +1561,10 @@ export async function settingsRoutes(app: FastifyInstance) {
     }
 
     if (body.barkUrl !== undefined) {
-      if (String(body.barkUrl || '').trim() !== config.barkUrl) {
+      if (nextBarkUrl !== config.barkUrl) {
         changedLabels.push('Bark 地址');
       }
-      config.barkUrl = String(body.barkUrl || '').trim();
+      config.barkUrl = nextBarkUrl;
       upsertSetting('bark_url', config.barkUrl);
     }
 
@@ -1704,6 +1759,7 @@ export async function settingsRoutes(app: FastifyInstance) {
       }
       config.routingWeights = nextWeights;
       upsertSetting('routing_weights', nextWeights);
+      routingDerivedInvalidationKeys.add('routing_weights');
     }
 
     if (body.payloadRules !== undefined) {
@@ -1713,6 +1769,7 @@ export async function settingsRoutes(app: FastifyInstance) {
       }
       config.payloadRules = nextPayloadRules;
       upsertSetting('payload_rules', nextPayloadRules);
+      routingDerivedInvalidationKeys.add('payload_rules');
     }
 
     if (body.downstreamRateLimit !== undefined) {
@@ -1722,6 +1779,7 @@ export async function settingsRoutes(app: FastifyInstance) {
       }
       config.downstreamRateLimit = nextDownstreamRateLimit;
       upsertSetting('downstream_rate_limit', nextDownstreamRateLimit);
+      routingDerivedInvalidationKeys.add('downstream_rate_limit');
     }
 
     if (body.channelAffinity !== undefined) {
@@ -1731,6 +1789,7 @@ export async function settingsRoutes(app: FastifyInstance) {
       }
       config.channelAffinity = nextChannelAffinity;
       upsertSetting('channel_affinity', nextChannelAffinity);
+      routingDerivedInvalidationKeys.add('channel_affinity');
     }
 
     if (body.routingFallbackUnitCost !== undefined) {
@@ -1744,6 +1803,7 @@ export async function settingsRoutes(app: FastifyInstance) {
       }
       config.routingFallbackUnitCost = normalized;
       upsertSetting('routing_fallback_unit_cost', normalized);
+      routingDerivedInvalidationKeys.add('routing_fallback_unit_cost');
     }
 
     if (body.proxyFirstByteTimeoutSec !== undefined) {
@@ -1770,6 +1830,8 @@ export async function settingsRoutes(app: FastifyInstance) {
       config.tokenRouterFailureCooldownMaxSec = normalized;
       upsertSetting('token_router_failure_cooldown_max_sec', normalized);
     }
+
+    await invalidateRoutingDerivedRuntimeState(routingDerivedInvalidationKeys);
 
     if (changedLabels.length > 0) {
       let eventType: 'checkin' | 'balance' | 'proxy' | 'status' | 'token' = 'status';
@@ -1913,6 +1975,7 @@ export async function settingsRoutes(app: FastifyInstance) {
       for (const item of result.appliedSettings) {
         applyImportedSettingToRuntime(item.key, item.value);
       }
+      await invalidateRoutingDerivedRuntimeState(result.appliedSettings.map((item) => item.key));
       if (result.appliedSettings.some((item) => item.key === 'backup_webdav_config_v1')) {
         await reloadBackupWebdavScheduler();
       }
@@ -1992,6 +2055,7 @@ export async function settingsRoutes(app: FastifyInstance) {
       for (const item of result.appliedSettings) {
         applyImportedSettingToRuntime(item.key, item.value);
       }
+      await invalidateRoutingDerivedRuntimeState(result.appliedSettings.map((item) => item.key));
       if (result.appliedSettings.some((item) => item.key === 'backup_webdav_config_v1')) {
         await reloadBackupWebdavScheduler();
       }
