@@ -29,6 +29,7 @@ const originalProxyEmptyContentFailEnabled = config.proxyEmptyContentFailEnabled
 const originalProxyStickySessionEnabled = config.proxyStickySessionEnabled;
 const originalProxySessionChannelConcurrencyLimit = config.proxySessionChannelConcurrencyLimit;
 const originalProxySessionChannelQueueWaitMs = config.proxySessionChannelQueueWaitMs;
+const originalProxyStreamIdleTimeoutMs = config.proxyStreamIdleTimeoutMs;
 const originalChannelAffinity = config.channelAffinity;
 const dbInsertMock = vi.fn((_arg?: any) => ({
   values: (values: Record<string, unknown>) => {
@@ -201,6 +202,7 @@ describe('responses proxy codex oauth refresh', () => {
     config.proxySessionChannelConcurrencyLimit = originalProxySessionChannelConcurrencyLimit;
     config.proxySessionChannelQueueWaitMs = originalProxySessionChannelQueueWaitMs;
     config.channelAffinity = normalizeChannelAffinityConfig(undefined);
+    config.proxyStreamIdleTimeoutMs = originalProxyStreamIdleTimeoutMs;
     fetchMock.mockReset();
     selectChannelMock.mockReset();
     selectNextChannelMock.mockReset();
@@ -256,6 +258,7 @@ describe('responses proxy codex oauth refresh', () => {
     config.proxySessionChannelConcurrencyLimit = originalProxySessionChannelConcurrencyLimit;
     config.proxySessionChannelQueueWaitMs = originalProxySessionChannelQueueWaitMs;
     config.channelAffinity = originalChannelAffinity;
+    config.proxyStreamIdleTimeoutMs = originalProxyStreamIdleTimeoutMs;
     if (app) {
       await app.close();
     }
@@ -602,9 +605,7 @@ describe('responses proxy codex oauth refresh', () => {
     });
 
     expect(secondResponse.statusCode).toBe(200);
-    expect(selectPreferredChannelMock).toHaveBeenCalledTimes(1);
-    expect(selectPreferredChannelMock.mock.calls[0]?.[0]).toBe('gpt-5.2-codex');
-    expect(selectPreferredChannelMock.mock.calls[0]?.[1]).toBe(11);
+    expect(selectPreferredChannelMock).not.toHaveBeenCalled();
 
     const [, firstOptions] = fetchMock.mock.calls[0] as [string, any];
     const [, secondOptions] = fetchMock.mock.calls[1] as [string, any];
@@ -1245,7 +1246,7 @@ describe('responses proxy codex oauth refresh', () => {
     expect(secondOptions.headers.Session_id || secondOptions.headers.session_id).toBe('session-http-serial-1');
   });
 
-  it('serializes concurrent codex HTTP responses requests that only share conversation id', async () => {
+  it('does not serialize concurrent codex HTTP responses requests that only share conversation id', async () => {
     const firstUpstream = createDeferred<Response>();
     fetchMock
       .mockImplementationOnce(() => firstUpstream.promise)
@@ -1290,9 +1291,7 @@ describe('responses proxy codex oauth refresh', () => {
       },
     });
 
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await waitFor(() => fetchMock.mock.calls.length === 2);
 
     firstUpstream.resolve(new Response(JSON.stringify({
       id: 'resp_codex_conv_serial_1',
@@ -1534,7 +1533,7 @@ describe('responses proxy codex oauth refresh', () => {
     expect(selectPreferredChannelMock.mock.calls[0]?.[1]).toBe(11);
   });
 
-  it('rebinds sticky channels after websocket transport fast-path successes when only conversation id is present', async () => {
+  it('does not rebind sticky channels after websocket transport fast-path successes when only conversation id is present', async () => {
     config.proxyStickySessionEnabled = true;
 
     const selected = {
@@ -1600,9 +1599,7 @@ describe('responses proxy codex oauth refresh', () => {
     });
 
     expect(secondResponse.statusCode).toBe(200);
-    expect(selectPreferredChannelMock).toHaveBeenCalledTimes(1);
-    expect(selectPreferredChannelMock.mock.calls[0]?.[0]).toBe('gpt-5.4');
-    expect(selectPreferredChannelMock.mock.calls[0]?.[1]).toBe(11);
+    expect(selectPreferredChannelMock).not.toHaveBeenCalled();
   });
 
   it('decodes zstd-compressed codex responses SSE before relaying native downstream streams', async () => {

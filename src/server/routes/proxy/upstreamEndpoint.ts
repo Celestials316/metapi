@@ -53,6 +53,11 @@ export {
 export type { UpstreamEndpoint } from '../../proxy-core/orchestration/upstreamRequest.js';
 export type EndpointPreference = DownstreamFormat | 'responses';
 
+export type StrictEndpointPolicy = {
+  allowedEndpoints: readonly UpstreamEndpoint[];
+  bypassRuntimePreference?: boolean;
+};
+
 type ChannelContext = {
   site: {
     id: number;
@@ -526,6 +531,7 @@ export async function resolveUpstreamEndpointCandidates(
     wantsNativeResponsesReasoning?: boolean;
     wantsContinuationAwareResponses?: boolean;
   },
+  strictEndpointPolicy?: StrictEndpointPolicy,
 ): Promise<UpstreamEndpoint[]> {
   await ensureUpstreamEndpointRuntimeStateLoaded(context.site.id);
   const sitePlatform = normalizePlatformName(context.site.platform);
@@ -538,13 +544,23 @@ export async function resolveUpstreamEndpointCandidates(
   const hasNonImageFileInput = capabilityProfile.hasNonImageFileInput;
   const wantsNativeResponsesReasoning = capabilityProfile.wantsNativeResponsesReasoning;
   const wantsContinuationAwareResponses = capabilityProfile.wantsContinuationAwareResponses;
-  const applyRuntimePreference = (candidates: UpstreamEndpoint[]) => (
-    applyUpstreamEndpointRuntimePreference(candidates, {
+  const allowedStrictEndpoints = strictEndpointPolicy?.allowedEndpoints
+    ? Array.from(new Set(strictEndpointPolicy.allowedEndpoints))
+    : null;
+  const applyRuntimePreference = (candidates: UpstreamEndpoint[]) => {
+    const scopedCandidates = allowedStrictEndpoints
+      ? candidates.filter((endpoint) => allowedStrictEndpoints.includes(endpoint))
+      : candidates;
+    if (allowedStrictEndpoints && scopedCandidates.length > 0) {
+      return [...scopedCandidates];
+    }
+    return applyUpstreamEndpointRuntimePreference(scopedCandidates, {
       siteId: context.site.id,
       downstreamFormat,
       capabilityProfile,
-    })
-  );
+      allowRuntimePreference: strictEndpointPolicy?.bypassRuntimePreference !== true,
+    });
+  };
   const conversationFileSummary = requestCapabilities?.conversationFileSummary ?? {
     hasImage: false,
     hasAudio: false,

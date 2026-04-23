@@ -747,6 +747,28 @@ export type ProxyDebugTraceDetail = {
     finalResponseHeadersJson?: string | null;
     finalResponseBodyJson?: string | null;
   };
+
+  runtimeDiagnostics?: {
+    activeRuntime?: {
+      traceId: number;
+      downstreamPath: string;
+      acceptedAtMs: number;
+      firstByteAtMs?: number | null;
+      lastActivityAtMs: number;
+      finalizedAtMs?: number | null;
+      stage: string;
+    } | null;
+    websocketRuntime?: {
+      sessionId: string;
+      socketUrl?: string | null;
+      hasOpenSocket: boolean;
+      createdAtMs: number;
+      lastActivityAtMs: number;
+      lastTerminalAtMs?: number | null;
+      lastTerminalReason?: string | null;
+      lastCloseReason?: string | null;
+    } | null;
+  };
   attempts: Array<{
     id: number;
     attemptIndex: number;

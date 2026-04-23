@@ -122,9 +122,12 @@ export function buildSurfaceStickySessionKey(input: {
   downstreamPath: string;
   downstreamApiKeyId?: number | null;
 }): string | null {
+  const strongSessionId = input.clientContext?.continuityTrust === 'strong'
+    ? input.clientContext?.sessionId || null
+    : null;
   return proxyChannelCoordinator.buildStickySessionKey({
     clientKind: input.clientContext?.clientKind || null,
-    sessionId: input.sessionId ?? input.clientContext?.sessionId ?? null,
+    sessionId: strongSessionId,
     continuityKey: input.continuityKey || null,
     requestedModel: input.requestedModel,
     downstreamPath: input.downstreamPath,
@@ -750,6 +753,7 @@ export function createSurfaceFailureToolkit(input: {
       upstreamPath?: string | null;
       httpStatus?: number;
       runtimeFailureStatus?: number | null;
+      runtimeReason?: string | null;
     }) {
       const errorMessage = args.errorMessage || 'stream processing failed';
       if (typeof args.runtimeFailureStatus === 'number') {
@@ -757,11 +761,13 @@ export function createSurfaceFailureToolkit(input: {
           status: args.runtimeFailureStatus,
           errorText: errorMessage,
           modelName: args.modelName,
+          runtimeReason: args.runtimeReason,
         }, args.selected.account.id);
       } else {
         await tokenRouter.recordFailure(args.selected.channel.id, {
           errorText: errorMessage,
           modelName: args.modelName,
+          runtimeReason: args.runtimeReason,
         }, args.selected.account.id);
       }
       await log({

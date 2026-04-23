@@ -24,6 +24,8 @@ export type DetectedCliProfile = {
   id: CliProfileId;
   sessionId?: string;
   traceHint?: string;
+  conversationHint?: string;
+  continuityTrust?: 'strong' | 'weak';
   clientAppId?: string;
   clientAppName?: string;
   clientConfidence?: CliProfileClientConfidence;

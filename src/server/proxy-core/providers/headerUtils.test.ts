@@ -49,7 +49,7 @@ describe('provider header utils', () => {
     ).toBe('GeminiCLI/0.55.0/gemini-2.5-flash (darwin; arm64)');
   });
 
-  it('builds codex runtime headers with continuity-derived session identifiers', async () => {
+  it('does not derive stable codex session identifiers from weak continuity keys', async () => {
     const { buildCodexRuntimeHeaders } = await import('./headerUtils.js');
 
     const headers = buildCodexRuntimeHeaders({
@@ -62,7 +62,6 @@ describe('provider header utils', () => {
         'chatgpt-account-id': 'acct-1',
       },
       stream: false,
-      continuityKey: 'cache-key-1',
       explicitSessionId: null,
     });
 
@@ -70,7 +69,7 @@ describe('provider header utils', () => {
     expect(headers.Originator).toBe('codex_cli_rs');
     expect(headers['Chatgpt-Account-Id']).toBe('acct-1');
     expect(headers.Session_id).toMatch(/^[0-9a-f-]{36}$/);
-    expect(headers.Conversation_id).toBe(headers.Session_id);
+    expect(headers.Conversation_id).toBeUndefined();
     expect(headers.Accept).toBe('application/json');
   });
 
@@ -84,7 +83,6 @@ describe('provider header utils', () => {
         'chatgpt-account-id': 'acct-base',
       },
       stream: true,
-      continuityKey: 'cache-key-2',
       explicitSessionId: 'session-base',
     });
 
@@ -92,7 +90,7 @@ describe('provider header utils', () => {
     expect(headers.Originator).toBe('codex_exec');
     expect(headers['Chatgpt-Account-Id']).toBe('acct-base');
     expect(headers.Session_id).toBe('session-base');
-    expect(headers.Conversation_id).toBe('session-base');
+    expect(headers.Conversation_id).toBeUndefined();
     expect(headers.Accept).toBe('text/event-stream');
   });
 

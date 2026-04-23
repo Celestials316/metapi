@@ -11,6 +11,8 @@ export type DownstreamClientContext = {
   clientKind: DownstreamClientKind;
   sessionId?: string;
   traceHint?: string;
+  conversationHint?: string;
+  continuityTrust?: 'strong' | 'weak';
   clientAppId?: string;
   clientAppName?: string;
   clientConfidence?: DownstreamClientConfidence;
@@ -281,6 +283,8 @@ export function detectDownstreamClientContext(input: {
     clientKind: detected.id,
     ...(detected.sessionId ? { sessionId: detected.sessionId } : {}),
     ...(detected.traceHint ? { traceHint: detected.traceHint } : {}),
+    ...(detected.conversationHint ? { conversationHint: detected.conversationHint } : {}),
+    ...(detected.continuityTrust ? { continuityTrust: detected.continuityTrust } : {}),
     ...(explicitSelfReport || fingerprint || profileClientApp || {}),
   };
 }

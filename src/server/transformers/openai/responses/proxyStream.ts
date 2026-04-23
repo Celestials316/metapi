@@ -4,6 +4,7 @@ import { completeResponsesStream, createOpenAiResponsesAggregateState, failRespo
 import { openAiResponsesOutbound } from './outbound.js';
 import { openAiResponsesStream } from './stream.js';
 import { config } from '../../../config.js';
+import { finalizeProxyActiveRuntime, registerProxyActiveRuntime, touchProxyActiveRuntime } from '../../../services/proxyActiveRuntimeRegistry.js';
 
 type StreamReader = {
   read(): Promise<{ done: boolean; value?: Uint8Array }>;
@@ -23,7 +24,10 @@ type ResponsesProxyStreamResult = {
 type ResponsesProxyStreamSessionInput = {
   modelName: string;
   successfulUpstreamPath: string;
+  runtimeTraceId?: number | null;
+  downstreamPath?: string;
   strictTerminalEvents?: boolean;
+  idleTimeoutMs?: number;
   getUsage: () => {
     promptTokens: number;
     completionTokens: number;
@@ -200,6 +204,15 @@ export function createResponsesProxyStreamSession(input: ResponsesProxyStreamSes
       errorMessage: getResponsesStreamFailureMessage(payload, fallbackMessage),
     };
     input.writeLines(failResponsesStream(responsesState, streamContext, input.getUsage(), payload));
+  };
+
+  const failIdleTimeout = () => {
+    fail({
+      type: 'response.failed',
+      error: {
+        message: 'stream idle timeout',
+      },
+    }, 'stream idle timeout');
   };
 
   const complete = () => {
@@ -383,12 +396,38 @@ export function createResponsesProxyStreamSession(input: ResponsesProxyStreamSes
       return terminalResult;
     },
     async run(reader: StreamReader | null | undefined, response: ResponseSink): Promise<ResponsesProxyStreamResult> {
+      const traceId = Number(input.runtimeTraceId || 0);
+      if (traceId > 0) {
+        registerProxyActiveRuntime({
+          traceId,
+          downstreamPath: input.downstreamPath || '/v1/responses',
+        });
+      }
       const lifecycle = createProxyStreamLifecycle<ParsedSseEvent>({
         reader,
         response,
         pullEvents: (buffer) => openAiResponsesStream.pullSseEvents(buffer),
         handleEvent: handleEventBlock,
         onEof: closeOut,
+        idleTimeoutMs: input.idleTimeoutMs,
+        onIdleTimeout: () => {
+          failIdleTimeout();
+          return true;
+        },
+        onChunkActivity: () => {
+          if (traceId > 0) {
+            touchProxyActiveRuntime(traceId, { stage: 'streaming_active', markFirstByte: true });
+          }
+        },
+        onFinalize: ({ reason }) => {
+          if (traceId <= 0) return;
+          if (reason === 'idle_timeout') {
+            touchProxyActiveRuntime(traceId, { stage: 'stream_idle' });
+          }
+          finalizeProxyActiveRuntime(traceId, {
+            stage: terminalResult.status === 'failed' ? 'failed' : 'completed',
+          });
+        },
       });
       await lifecycle.run();
       return terminalResult;

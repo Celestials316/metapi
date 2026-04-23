@@ -62,6 +62,7 @@ vi.mock('../../services/alertService.js', () => ({
   reportTokenExpired: (...args: unknown[]) => reportTokenExpiredMock(...args),
 }));
 
+
 vi.mock('../../services/downstreamApiKeyService.js', () => ({
   authorizeDownstreamToken: (...args: unknown[]) => authorizeDownstreamTokenMock(...args),
   consumeManagedKeyRequest: (...args: unknown[]) => consumeManagedKeyRequestMock(...args),
@@ -301,6 +302,7 @@ function createClientSocketForPath(path: string, headers: Record<string, string>
 describe('responses websocket transport', () => {
   const originalCodexResponsesWebsocketBeta = config.codexResponsesWebsocketBeta;
   const originalCodexUpstreamWebsocketEnabled = config.codexUpstreamWebsocketEnabled;
+  const originalCodexWebsocketIdleTimeoutMs = config.codexWebsocketIdleTimeoutMs;
   let app: FastifyInstance;
   let baseUrl: string;
   let upstreamServer: WebSocketServer;
@@ -392,6 +394,7 @@ describe('responses websocket transport', () => {
     upstreamRequests = [];
     (config as any).codexResponsesWebsocketBeta = originalCodexResponsesWebsocketBeta;
     (config as any).codexUpstreamWebsocketEnabled = true;
+    (config as any).codexWebsocketIdleTimeoutMs = originalCodexWebsocketIdleTimeoutMs;
     rejectedUpgradeStatus = 426;
     rejectedUpgradeStatusText = 'Upgrade Required';
     rejectedUpgradeBody = 'Upgrade Required';
@@ -437,6 +440,7 @@ describe('responses websocket transport', () => {
 
   afterAll(async () => {
     (config as any).codexUpstreamWebsocketEnabled = originalCodexUpstreamWebsocketEnabled;
+    (config as any).codexWebsocketIdleTimeoutMs = originalCodexWebsocketIdleTimeoutMs;
     for (const socket of trackedClientSockets) {
       try {
         socket.terminate();
@@ -754,6 +758,47 @@ describe('responses websocket transport', () => {
         },
       ],
     });
+  });
+
+  it('emits a websocket error when the upstream websocket turn goes idle before a terminal event', async () => {
+    const selectedChannel = createSelectedChannel({
+      siteUrl: upstreamSiteUrl,
+    });
+    selectChannelMock.mockReturnValue(selectedChannel);
+    previewSelectedChannelMock.mockResolvedValue(selectedChannel);
+    (config as any).codexWebsocketIdleTimeoutMs = 50;
+    upstreamMessageHandler = (socket) => {
+      socket.send(JSON.stringify({
+        type: 'response.created',
+        response: {
+          id: 'resp_idle_ws',
+          model: 'gpt-5.4',
+          status: 'in_progress',
+          output: [],
+        },
+      }));
+    };
+
+    const socket = createClientSocket(baseUrl, {
+      session_id: 'ws-session-idle',
+    });
+    await waitForSocketOpen(socket);
+
+    const messagePromise = waitForSocketMessageMatching(
+      socket,
+      (message) => message?.type === 'error' && /stream idle timeout/i.test(String(message?.error?.message || '')),
+      1000,
+    );
+    socket.send(JSON.stringify({
+      type: 'response.create',
+      model: 'gpt-5.4',
+      input: [],
+    }));
+
+    const message = await messagePromise;
+    expect(message.error.message).toContain('stream idle timeout');
+    socket.close();
+    (config as any).codexWebsocketIdleTimeoutMs = originalCodexWebsocketIdleTimeoutMs;
   });
 
   it('retries websocket turns once without previous_response_id when the upstream reports previous_response_not_found', async () => {

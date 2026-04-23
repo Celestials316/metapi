@@ -1,4 +1,5 @@
 import Fastify, { type FastifyInstance } from 'fastify';
+import { registerProxyActiveRuntime, resetProxyActiveRuntimeRegistry } from '../../services/proxyActiveRuntimeRegistry.js';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
@@ -34,6 +35,7 @@ describe('stats proxy debug api', () => {
   beforeEach(async () => {
     await db.delete(schema.proxyDebugAttempts).run();
     await db.delete(schema.proxyDebugTraces).run();
+    resetProxyActiveRuntimeRegistry();
   });
 
   afterAll(async () => {
@@ -41,6 +43,44 @@ describe('stats proxy debug api', () => {
     const dbModule = await import('../../db/index.js');
     await dbModule.closeDbConnections();
     delete process.env.DATA_DIR;
+  });
+
+
+  it('includes runtime diagnostics alongside proxy debug trace detail', async () => {
+    const trace = await store.createProxyDebugTrace({
+      downstreamPath: '/v1/responses',
+      clientKind: 'codex',
+      sessionId: 'sess-runtime-1',
+      traceHint: 'trace-runtime-1',
+      requestedModel: 'gpt-5.4',
+      requestHeaders: { authorization: 'Bearer test' },
+      requestBody: { model: 'gpt-5.4' },
+    });
+
+    registerProxyActiveRuntime({
+      traceId: trace.id,
+      downstreamPath: '/v1/responses',
+      nowMs: 123,
+    });
+
+    const detailResponse = await app.inject({
+      method: 'GET',
+      url: `/api/stats/proxy-debug/traces/${trace.id}`,
+    });
+
+    expect(detailResponse.statusCode).toBe(200);
+    const detailBody = detailResponse.json() as {
+      runtimeDiagnostics?: {
+        activeRuntime?: { traceId?: number; downstreamPath?: string; stage?: string } | null;
+        websocketRuntime?: unknown;
+      };
+    };
+    expect(detailBody.runtimeDiagnostics?.activeRuntime).toMatchObject({
+      traceId: trace.id,
+      downstreamPath: '/v1/responses',
+      stage: 'accepted',
+    });
+    expect(detailBody.runtimeDiagnostics?.websocketRuntime).toBeNull();
   });
 
   it('lists and returns proxy debug traces with attempt details', async () => {

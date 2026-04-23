@@ -87,11 +87,23 @@ type FailureAwareChannel = {
   lastFailAt?: string | null;
 };
 
+type SiteRuntimeFailureReason =
+  | 'stream_idle_timeout'
+  | 'stream_failed'
+  | 'startup_reconciled_orphan'
+  | 'runtime_scavenged_orphan'
+  | 'proxy-runtime-hygiene'
+  | 'websocket_stale_evicted'
+  | 'terminal_event'
+  | 'socket_closed'
+  | 'response.completed';
+
 type SiteRuntimeFailureContext = {
   status?: number | null;
   errorText?: string | null;
   modelName?: string | null;
   suppressionReason?: string | null;
+  runtimeReason?: SiteRuntimeFailureReason | string | null;
 };
 
 type SiteRuntimeHealthState = {
@@ -412,6 +424,18 @@ function isValidationRuntimeFailure(context: SiteRuntimeFailureContext = {}): bo
   return matchesAnyPattern(SITE_VALIDATION_FAILURE_PATTERNS, context.errorText);
 }
 
+function isRuntimeLifecycleFailureReason(reason: string | null | undefined): boolean {
+  const normalized = typeof reason === 'string' ? reason.trim() : '';
+  return normalized === 'stream_idle_timeout'
+    || normalized === 'stream_failed'
+    || normalized === 'startup_reconciled_orphan'
+    || normalized === 'runtime_scavenged_orphan'
+    || normalized === 'proxy-runtime-hygiene'
+    || normalized === 'websocket_stale_evicted'
+    || normalized === 'terminal_event'
+    || normalized === 'socket_closed';
+}
+
 function classifyManualDispatchFailureKind(context: SiteRuntimeFailureContext = {}): 'soft' | 'hard' {
   const status = typeof context.status === 'number' ? context.status : 0;
   const errorText = (context.errorText || '').trim();
@@ -624,6 +648,23 @@ function resolveStableFirstSuccessRate(
 function resolveSiteRuntimeFailurePenalty(context: SiteRuntimeFailureContext = {}): number {
   const status = typeof context.status === 'number' ? context.status : 0;
   const errorText = (context.errorText || '').trim();
+  const runtimeReason = typeof context.runtimeReason === 'string' ? context.runtimeReason.trim() : '';
+
+  if (runtimeReason === 'stream_idle_timeout') {
+    return 2.8;
+  }
+
+  if (runtimeReason === 'stream_failed') {
+    return 2.4;
+  }
+
+  if (runtimeReason === 'startup_reconciled_orphan' || runtimeReason === 'runtime_scavenged_orphan') {
+    return 3.2;
+  }
+
+  if (runtimeReason === 'websocket_stale_evicted' || runtimeReason === 'proxy-runtime-hygiene') {
+    return 2.2;
+  }
 
   if (isUsageLimitRateLimitFailure({ status, errorText })) {
     return 0.4;
@@ -663,6 +704,13 @@ function resolveSiteRuntimeFailurePenalty(context: SiteRuntimeFailureContext = {
 function isTransientSiteRuntimeFailure(context: SiteRuntimeFailureContext = {}): boolean {
   const status = typeof context.status === 'number' ? context.status : 0;
   const errorText = (context.errorText || '').trim();
+  const runtimeReason = typeof context.runtimeReason === 'string' ? context.runtimeReason.trim() : '';
+  if (runtimeReason === 'response.completed') {
+    return false;
+  }
+  if (isRuntimeLifecycleFailureReason(runtimeReason)) {
+    return true;
+  }
   if (isUsageLimitRateLimitFailure({ status, errorText })) {
     return false;
   }

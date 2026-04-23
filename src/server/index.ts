@@ -29,6 +29,11 @@ import * as routeRefreshWorkflow from './services/routeRefreshWorkflow.js';
 import { startProxyFileRetentionService, stopProxyFileRetentionService } from './services/proxyFileRetentionService.js';
 import { setLegacyProxyLogRetentionFallbackEnabled, stopProxyLogRetentionService } from './services/proxyLogRetentionService.js';
 import { buildStartupSummaryLines } from './services/startupInfo.js';
+import {
+  runStartupProxyRuntimeReconciliation,
+  startProxyRuntimeHygieneScheduler,
+  stopProxyRuntimeHygieneScheduler,
+} from './services/proxyRuntimeHygieneService.js';
 import { repairStoredCreatedAtValues } from './services/storedTimestampRepairService.js';
 import { migrateSiteApiKeysToAccounts } from './services/siteApiKeyMigrationService.js';
 import { ensureDefaultSitesSeeded } from './services/defaultSiteSeedService.js';
@@ -183,6 +188,10 @@ try {
   await ensureDefaultSitesSeeded();
   await ensureOauthIdentityBackfill();
   await routeRefreshWorkflow.rebuildRoutesOnly();
+  const reconciledRuntimeTraces = await runStartupProxyRuntimeReconciliation();
+  if (reconciledRuntimeTraces > 0) {
+    console.log(`Reconciled ${reconciledRuntimeTraces} stale proxy runtime trace(s) at startup`);
+  }
 
   console.log('Loaded runtime settings overrides');
 } catch (error) {
@@ -255,6 +264,7 @@ if (existsSync(webDir)) {
 // Start scheduler
 await startScheduler();
 await reloadBackupWebdavScheduler();
+startProxyRuntimeHygieneScheduler();
 startSiteAnnouncementPolling();
 startModelAvailabilityProbeScheduler();
 startChannelRecoveryProbeScheduler();
@@ -270,6 +280,7 @@ startProxyFileRetentionService();
 app.addHook('onClose', async () => {
   stopSiteAnnouncementPolling();
   stopUpdateCenterPolling();
+  stopProxyRuntimeHygieneScheduler();
   stopProxyFileRetentionService();
   stopProxyLogRetentionService();
   stopModelAvailabilityProbeScheduler();

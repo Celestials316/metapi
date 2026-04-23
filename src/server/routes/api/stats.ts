@@ -35,6 +35,7 @@ import {
   clearProxyOpsRuntimeState,
   getProxyOpsRuntimeStateSnapshot,
 } from '../../services/proxyOpsRuntimeStateService.js';
+import { buildProxyDebugRuntimeDiagnostics } from '../../services/proxyDebugDiagnosticsService.js';
 import { runChannelRecoveryProbeSweep } from '../../services/channelRecoveryProbeService.js';
 import { parseProxyLogMessageMeta } from '../proxy/logPathMeta.js';
 import { requiresManagedAccountTokens } from '../../services/accountExtraConfig.js';
@@ -1119,7 +1120,13 @@ export async function statsRoutes(app: FastifyInstance) {
       return reply.code(404).send({ message: 'proxy debug trace not found' });
     }
 
-    return detail;
+    return {
+      ...detail,
+      runtimeDiagnostics: buildProxyDebugRuntimeDiagnostics({
+        traceId: id,
+        trace: detail.trace,
+      }),
+    };
   });
 
   // Models marketplace - refresh upstream models and aggregate.

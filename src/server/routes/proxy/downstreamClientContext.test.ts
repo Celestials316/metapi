@@ -61,8 +61,28 @@ describe('detectDownstreamClientContext', () => {
       clientAppId: 'codex_cli_rs',
       clientAppName: 'Codex CLI',
       clientConfidence: 'exact',
+      continuityTrust: 'strong',
       sessionId: 'codex-session-123',
       traceHint: 'codex-session-123',
+    });
+  });
+
+  it('keeps conversation_id as weak continuity trace only for codex requests', () => {
+    expect(detectDownstreamClientContext({
+      downstreamPath: '/v1/responses',
+      headers: {
+        'openai-beta': 'responses-2025-03-11',
+        'x-stainless-lang': 'typescript',
+        conversation_id: 'conv-only-1',
+      },
+    })).toEqual({
+      clientKind: 'codex',
+      clientAppId: 'codex',
+      clientAppName: 'Codex',
+      clientConfidence: 'heuristic',
+      continuityTrust: 'weak',
+      traceHint: 'conv-only-1',
+      conversationHint: 'conv-only-1',
     });
   });
 

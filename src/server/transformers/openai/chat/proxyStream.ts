@@ -5,6 +5,7 @@ import { createOpenAiChatAggregateState, applyOpenAiChatStreamEvent, finalizeOpe
 import { openAiChatOutbound } from './outbound.js';
 import { openAiChatStream } from './stream.js';
 import { config } from '../../../config.js';
+import { finalizeProxyActiveRuntime, registerProxyActiveRuntime, touchProxyActiveRuntime } from '../../../services/proxyActiveRuntimeRegistry.js';
 
 type StreamReader = {
   read(): Promise<{ done: boolean; value?: Uint8Array }>;
@@ -16,6 +17,8 @@ type ChatProxyStreamSessionInput = {
   downstreamFormat: DownstreamFormat;
   modelName: string;
   successfulUpstreamPath: string;
+  runtimeTraceId?: number | null;
+  downstreamPath?: string;
   onParsedPayload?: (payload: unknown) => void;
   writeLines: (lines: string[]) => void;
   writeRaw: (chunk: string) => void;
@@ -334,12 +337,30 @@ export function createChatProxyStreamSession(input: ChatProxyStreamSessionInput)
       return terminalResult;
     },
     async run(reader: StreamReader | null | undefined, response: ResponseSink): Promise<ChatProxyStreamResult> {
+      const traceId = Number(input.runtimeTraceId || 0);
+      if (traceId > 0) {
+        registerProxyActiveRuntime({
+          traceId,
+          downstreamPath: input.downstreamPath || '/v1/chat/completions',
+        });
+      }
       const lifecycle = createProxyStreamLifecycle<ParsedSseEvent>({
         reader,
         response,
         pullEvents: (buffer) => downstreamTransformer.pullSseEvents(buffer),
         handleEvent: handleEventBlock,
         onEof: finalize,
+        onChunkActivity: () => {
+          if (traceId > 0) {
+            touchProxyActiveRuntime(traceId, { stage: 'streaming_active', markFirstByte: true });
+          }
+        },
+        onFinalize: () => {
+          if (traceId <= 0) return;
+          finalizeProxyActiveRuntime(traceId, {
+            stage: terminalResult.status === 'failed' ? 'failed' : 'completed',
+          });
+        },
       });
       await lifecycle.run();
       return terminalResult;

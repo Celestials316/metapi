@@ -121,6 +121,7 @@ describe('proxyDebugTraceStore', () => {
         error: {
           message: 'Channel busy',
         },
+        metapiRuntimeReason: 'stream_idle_timeout',
       },
     });
 
@@ -141,6 +142,7 @@ describe('proxyDebugTraceStore', () => {
     expect(detail?.trace.requestHeadersJson || '').toContain('Bearer developer-token');
     expect(detail?.trace.requestBodyJson || '').toContain('"hello"');
     expect(detail?.trace.finalResponseBodyJson || '').toContain('Channel busy');
+    expect(detail?.trace.finalResponseBodyJson || '').toContain('stream_idle_timeout');
     expect(detail?.attempts).toHaveLength(1);
     expect(detail?.attempts[0]?.requestHeadersJson || '').toContain('developer-token');
     expect(detail?.attempts[0]?.responseBodyJson || '').toContain('forbidden');

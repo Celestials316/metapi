@@ -618,6 +618,111 @@ describe('resolveUpstreamEndpointCandidates', () => {
 
     expect(order).toEqual(['responses', 'messages', 'chat']);
   });
+  it('keeps codex strict responses-only even when runtime success memory prefers chat', async () => {
+    recordUpstreamEndpointSuccess({
+      siteId: baseContext.site.id,
+      endpoint: 'chat',
+      downstreamFormat: 'openai',
+      modelName: 'gpt-5.2-codex',
+    });
+
+    const order = await resolveUpstreamEndpointCandidates(
+      {
+        ...baseContext,
+        site: { ...baseContext.site, platform: 'new-api' },
+      },
+      'gpt-5.2-codex',
+      'responses',
+      undefined,
+      undefined,
+      {
+        allowedEndpoints: ['responses'],
+        bypassRuntimePreference: true,
+      },
+    );
+
+    expect(order).toEqual(['responses']);
+  });
+
+  it('keeps codex strict responses-only even when runtime failure memory blocks responses and suggests chat', async () => {
+    const memoryWrite = recordUpstreamEndpointFailure({
+      siteId: baseContext.site.id,
+      endpoint: 'responses',
+      downstreamFormat: 'responses',
+      modelName: 'gpt-5.2-codex',
+      status: 400,
+      errorText: 'Unsupported Media Type: Only "application/json" is allowed',
+    });
+    expect(memoryWrite).toMatchObject({
+      action: 'failure',
+      endpoint: 'responses',
+      blockedEndpoint: 'responses',
+      preferredEndpoint: null,
+    });
+
+    const permissiveOrder = await resolveUpstreamEndpointCandidates(
+      {
+        ...baseContext,
+        site: { ...baseContext.site, platform: 'new-api' },
+      },
+      'gpt-5.2-codex',
+      'responses',
+    );
+    expect(permissiveOrder).toEqual(['chat', 'messages']);
+
+    const strictOrder = await resolveUpstreamEndpointCandidates(
+      {
+        ...baseContext,
+        site: { ...baseContext.site, platform: 'new-api' },
+      },
+      'gpt-5.2-codex',
+      'responses',
+      undefined,
+      undefined,
+      {
+        allowedEndpoints: ['responses'],
+        bypassRuntimePreference: true,
+      },
+    );
+
+    expect(strictOrder).toEqual(['responses']);
+  });
+
+  it('bypasses runtime endpoint reordering when strict endpoint policy is enabled', async () => {
+    recordUpstreamEndpointSuccess({
+      siteId: baseContext.site.id,
+      endpoint: 'chat',
+      downstreamFormat: 'openai',
+      modelName: 'gpt-5.3',
+    });
+
+    const nonStrictOrder = await resolveUpstreamEndpointCandidates(
+      {
+        ...baseContext,
+        site: { ...baseContext.site, platform: 'new-api' },
+      },
+      'gpt-5.3',
+      'openai',
+    );
+    expect(nonStrictOrder).toEqual(['chat', 'messages', 'responses']);
+
+    const strictOrder = await resolveUpstreamEndpointCandidates(
+      {
+        ...baseContext,
+        site: { ...baseContext.site, platform: 'new-api' },
+      },
+      'gpt-5.3',
+      'openai',
+      undefined,
+      undefined,
+      {
+        allowedEndpoints: ['responses', 'chat'],
+        bypassRuntimePreference: true,
+      },
+    );
+    expect(strictOrder).toEqual(['chat', 'responses']);
+  });
+
 
   it('treats endpoint-not-found responses as downgrade candidates', () => {
     expect(isEndpointDowngradeError(404, '{"error":{"message":"Not Found","type":"not_found_error"}}')).toBe(true);
@@ -813,7 +918,7 @@ describe('buildUpstreamEndpointRequest', () => {
     expect(request.headers['Chatgpt-Account-Id']).toBe('chatgpt-account-123');
     expect(request.headers.Version).toBe('0.101.0');
     expect(request.headers.Session_id).toMatch(/^[0-9a-f-]{36}$/i);
-    expect(request.headers.Conversation_id).toBe(request.headers.Session_id);
+    expect(request.headers.Conversation_id).toBeUndefined();
     expect(request.headers['User-Agent']).toBe('codex_cli_rs/0.101.0 (Mac OS 26.0.1; arm64) Apple_Terminal/464');
     expect(request.headers.Accept).toBe('application/json');
     expect(request.headers.Connection).toBe('Keep-Alive');
@@ -876,7 +981,7 @@ describe('buildUpstreamEndpointRequest', () => {
     expect(request.headers.Accept).toBe('text/event-stream');
     expect(request.headers.accept).toBeUndefined();
     expect(request.headers.Session_id).toBe('session-abc');
-    expect(request.headers.Conversation_id).toBe('session-abc');
+    expect(request.headers.Conversation_id).toBeUndefined();
     expect(request.body.instructions).toBe('');
     expect(request.body.store).toBe(false);
     expect(request.body.max_output_tokens).toBeUndefined();
@@ -889,7 +994,7 @@ describe('buildUpstreamEndpointRequest', () => {
     ]);
   });
 
-  it('reuses a stable codex session id when the same downstream continuity key is provided', () => {
+  it('does not reuse strong codex session ids from weak continuity cache keys alone', () => {
     const firstRequest = buildUpstreamEndpointRequest({
       endpoint: 'responses',
       modelName: 'gpt-5.4',
@@ -926,8 +1031,9 @@ describe('buildUpstreamEndpointRequest', () => {
       codexSessionCacheKey: 'gpt-5.4:user-123',
     } as any);
 
-    expect(firstRequest.headers.Session_id).toBe(secondRequest.headers.Session_id);
-    expect(firstRequest.headers.Conversation_id).toBe(secondRequest.headers.Conversation_id);
+    expect(firstRequest.headers.Session_id).not.toBe(secondRequest.headers.Session_id);
+    expect(firstRequest.headers.Conversation_id).toBeUndefined();
+    expect(secondRequest.headers.Conversation_id).toBeUndefined();
     expect(firstRequest.body.prompt_cache_key).toBe(secondRequest.body.prompt_cache_key);
   });
 
@@ -1011,7 +1117,7 @@ describe('buildUpstreamEndpointRequest', () => {
     } as any);
 
     expect(request.headers.Session_id).toMatch(/^[0-9a-f-]{36}$/i);
-    expect(request.headers.Conversation_id).toBe(request.headers.Session_id);
+    expect(request.headers.Conversation_id).toBeUndefined();
     expect(request.body.prompt_cache_key).toBeUndefined();
     expect(request.body.instructions).toBe('');
     expect(request.body.stream).toBe(false);

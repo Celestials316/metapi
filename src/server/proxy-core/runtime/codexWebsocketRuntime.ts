@@ -1,5 +1,6 @@
 import type { IncomingMessage } from 'node:http';
 import WebSocket from 'ws';
+import { config } from '../../config.js';
 import {
   extractResponsesTerminalResponseId,
   isResponsesPreviousResponseNotFoundError,
@@ -23,6 +24,7 @@ import type {
   CodexWebsocketRuntimeResult,
   CodexWebsocketRuntimeSendInput,
   CodexWebsocketSession,
+  CodexWebsocketSessionSnapshot,
   CodexWebsocketSessionStore,
 } from './types.js';
 
@@ -197,16 +199,38 @@ async function closeSocket(socket: WebSocket | null): Promise<void> {
   });
 }
 
+function touchSession(session: CodexWebsocketSession, nowMs = Date.now()): void {
+  session.lastActivityAtMs = nowMs;
+}
+
+function markSessionTerminal(
+  session: CodexWebsocketSession,
+  input?: { nowMs?: number; reason?: string | null; closeReason?: string | null },
+): void {
+  const nowMs = input?.nowMs ?? Date.now();
+  session.lastActivityAtMs = nowMs;
+  session.lastTerminalAtMs = nowMs;
+  session.lastTerminalReason = typeof input?.reason === 'string' && input.reason.trim()
+    ? input.reason.trim()
+    : session.lastTerminalReason;
+  session.lastCloseReason = typeof input?.closeReason === 'string' && input.closeReason.trim()
+    ? input.closeReason.trim()
+    : session.lastCloseReason;
+}
+
 function clearSessionSocket(session: CodexWebsocketSession, socket: WebSocket): void {
   if (session.socket !== socket) return;
   session.socket = null;
   session.socketUrl = null;
+  touchSession(session);
 }
 
 function buildContinuationAwareRuntimeBody(
   sessionId: string,
+  trustedSession: boolean,
   body: Record<string, unknown>,
 ): Record<string, unknown> {
+  if (!trustedSession) return body;
   const rememberedResponseId = getCodexSessionResponseId(sessionId);
   if (!shouldInferResponsesPreviousResponseId(body, rememberedResponseId)) {
     return body;
@@ -214,7 +238,8 @@ function buildContinuationAwareRuntimeBody(
   return withResponsesPreviousResponseId(body, rememberedResponseId);
 }
 
-function rememberSessionResponseId(sessionId: string, payload: unknown): void {
+function rememberSessionResponseId(sessionId: string, trustedSession: boolean, payload: unknown): void {
+  if (!trustedSession) return;
   const responseId = extractResponsesTerminalResponseId(payload);
   if (!responseId) return;
   setCodexSessionResponseId(sessionId, responseId);
@@ -225,6 +250,7 @@ async function ensureSessionSocket(
   input: CodexWebsocketRuntimeSendInput,
 ): Promise<{ socket: WebSocket; reusedSession: boolean }> {
   const requestUrl = toCodexWebsocketUrl(input.requestUrl);
+  touchSession(session);
   const existing = session.socket;
   if (
     existing
@@ -248,6 +274,7 @@ async function ensureSessionSocket(
   await waitForSocketOpen(nextSocket);
   session.socket = nextSocket;
   session.socketUrl = requestUrl;
+  touchSession(session);
 
   nextSocket.on('close', () => {
     clearSessionSocket(session, nextSocket);
@@ -273,8 +300,31 @@ async function sendSessionRequestAttempt(
 
   return new Promise<CodexWebsocketRuntimeResult>((resolve, reject) => {
     let settled = false;
+    const idleTimeoutMs = Math.max(0, Math.trunc(config.codexWebsocketIdleTimeoutMs || 0));
+    let idleTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const clearIdleTimer = () => {
+      if (!idleTimer) return;
+      clearTimeout(idleTimer);
+      idleTimer = null;
+    };
+
+    const resetIdleTimer = () => {
+      clearIdleTimer();
+      if (idleTimeoutMs <= 0) return;
+      idleTimer = setTimeout(() => {
+        clearSessionSocket(session, socket);
+        markSessionTerminal(session, {
+          reason: 'stream_idle_timeout',
+          closeReason: 'idle_timeout',
+        });
+        rejectWith('stream idle timeout');
+        void closeSocket(socket);
+      }, idleTimeoutMs);
+    };
 
     const cleanup = () => {
+      clearIdleTimer();
       socket.off('message', onMessage);
       socket.off('error', onError);
       socket.off('close', onClose);
@@ -289,6 +339,8 @@ async function sendSessionRequestAttempt(
 
     const onMessage = (payload: WebSocket.RawData) => {
       try {
+        resetIdleTimer();
+        touchSession(session);
         const parsed = JSON.parse(String(payload));
         if (!isRecord(parsed)) return;
         events.push(parsed);
@@ -304,6 +356,10 @@ async function sendSessionRequestAttempt(
           settled = true;
           cleanup();
           clearSessionSocket(session, socket);
+          markSessionTerminal(session, {
+            reason: asTrimmedString(parsed.type) || 'error',
+            closeReason: 'terminal_error',
+          });
           void closeSocket(socket);
           reject(new CodexWebsocketRuntimeError(extractTerminalErrorMessage(parsed), {
             events: [...events],
@@ -312,7 +368,11 @@ async function sendSessionRequestAttempt(
           }));
           return;
         }
-        rememberSessionResponseId(session.sessionId, parsed);
+        rememberSessionResponseId(session.sessionId, input.trustedSession, parsed);
+        markSessionTerminal(session, {
+          reason: asTrimmedString(parsed.type) || 'response.completed',
+          closeReason: 'terminal_event',
+        });
         settled = true;
         cleanup();
         resolve({
@@ -326,17 +386,26 @@ async function sendSessionRequestAttempt(
 
     const onError = (error: Error) => {
       clearSessionSocket(session, socket);
+      markSessionTerminal(session, {
+        reason: 'socket_error',
+        closeReason: error.message || 'socket_error',
+      });
       rejectWith(error.message || 'upstream websocket error');
     };
 
     const onClose = () => {
       clearSessionSocket(session, socket);
+      markSessionTerminal(session, {
+        reason: 'stream_closed_before_terminal',
+        closeReason: 'socket_closed',
+      });
       rejectWith('stream closed before response.completed');
     };
 
     socket.on('message', onMessage);
     socket.once('error', onError);
     socket.once('close', onClose);
+    resetIdleTimer();
 
     socket.send(JSON.stringify(buildCodexWebsocketRequestBody(input.body)), (error) => {
       if (!error) return;
@@ -350,7 +419,7 @@ async function sendSessionRequest(
   session: CodexWebsocketSession,
   input: CodexWebsocketRuntimeSendInput,
 ): Promise<CodexWebsocketRuntimeResult> {
-  let currentBody = buildContinuationAwareRuntimeBody(session.sessionId, input.body);
+  let currentBody = buildContinuationAwareRuntimeBody(session.sessionId, input.trustedSession, input.body);
   let previousResponseRecoveryTried = false;
 
   for (;;) {
@@ -377,7 +446,9 @@ async function sendSessionRequest(
       }
 
       previousResponseRecoveryTried = true;
-      clearCodexSessionResponseId(session.sessionId);
+      if (input.trustedSession) {
+        clearCodexSessionResponseId(session.sessionId);
+      }
       currentBody = previousResponseRecovery.body;
     }
   }
@@ -397,6 +468,7 @@ export function createCodexWebsocketRuntime(input?: {
 
       await ensureCodexSessionResponseStoreLoaded();
       const session = sessionStore.getOrCreate(sessionId);
+      sessionStore.touch(sessionId);
       const run = session.queue
         .catch(() => undefined)
         .then(() => sendSessionRequest(session, payload));
@@ -411,6 +483,12 @@ export function createCodexWebsocketRuntime(input?: {
       await closeSocket(session.socket);
       session.socket = null;
       session.socketUrl = null;
+      if (!session.lastTerminalReason && !session.lastCloseReason) {
+        markSessionTerminal(session, {
+          reason: 'session_closed',
+          closeReason: 'close_session',
+        });
+      }
       clearCodexSessionResponseId(sessionId);
     },
 
@@ -420,5 +498,32 @@ export function createCodexWebsocketRuntime(input?: {
         await this.closeSession(session.sessionId);
       }
     },
+
+
+    listSessionSnapshots(): CodexWebsocketSessionSnapshot[] {
+      return sessionStore.snapshots();
+    },
+
+    async evictStaleSessions(input?: { staleBeforeMs?: number; closeReason?: string }): Promise<number> {
+      const staleBeforeMs = Math.trunc(Number(input?.staleBeforeMs) || 0);
+      if (!Number.isFinite(staleBeforeMs) || staleBeforeMs <= 0) return 0;
+      const snapshots = sessionStore.snapshots();
+      let evicted = 0;
+      for (const snapshot of snapshots) {
+        if (snapshot.lastActivityAtMs > staleBeforeMs) continue;
+        const session = sessionStore.getOrCreate(snapshot.sessionId);
+        markSessionTerminal(session, {
+          reason: 'websocket_stale_evicted',
+          closeReason: typeof input?.closeReason === 'string' && input.closeReason.trim()
+            ? input.closeReason.trim()
+            : 'stale_evicted',
+        });
+        await this.closeSession(snapshot.sessionId);
+        evicted += 1;
+      }
+      return evicted;
+    },
   };
 }
+
+export const sharedCodexWebsocketRuntime = createCodexWebsocketRuntime();

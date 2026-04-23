@@ -33,7 +33,7 @@ describe('resolveProviderProfile', () => {
     expect(result.headers.Originator).toBe('codex_cli_rs');
     expect(result.headers['Chatgpt-Account-Id']).toBe('chatgpt-account-123');
     expect(result.headers.Session_id).toMatch(/^[0-9a-f-]{36}$/i);
-    expect(result.headers.Conversation_id).toBe(result.headers.Session_id);
+    expect(result.headers.Conversation_id).toBeUndefined();
     expect(result.runtime).toMatchObject({
       executor: 'codex',
       modelName: 'gpt-5.2-codex',

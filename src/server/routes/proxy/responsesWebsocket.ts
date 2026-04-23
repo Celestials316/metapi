@@ -3,7 +3,7 @@ import type { FastifyInstance } from 'fastify';
 import type { IncomingMessage } from 'node:http';
 import type { Duplex } from 'node:stream';
 import { WebSocketServer, type RawData, type WebSocket } from 'ws';
-import { createCodexWebsocketRuntime, CodexWebsocketRuntimeError } from '../../proxy-core/runtime/codexWebsocketRuntime.js';
+import { sharedCodexWebsocketRuntime, CodexWebsocketRuntimeError } from '../../proxy-core/runtime/codexWebsocketRuntime.js';
 import { buildCodexSessionResponseStoreKey } from '../../proxy-core/runtime/codexSessionResponseStore.js';
 import {
   authorizeDownstreamToken,
@@ -22,7 +22,7 @@ const installedApps = new WeakSet<FastifyInstance>();
 const WS_TURN_STATE_HEADER = 'x-codex-turn-state';
 const RESPONSES_WEBSOCKET_MODE_HEADER = 'x-metapi-responses-websocket-mode';
 const RESPONSES_WEBSOCKET_TRANSPORT_HEADER = 'x-metapi-responses-websocket-transport';
-const codexWebsocketRuntime = createCodexWebsocketRuntime();
+const codexWebsocketRuntime = sharedCodexWebsocketRuntime;
 
 type SelectedChannel = NonNullable<Awaited<ReturnType<typeof tokenRouter.selectChannel>>>;
 type ResponsesWebsocketAuthContext = DownstreamTokenAuthSuccess;
@@ -561,6 +561,7 @@ async function handleResponsesWebsocketConnection(
   let selectedChannel: SelectedChannel | null = null;
   let messageQueue = Promise.resolve();
 
+
   socket.once('close', () => {
     const sessionKeys = runtimeSessionKeys.size > 0
       ? Array.from(runtimeSessionKeys)
@@ -648,6 +649,9 @@ async function handleResponsesWebsocketConnection(
               accountId: codexWebsocketChannel.account.id,
               channelId: codexWebsocketChannel.channel.id,
             }) || websocketSessionId;
+            const hasStrongDownstreamSession = !!headerValueToTrimmedString(
+              request.headers.session_id || request.headers['session-id'],
+            );
             runtimeSessionKeys.add(websocketRuntimeSessionKey);
 
             try {
@@ -673,6 +677,7 @@ async function handleResponsesWebsocketConnection(
                   try {
                     return await codexWebsocketRuntime.sendRequest({
                       sessionId: websocketRuntimeSessionKey,
+                      trustedSession: hasStrongDownstreamSession,
                       requestUrl,
                       headers: prepared.headers,
                       body: prepared.body,
@@ -740,7 +745,7 @@ async function handleResponsesWebsocketConnection(
           if (forwarded) {
             lastResponseOutput = forwarded;
           }
-        } catch {
+        } catch (error) {
           writeResponsesWebsocketError(socket, 500, 'internal websocket proxy error');
         }
       });

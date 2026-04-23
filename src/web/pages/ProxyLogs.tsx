@@ -1351,6 +1351,128 @@ export default function ProxyLogs() {
     );
   }
 
+
+  function formatRuntimeTimestamp(value: number | null | undefined) {
+    if (!Number.isFinite(Number(value))) return '-';
+    try {
+      return new Date(Number(value)).toLocaleString();
+    } catch {
+      return String(value);
+    }
+  }
+
+  function formatRuntimeReasonLabel(reason: string | null | undefined) {
+    if (!reason) return '-';
+
+    const normalized = reason.trim();
+    if (!normalized) return '-';
+
+    const labelMap: Record<string, string> = {
+      stream_idle_timeout: '流空闲超时',
+      stream_failed: '流式请求失败',
+      startup_reconciled_orphan: '启动时补扫到孤儿运行态',
+      runtime_scavenged_orphan: '运行中清扫到孤儿运行态',
+      websocket_stale_evicted: 'WebSocket 运行态因陈旧被清理',
+      proxy_runtime_hygiene: '运行态卫生清理',
+      'proxy-runtime-hygiene': '运行态卫生清理',
+      terminal_event: '收到终态事件',
+      socket_closed: 'Socket 提前关闭',
+      response_completed: '响应正常完成',
+      'response.completed': '响应正常完成',
+    };
+
+    if (labelMap[normalized]) {
+      return labelMap[normalized];
+    }
+
+    return normalized.replace(/[_-]+/g, ' ');
+  }
+
+  function formatRuntimeBooleanLabel(value: boolean) {
+    return value ? '是' : '否';
+  }
+
+  function renderRuntimeDiagnosticsSection() {
+    const runtimeDiagnostics = selectedDebugTraceDetail?.data?.runtimeDiagnostics;
+    const activeRuntime = runtimeDiagnostics?.activeRuntime;
+    const websocketRuntime = runtimeDiagnostics?.websocketRuntime;
+
+    return (
+      <div style={{ ...formSectionStyle, gap: 10 }}>
+        <div style={detailSectionTitleStyle}>Runtime Diagnostics</div>
+        <div style={{ display: 'grid', gap: 12 }}>
+          <div style={{ ...formSectionStyle, gap: 10 }}>
+            <div style={detailSectionTitleStyle}>Active Runtime</div>
+            {activeRuntime ? (
+              <div style={detailInfoGridStyle}>
+                <div style={detailInfoItemStyle}>
+                  <div style={detailInfoLabelStyle}>Stage</div>
+                  <div style={detailInfoValueStyle}>{activeRuntime.stage || '-'}</div>
+                </div>
+                <div style={detailInfoItemStyle}>
+                  <div style={detailInfoLabelStyle}>Downstream Path</div>
+                  <div style={detailInfoValueStyle}>{activeRuntime.downstreamPath || '-'}</div>
+                </div>
+                <div style={detailInfoItemStyle}>
+                  <div style={detailInfoLabelStyle}>Accepted At</div>
+                  <div style={detailInfoValueStyle}>{formatRuntimeTimestamp(activeRuntime.acceptedAtMs)}</div>
+                </div>
+                <div style={detailInfoItemStyle}>
+                  <div style={detailInfoLabelStyle}>First Byte</div>
+                  <div style={detailInfoValueStyle}>{formatRuntimeTimestamp(activeRuntime.firstByteAtMs ?? null)}</div>
+                </div>
+                <div style={detailInfoItemStyle}>
+                  <div style={detailInfoLabelStyle}>Last Activity</div>
+                  <div style={detailInfoValueStyle}>{formatRuntimeTimestamp(activeRuntime.lastActivityAtMs)}</div>
+                </div>
+                <div style={detailInfoItemStyle}>
+                  <div style={detailInfoLabelStyle}>Finalized At</div>
+                  <div style={detailInfoValueStyle}>{formatRuntimeTimestamp(activeRuntime.finalizedAtMs ?? null)}</div>
+                </div>
+              </div>
+            ) : (
+              <div style={{ color: 'var(--color-text-muted)', fontSize: 13 }}>暂无 Active Runtime 诊断信息</div>
+            )}
+          </div>
+
+          <div style={{ ...formSectionStyle, gap: 10 }}>
+            <div style={detailSectionTitleStyle}>Websocket Runtime</div>
+            {websocketRuntime ? (
+              <div style={detailInfoGridStyle}>
+                <div style={detailInfoItemStyle}>
+                  <div style={detailInfoLabelStyle}>Session</div>
+                  <div style={detailInfoValueStyle}>{websocketRuntime.sessionId || '-'}</div>
+                </div>
+                <div style={detailInfoItemStyle}>
+                  <div style={detailInfoLabelStyle}>Open Socket</div>
+                  <div style={detailInfoValueStyle}>{formatRuntimeBooleanLabel(websocketRuntime.hasOpenSocket)}</div>
+                </div>
+                <div style={detailInfoItemStyle}>
+                  <div style={detailInfoLabelStyle}>Last Terminal Reason</div>
+                  <div style={detailInfoValueStyle}>{formatRuntimeReasonLabel(websocketRuntime.lastTerminalReason)}</div>
+                </div>
+                <div style={detailInfoItemStyle}>
+                  <div style={detailInfoLabelStyle}>Last Close Reason</div>
+                  <div style={detailInfoValueStyle}>{formatRuntimeReasonLabel(websocketRuntime.lastCloseReason)}</div>
+                </div>
+                <div style={detailInfoItemStyle}>
+                  <div style={detailInfoLabelStyle}>Created At</div>
+                  <div style={detailInfoValueStyle}>{formatRuntimeTimestamp(websocketRuntime.createdAtMs)}</div>
+                </div>
+                <div style={detailInfoItemStyle}>
+                  <div style={detailInfoLabelStyle}>Last Activity</div>
+                  <div style={detailInfoValueStyle}>{formatRuntimeTimestamp(websocketRuntime.lastActivityAtMs)}</div>
+                </div>
+              </div>
+            ) : (
+              <div style={{ color: 'var(--color-text-muted)', fontSize: 13 }}>暂无 Websocket Runtime 诊断信息</div>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   function renderDebugTraceDetailContent() {
     if (!selectedDebugTraceId) {
       return (
@@ -1377,7 +1499,7 @@ export default function ProxyLogs() {
     return (
       <div style={{ display: 'grid', gap: 12 }}>
         <div style={{ ...formSectionStyle, gap: 10 }}>
-          <div style={detailSectionTitleStyle}>基础信息</div>
+          <div style={detailSectionTitleStyle}>Trace Summary</div>
           <div style={detailInfoGridStyle}>
             <div style={detailInfoItemStyle}>
               <div style={detailInfoLabelStyle}>下游路径</div>
@@ -1412,6 +1534,8 @@ export default function ProxyLogs() {
             copyLabel: '最终响应',
           })}
         </div>
+
+        {renderRuntimeDiagnosticsSection()}
 
         <DetailDisclosureCard title={`Attempt 记录 (${selectedDebugTraceDetail.data.attempts.length})`}>
           <div style={{ padding: 12, display: 'grid', gap: 8 }}>

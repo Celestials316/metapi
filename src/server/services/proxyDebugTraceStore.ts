@@ -411,3 +411,26 @@ export async function findLatestProxyDebugTrace(input: {
     .orderBy(desc(schema.proxyDebugTraces.createdAt), desc(schema.proxyDebugTraces.id))
     .get();
 }
+
+
+export type ProxyDebugRuntimeDiagnostics = {
+  activeRuntime?: {
+    traceId: number;
+    downstreamPath: string;
+    acceptedAtMs: number;
+    firstByteAtMs: number | null;
+    lastActivityAtMs: number;
+    finalizedAtMs: number | null;
+    stage: string;
+  } | null;
+  websocketRuntime?: {
+    sessionId: string;
+    socketUrl: string | null;
+    hasOpenSocket: boolean;
+    createdAtMs: number;
+    lastActivityAtMs: number;
+    lastTerminalAtMs: number | null;
+    lastTerminalReason: string | null;
+    lastCloseReason: string | null;
+  } | null;
+};

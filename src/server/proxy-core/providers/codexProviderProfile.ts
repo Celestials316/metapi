@@ -47,7 +47,6 @@ function prepareCodexRequest(input: PrepareProviderRequestInput & {
     providerHeaders: input.providerHeaders,
     stream: input.stream,
     explicitSessionId: asTrimmedString(input.codexExplicitSessionId) || null,
-    continuityKey: asTrimmedString(input.codexSessionCacheKey) || null,
     userAgentOverride: configuredUserAgent || null,
     preserveBaseUserAgent: input.preserveBaseUserAgent === true,
     preserveBaseOriginator: false,

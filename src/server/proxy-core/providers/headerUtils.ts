@@ -149,7 +149,6 @@ export function buildCodexRuntimeHeaders(input: {
   providerHeaders?: Record<string, string>;
   stream?: boolean;
   explicitSessionId?: string | null;
-  continuityKey?: string | null;
   versionDefault?: string;
   userAgentDefault?: string;
   userAgentOverride?: string | null;
@@ -190,19 +189,16 @@ export function buildCodexRuntimeHeaders(input: {
   const timingMetrics = input.timingMetrics || null;
   const openAiBeta = input.openAiBeta || null;
   const explicitSessionId = asTrimmedString(input.explicitSessionId);
-  const continuityKey = asTrimmedString(input.continuityKey);
   const sessionId = (
     getInputHeader(input.baseHeaders, 'session_id')
     || getInputHeader(input.baseHeaders, 'session-id')
     || explicitSessionId
-    || (continuityKey ? uuidFromSeed(`metapi:codex:${continuityKey}`) : null)
     || randomUUID()
   );
   const conversationId = (
     getInputHeader(input.baseHeaders, 'conversation_id')
     || getInputHeader(input.baseHeaders, 'conversation-id')
-    || explicitSessionId
-    || (continuityKey ? sessionId : null)
+    || null
   );
 
   return {

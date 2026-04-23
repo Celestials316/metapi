@@ -571,9 +571,13 @@ export function applyUpstreamEndpointRuntimePreference(
     siteId: number;
     downstreamFormat: UpstreamEndpointRuntimePreference;
     capabilityProfile: EndpointCapabilityProfile;
+    allowRuntimePreference?: boolean;
   },
   nowMs = Date.now(),
 ): UpstreamEndpointRuntimeEndpoint[] {
+  if (input.allowRuntimePreference === false) {
+    return candidates;
+  }
   if (!shouldUseEndpointRuntimeMemory(input.capabilityProfile)) {
     return candidates;
   }

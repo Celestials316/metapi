@@ -229,6 +229,25 @@ describe('ProxyLogs server-driven page', () => {
         sessionId: 'sess-debug-1',
         requestHeadersJson: '{\n  "authorization": "Bearer demo"\n}',
       },
+      runtimeDiagnostics: {
+        activeRuntime: {
+          traceId: 701,
+          downstreamPath: '/v1/responses',
+          acceptedAtMs: 1760000000000,
+          firstByteAtMs: 1760000000500,
+          lastActivityAtMs: 1760000002500,
+          finalizedAtMs: 1760000003500,
+          stage: 'streaming',
+        },
+        websocketRuntime: {
+          sessionId: 'sess-debug-1',
+          hasOpenSocket: true,
+          createdAtMs: 1760000000000,
+          lastActivityAtMs: 1760000002500,
+          lastTerminalReason: 'websocket_stale_evicted',
+          lastCloseReason: 'proxy-runtime-hygiene',
+        },
+      },
       attempts: [],
     });
     apiMock.updateRuntimeSettings.mockResolvedValue({
@@ -755,6 +774,7 @@ describe('ProxyLogs server-driven page', () => {
       await flushMicrotasks();
 
       expect(collectText(root.root)).toContain('原始下游请求头');
+      expect(collectText(root.root)).toContain('Runtime Diagnostics');
       expect(collectText(root.root)).not.toContain('加载追踪详情中...');
 
       await act(async () => {
@@ -786,6 +806,43 @@ describe('ProxyLogs server-driven page', () => {
       });
       vi.runOnlyPendingTimers();
       vi.useRealTimers();
+    }
+  });
+
+
+  it('renders runtime diagnostics with localized reason labels', async () => {
+    let root!: WebTestRenderer;
+
+    try {
+      await act(async () => {
+        root = create(
+          <MemoryRouter initialEntries={['/logs']}>
+            <ToastProvider>
+              <ProxyLogs />
+            </ToastProvider>
+          </MemoryRouter>,
+        );
+      });
+      await flushMicrotasks();
+
+      const viewDetailButton = root.root.find((node) => (
+        node.type === 'button'
+        && typeof node.props.onClick === 'function'
+        && collectText(node).trim() === '查看详情'
+      ));
+
+      await act(async () => {
+        viewDetailButton.props.onClick();
+      });
+      await flushMicrotasks();
+
+      const text = collectText(root.root);
+      expect(text).toContain('Runtime Diagnostics');
+      expect(text).toContain('WebSocket 运行态因陈旧被清理');
+      expect(text).toContain('运行态卫生清理');
+      expect(text).toContain('是');
+    } finally {
+      root?.unmount();
     }
   });
 

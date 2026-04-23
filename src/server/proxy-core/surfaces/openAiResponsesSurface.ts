@@ -136,8 +136,6 @@ function getResponsesSessionHeaderValue(headers: Record<string, unknown>): strin
   return getResponsesHeaderValueByKeys(headers, [
     'session_id',
     'session-id',
-    'conversation_id',
-    'conversation-id',
   ]);
 }
 
@@ -429,7 +427,21 @@ export async function handleOpenAiResponsesSurfaceRequest(
       requestHeaders,
       requestBody: request.body,
     });
-    const finalizeDebugFailure = async (status: number, payload: unknown, upstreamPath: string | null = null) => {
+    const finalizeDebugFailure = async (
+      status: number,
+      payload: unknown,
+      upstreamPath: string | null = null,
+      options?: { reason?: string | null },
+    ) => {
+      const normalizedReason = typeof options?.reason === 'string' && options.reason.trim()
+        ? options.reason.trim()
+        : null;
+      const finalResponseBody = payload && typeof payload === 'object' && !Array.isArray(payload)
+        ? {
+          ...(payload as Record<string, unknown>),
+          ...(normalizedReason ? { metapiRuntimeReason: normalizedReason } : {}),
+        }
+        : payload;
       await safeFinalizeSurfaceProxyDebugTrace(debugTrace, {
         finalStatus: 'failed',
         finalHttpStatus: status,
@@ -437,7 +449,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
         finalResponseHeaders: {
           'content-type': 'application/json',
         },
-        finalResponseBody: payload,
+        finalResponseBody,
       });
     };
     const finalizeDebugSuccess = async (status: number, upstreamPath: string | null, responseHeaders: unknown, responseBody: unknown) => {
@@ -529,9 +541,16 @@ export async function handleOpenAiResponsesSurfaceRequest(
       const isCodexSite = String(selected.site.platform || '').trim().toLowerCase() === 'codex';
       const isCodexClient = clientContext.clientKind === 'codex';
       const isCodexCompatibleRequest = isCodexSite || isCodexClient;
-      const trustedResponsesSessionStoreKey = continuitySessionId
+      const strongClientSessionId = clientContext.continuityTrust === 'strong'
+        ? (clientContext.sessionId || '').trim()
+        : '';
+      const downstreamSessionId = (
+        strongClientSessionId
+        || getResponsesSessionHeaderValue(requestHeaders)
+      ).trim();
+      const trustedResponsesSessionStoreKey = downstreamSessionId
         ? buildCodexSessionResponseStoreKey({
-          sessionId: continuitySessionId,
+          sessionId: downstreamSessionId,
           siteId: selected.site.id,
           accountId: selected.account.id,
           channelId: selected.channel.id,
@@ -599,9 +618,17 @@ export async function handleOpenAiResponsesSurfaceRequest(
             wantsNativeResponsesReasoning: prefersNativeResponsesReasoning,
             wantsContinuationAwareResponses,
           },
+          isCodexClient
+            ? {
+              allowedEndpoints: ['responses'],
+              bypassRuntimePreference: true,
+            }
+            : undefined,
         );
       if (endpointCandidates.length === 0) {
-        endpointCandidates.push('responses', 'chat', 'messages');
+        endpointCandidates = isCodexClient
+          ? ['responses']
+          : ['responses', 'chat', 'messages'];
       }
       if (hasOrphanToolOutputContinuation && !hasTrustedNativeResponsesAnchor) {
         endpointCandidates = moveEndpointToTail(endpointCandidates, 'responses');
@@ -711,8 +738,8 @@ export async function handleOpenAiResponsesSurfaceRequest(
           if (!isCodexCompatibleRequest || !endpointRequest.path.startsWith('/responses')) {
             return baseDispatchRequest(endpointRequest, targetUrl);
           }
-          const sessionId = getResponsesSessionHeaderValue(endpointRequest.headers);
-          if (!downstreamSessionId) {
+          const sessionId = downstreamSessionId || getResponsesSessionHeaderValue(endpointRequest.headers);
+          if (!sessionId) {
             return baseDispatchRequest(endpointRequest, targetUrl);
           }
           return runCodexHttpSessionTask(
@@ -1035,6 +1062,9 @@ export async function handleOpenAiResponsesSurfaceRequest(
           const streamSession = openAiResponsesTransformer.proxyStream.createSession({
             modelName,
             successfulUpstreamPath,
+            runtimeTraceId: debugTrace?.traceId ?? null,
+            downstreamPath,
+            idleTimeoutMs: Math.max(0, Math.trunc(config.proxyStreamIdleTimeoutMs || 0)),
             getUsage: () => parsedUsage,
             onParsedPayload: (payload) => {
               if (payload && typeof payload === 'object') {
@@ -1072,13 +1102,20 @@ export async function handleOpenAiResponsesSurfaceRequest(
                   completionTokens: parsedUsage.completionTokens,
                   totalTokens: parsedUsage.totalTokens,
                   upstreamPath: successfulUpstreamPath,
+                  runtimeReason: streamResult.errorMessage === 'stream idle timeout'
+                    ? 'stream_idle_timeout'
+                    : 'stream_failed',
                 });
 	              await finalizeDebugFailure(502, {
                   error: {
                     message: streamResult.errorMessage,
                     type: 'stream_error',
                   },
-                }, successfulUpstreamPath);
+                }, successfulUpstreamPath, {
+                  reason: streamResult.errorMessage === 'stream idle timeout'
+                    ? 'stream_idle_timeout'
+                    : 'stream_failed',
+                });
                 return;
 	              }
 
@@ -1163,13 +1200,20 @@ export async function handleOpenAiResponsesSurfaceRequest(
                 totalTokens: parsedUsage.totalTokens,
                 upstreamPath: successfulUpstreamPath,
                 runtimeFailureStatus: 502,
+                runtimeReason: streamResult.errorMessage === 'stream idle timeout'
+                  ? 'stream_idle_timeout'
+                  : 'stream_failed',
               });
               await finalizeDebugFailure(502, {
                 error: {
                   message: streamResult.errorMessage,
                   type: 'stream_error',
                 },
-              }, successfulUpstreamPath);
+              }, successfulUpstreamPath, {
+                reason: streamResult.errorMessage === 'stream idle timeout'
+                  ? 'stream_idle_timeout'
+                  : 'stream_failed',
+              });
               return;
 	            }
 
@@ -1249,6 +1293,9 @@ export async function handleOpenAiResponsesSurfaceRequest(
                   totalTokens: parsedUsage.totalTokens,
                   upstreamPath: successfulUpstreamPath,
                   runtimeFailureStatus: 502,
+                  runtimeReason: streamResult.errorMessage === 'stream idle timeout'
+                    ? 'stream_idle_timeout'
+                    : 'stream_failed',
                 });
                 await finalizeDebugFailure(502, {
                   error: {
@@ -1316,6 +1363,9 @@ export async function handleOpenAiResponsesSurfaceRequest(
               totalTokens: parsedUsage.totalTokens,
               upstreamPath: successfulUpstreamPath,
               runtimeFailureStatus: 502,
+              runtimeReason: streamResult.errorMessage === 'stream idle timeout'
+                ? 'stream_idle_timeout'
+                : 'stream_failed',
             });
             await finalizeDebugFailure(502, {
               error: {

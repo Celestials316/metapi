@@ -1,9 +1,12 @@
 import { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { config } from '../../config.js';
 import { WebSocketServer } from 'ws';
 import { resetCodexSessionResponseStore } from './codexSessionResponseStore.js';
+import { createCodexWebsocketSessionStore } from './codexWebsocketSessionStore.js';
 
 describe('codexWebsocketRuntime', () => {
+  const originalCodexWebsocketIdleTimeoutMs = config.codexWebsocketIdleTimeoutMs;
   let upstreamServer: WebSocketServer;
   let upstreamWsUrl: string;
   let upstreamConnectionCount = 0;
@@ -26,6 +29,7 @@ describe('codexWebsocketRuntime', () => {
   });
 
   beforeEach(() => {
+    config.codexWebsocketIdleTimeoutMs = originalCodexWebsocketIdleTimeoutMs;
     resetCodexSessionResponseStore();
     upstreamConnectionCount = 0;
     upstreamRequests = [];
@@ -50,6 +54,7 @@ describe('codexWebsocketRuntime', () => {
   });
 
   afterAll(async () => {
+    config.codexWebsocketIdleTimeoutMs = originalCodexWebsocketIdleTimeoutMs;
     await new Promise<void>((resolve) => upstreamServer.close(() => resolve()));
   });
 
@@ -59,6 +64,7 @@ describe('codexWebsocketRuntime', () => {
 
     const first = await runtime.sendRequest({
       sessionId: 'exec-session-1',
+      trustedSession: true,
       requestUrl: upstreamWsUrl,
       headers: {
         Authorization: 'Bearer oauth-access-token',
@@ -72,6 +78,7 @@ describe('codexWebsocketRuntime', () => {
 
     const second = await runtime.sendRequest({
       sessionId: 'exec-session-1',
+      trustedSession: true,
       requestUrl: upstreamWsUrl,
       headers: {
         Authorization: 'Bearer oauth-access-token',
@@ -112,6 +119,7 @@ describe('codexWebsocketRuntime', () => {
 
     await runtime.sendRequest({
       sessionId: 'exec-session-close',
+      trustedSession: true,
       requestUrl: upstreamWsUrl,
       headers: {
         Authorization: 'Bearer oauth-access-token',
@@ -126,6 +134,7 @@ describe('codexWebsocketRuntime', () => {
 
     await runtime.sendRequest({
       sessionId: 'exec-session-close',
+      trustedSession: true,
       requestUrl: upstreamWsUrl,
       headers: {
         Authorization: 'Bearer oauth-access-token',
@@ -161,6 +170,7 @@ describe('codexWebsocketRuntime', () => {
 
     const result = await runtime.sendRequest({
       sessionId: 'exec-session-incomplete',
+      trustedSession: true,
       requestUrl: upstreamWsUrl,
       headers: {
         Authorization: 'Bearer oauth-access-token',
@@ -222,6 +232,7 @@ describe('codexWebsocketRuntime', () => {
 
     const first = await runtime.sendRequest({
       sessionId: 'exec-session-failed-turn',
+      trustedSession: true,
       requestUrl: upstreamWsUrl,
       headers: {
         Authorization: 'Bearer oauth-access-token',
@@ -235,6 +246,7 @@ describe('codexWebsocketRuntime', () => {
 
     const second = await runtime.sendRequest({
       sessionId: 'exec-session-failed-turn',
+      trustedSession: true,
       requestUrl: upstreamWsUrl,
       headers: {
         Authorization: 'Bearer oauth-access-token',
@@ -318,6 +330,7 @@ describe('codexWebsocketRuntime', () => {
 
     await runtime.sendRequest({
       sessionId: 'exec-session-retry-stale',
+      trustedSession: true,
       requestUrl: upstreamWsUrl,
       headers: {
         Authorization: 'Bearer oauth-access-token',
@@ -331,6 +344,7 @@ describe('codexWebsocketRuntime', () => {
 
     await expect(runtime.sendRequest({
       sessionId: 'exec-session-retry-stale',
+      trustedSession: true,
       requestUrl: upstreamWsUrl,
       headers: {
         Authorization: 'Bearer oauth-access-token',
@@ -345,6 +359,7 @@ describe('codexWebsocketRuntime', () => {
 
     const recovered = await runtime.sendRequest({
       sessionId: 'exec-session-retry-stale',
+      trustedSession: true,
       requestUrl: upstreamWsUrl,
       headers: {
         Authorization: 'Bearer oauth-access-token',
@@ -394,6 +409,7 @@ describe('codexWebsocketRuntime', () => {
     try {
       await runtime.sendRequest({
         sessionId: 'exec-session-error',
+        trustedSession: true,
         requestUrl: upstreamWsUrl,
         headers: {
           Authorization: 'Bearer oauth-access-token',
@@ -422,4 +438,124 @@ describe('codexWebsocketRuntime', () => {
       }),
     ]);
   });
+
+  it('fails websocket turns that go idle before a terminal event arrives', async () => {
+    config.codexWebsocketIdleTimeoutMs = 50;
+    upstreamMessageHandler = (socket) => {
+      socket.send(JSON.stringify({
+        type: 'response.created',
+        response: {
+          id: 'resp-idle',
+          model: 'gpt-5.4',
+          status: 'in_progress',
+          output: [],
+        },
+      }));
+    };
+
+    const { createCodexWebsocketRuntime } = await import('./codexWebsocketRuntime.js');
+    const runtime = createCodexWebsocketRuntime();
+
+    await expect(runtime.sendRequest({
+      sessionId: 'exec-session-idle',
+      trustedSession: true,
+      requestUrl: upstreamWsUrl,
+      headers: {
+        Authorization: 'Bearer oauth-access-token',
+        'OpenAI-Beta': 'responses_websockets=2026-02-06',
+      },
+      body: {
+        model: 'gpt-5.4',
+        input: [],
+      },
+    })).rejects.toThrow('stream idle timeout');
+  });
+
+  it('evicts stale websocket sessions and opens a fresh connection on the next turn', async () => {
+  const { createCodexWebsocketRuntime } = await import('./codexWebsocketRuntime.js');
+  const runtime = createCodexWebsocketRuntime();
+
+  await runtime.sendRequest({
+    sessionId: 'exec-session-evict-stale',
+    trustedSession: true,
+    requestUrl: upstreamWsUrl,
+    headers: {
+      Authorization: 'Bearer oauth-access-token',
+      'OpenAI-Beta': 'responses_websockets=2026-02-06',
+    },
+    body: {
+      model: 'gpt-5.4',
+      input: [],
+    },
+  });
+
+  const snapshots = runtime.listSessionSnapshots();
+  const snapshot = snapshots.find((item) => item.sessionId === 'exec-session-evict-stale');
+  expect(snapshot).toBeTruthy();
+
+  const evicted = await runtime.evictStaleSessions({
+    staleBeforeMs: (snapshot?.lastActivityAtMs || 0) + 1,
+    closeReason: 'test-stale-evict',
+  });
+  expect(evicted).toBe(1);
+
+  const postEvictSnapshots = runtime.listSessionSnapshots();
+  expect(postEvictSnapshots.find((item) => item.sessionId === 'exec-session-evict-stale')).toBeUndefined();
+
+  await runtime.sendRequest({
+    sessionId: 'exec-session-evict-stale',
+    trustedSession: true,
+    requestUrl: upstreamWsUrl,
+    headers: {
+      Authorization: 'Bearer oauth-access-token',
+      'OpenAI-Beta': 'responses_websockets=2026-02-06',
+    },
+    body: {
+      model: 'gpt-5.4',
+      input: [],
+    },
+  });
+
+  expect(upstreamConnectionCount).toBe(2);
+  await runtime.closeSession('exec-session-evict-stale');
+});
+
+it('records websocket stale eviction reason before removing the session snapshot', async () => {
+  const { createCodexWebsocketRuntime } = await import('./codexWebsocketRuntime.js');
+  const sessionStore = createCodexWebsocketSessionStore();
+  const runtime = createCodexWebsocketRuntime({ sessionStore });
+
+  await runtime.sendRequest({
+    sessionId: 'exec-session-evict-reason',
+    trustedSession: true,
+    requestUrl: upstreamWsUrl,
+    headers: {
+      Authorization: 'Bearer oauth-access-token',
+      'OpenAI-Beta': 'responses_websockets=2026-02-06',
+    },
+    body: {
+      model: 'gpt-5.4',
+      input: [],
+    },
+  });
+
+  const snapshots = runtime.listSessionSnapshots();
+  const snapshot = snapshots.find((item) => item.sessionId === 'exec-session-evict-reason');
+  expect(snapshot).toBeTruthy();
+
+  const staleBeforeMs = (snapshot?.lastActivityAtMs || 0) + 1;
+  const session = sessionStore.getOrCreate('exec-session-evict-reason');
+  expect(session.lastTerminalReason).toBe('response.completed');
+  expect(session.lastCloseReason).toBe('terminal_event');
+
+  const evicted = await runtime.evictStaleSessions({
+    staleBeforeMs,
+    closeReason: 'proxy-runtime-hygiene',
+  });
+
+  expect(evicted).toBe(1);
+  expect(session.lastTerminalReason).toBe('websocket_stale_evicted');
+  expect(session.lastCloseReason).toBe('proxy-runtime-hygiene');
+});
+
 });

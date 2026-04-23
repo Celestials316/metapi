@@ -224,7 +224,21 @@ export async function handleChatSurfaceRequest(
     clientContext,
     downstreamApiKeyId,
   });
-  const finalizeDebugFailure = async (status: number, payload: unknown, upstreamPath: string | null = null) => {
+  const finalizeDebugFailure = async (
+    status: number,
+    payload: unknown,
+    upstreamPath: string | null = null,
+    options?: { reason?: string | null },
+  ) => {
+    const normalizedReason = typeof options?.reason === 'string' && options.reason.trim()
+      ? options.reason.trim()
+      : null;
+    const finalResponseBody = payload && typeof payload === 'object' && !Array.isArray(payload)
+      ? {
+        ...(payload as Record<string, unknown>),
+        ...(normalizedReason ? { metapiRuntimeReason: normalizedReason } : {}),
+      }
+      : payload;
     await safeFinalizeSurfaceProxyDebugTrace(debugTrace, {
       finalStatus: 'failed',
       finalHttpStatus: status,
@@ -232,7 +246,7 @@ export async function handleChatSurfaceRequest(
       finalResponseHeaders: {
         'content-type': 'application/json',
       },
-      finalResponseBody: payload,
+      finalResponseBody,
     });
   };
   const finalizeDebugSuccess = async (status: number, upstreamPath: string | null, responseHeaders: unknown, responseBody: unknown) => {
@@ -650,6 +664,8 @@ export async function handleChatSurfaceRequest(
           downstreamFormat,
           modelName,
           successfulUpstreamPath,
+          runtimeTraceId: debugTrace?.traceId ?? null,
+          downstreamPath,
           onParsedPayload: (payload) => {
             if (payload && typeof payload === 'object') {
               upstreamUsagePresent = upstreamUsagePresent || hasProxyUsagePayload(payload);
@@ -688,13 +704,20 @@ export async function handleChatSurfaceRequest(
                 completionTokens: parsedUsage.completionTokens,
                 totalTokens: parsedUsage.totalTokens,
                 upstreamPath: successfulUpstreamPath,
+                runtimeReason: streamResult.errorMessage === 'stream idle timeout'
+                  ? 'stream_idle_timeout'
+                  : 'stream_failed',
               });
               await finalizeDebugFailure(502, {
                 error: {
                   message: streamResult.errorMessage,
                   type: 'stream_error',
                 },
-              }, successfulUpstreamPath);
+              }, successfulUpstreamPath, {
+                reason: streamResult.errorMessage === 'stream idle timeout'
+                  ? 'stream_idle_timeout'
+                  : 'stream_failed',
+              });
               if (!streamStarted) {
                 return reply.code(502).send({
                   error: {
@@ -788,6 +811,9 @@ export async function handleChatSurfaceRequest(
               totalTokens: parsedUsage.totalTokens,
               upstreamPath: successfulUpstreamPath,
               runtimeFailureStatus: 502,
+              runtimeReason: streamResult.errorMessage === 'stream idle timeout'
+                ? 'stream_idle_timeout'
+                : 'stream_failed',
             });
             await finalizeDebugFailure(502, {
               error: {
@@ -866,6 +892,9 @@ export async function handleChatSurfaceRequest(
               totalTokens: parsedUsage.totalTokens,
               upstreamPath: successfulUpstreamPath,
               runtimeFailureStatus: 502,
+              runtimeReason: streamResult.errorMessage === 'stream idle timeout'
+                ? 'stream_idle_timeout'
+                : 'stream_failed',
             });
             await finalizeDebugFailure(502, {
               error: {

@@ -1657,6 +1657,134 @@ describe('TokenRouter selection scoring', () => {
     expect((recoveredCandidateB?.probability || 0)).toBeLessThan(70);
   });
 
+
+  it('opens a site breaker for repeated stream idle timeout runtime reasons', async () => {
+    config.routingWeights = {
+      baseWeightFactor: 1,
+      valueScoreFactor: 0,
+      costWeight: 0,
+      balanceWeight: 0,
+      usageWeight: 0,
+    };
+
+    const route = await createRoute('gpt-5.4');
+
+    const siteA = await createSite('runtime-breaker-a');
+    const accountA = await createAccount(siteA.id, 'runtime-breaker-user-a');
+    const tokenA = await createToken(accountA.id, 'runtime-breaker-token-a');
+    const channelA = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: accountA.id,
+      tokenId: tokenA.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+
+    const siteB = await createSite('runtime-breaker-b');
+    const accountB = await createAccount(siteB.id, 'runtime-breaker-user-b');
+    const tokenB = await createToken(accountB.id, 'runtime-breaker-token-b');
+    const channelB = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: accountB.id,
+      tokenId: tokenB.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+
+    const router = new TokenRouter();
+    for (let index = 0; index < 3; index += 1) {
+      await router.recordFailure(channelA.id, {
+        status: 200,
+        errorText: 'stream ended without terminal event',
+        modelName: 'gpt-5.4',
+        runtimeReason: 'stream_idle_timeout',
+      });
+    }
+    await db.update(schema.routeChannels).set({
+      cooldownUntil: null,
+      lastFailAt: null,
+      failCount: 0,
+      consecutiveFailCount: 0,
+      cooldownLevel: 0,
+    }).where(eq(schema.routeChannels.id, channelA.id)).run();
+    invalidateTokenRouterCache();
+
+    const decision = await router.explainSelection('gpt-5.4');
+    const candidateA = decision.candidates.find((candidate) => candidate.channelId === channelA.id);
+    const candidateB = decision.candidates.find((candidate) => candidate.channelId === channelB.id);
+
+    expect(candidateA?.reason || '').toContain('熔断');
+    expect((candidateA?.probability || 0)).toBe(0);
+    expect((candidateB?.probability || 0)).toBe(100);
+    expect(decision.summary.join(' ')).toContain('熔断避让');
+  });
+
+  it('does not open a site breaker for response completed runtime reasons', async () => {
+    config.routingWeights = {
+      baseWeightFactor: 1,
+      valueScoreFactor: 0,
+      costWeight: 0,
+      balanceWeight: 0,
+      usageWeight: 0,
+    };
+
+    const route = await createRoute('gpt-5.4');
+
+    const siteA = await createSite('runtime-completed-a');
+    const accountA = await createAccount(siteA.id, 'runtime-completed-user-a');
+    const tokenA = await createToken(accountA.id, 'runtime-completed-token-a');
+    const channelA = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: accountA.id,
+      tokenId: tokenA.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+
+    const siteB = await createSite('runtime-completed-b');
+    const accountB = await createAccount(siteB.id, 'runtime-completed-user-b');
+    const tokenB = await createToken(accountB.id, 'runtime-completed-token-b');
+    const channelB = await db.insert(schema.routeChannels).values({
+      routeId: route.id,
+      accountId: accountB.id,
+      tokenId: tokenB.id,
+      priority: 0,
+      weight: 10,
+      enabled: true,
+    }).returning().get();
+
+    const router = new TokenRouter();
+    for (let index = 0; index < 4; index += 1) {
+      await router.recordFailure(channelA.id, {
+        status: 200,
+        errorText: 'response finished normally',
+        modelName: 'gpt-5.4',
+        runtimeReason: 'response.completed',
+      });
+    }
+    await db.update(schema.routeChannels).set({
+      cooldownUntil: null,
+      lastFailAt: null,
+      failCount: 0,
+      consecutiveFailCount: 0,
+      cooldownLevel: 0,
+    }).where(eq(schema.routeChannels.id, channelA.id)).run();
+    invalidateTokenRouterCache();
+
+    const decision = await router.explainSelection('gpt-5.4');
+    const candidateA = decision.candidates.find((candidate) => candidate.channelId === channelA.id);
+    const candidateB = decision.candidates.find((candidate) => candidate.channelId === channelB.id);
+
+    expect(candidateA).toBeTruthy();
+    expect(candidateB).toBeTruthy();
+    expect(candidateA?.reason || '').not.toContain('熔断');
+    expect(decision.summary.join(' ')).not.toContain('熔断避让');
+    expect((candidateA?.probability || 0)).toBeGreaterThan(0);
+  });
+
   it('does not open a site breaker for repeated timeout validation errors', async () => {
     config.routingWeights = {
       baseWeightFactor: 1,

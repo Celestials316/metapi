@@ -15,7 +15,16 @@ type ProxyStreamLifecycleInput<TEvent> = {
   pullEvents(buffer: string): PulledEventBatch<TEvent>;
   handleEvent(event: TEvent): Promise<boolean | void> | boolean | void;
   onEof?: () => Promise<void> | void;
+  idleTimeoutMs?: number;
+  onIdleTimeout?: () => Promise<boolean | void> | boolean | void;
+  onChunkActivity?: () => Promise<void> | void;
+  onFinalize?: (input: { reason: 'eof' | 'idle_timeout' | 'stopped' }) => Promise<void> | void;
 };
+
+function clearTimer(timer: ReturnType<typeof setTimeout> | null) {
+  if (!timer) return;
+  clearTimeout(timer);
+}
 
 export function createProxyStreamLifecycle<TEvent>(input: ProxyStreamLifecycleInput<TEvent>) {
   const flushBuffer = async (buffer: string): Promise<{ rest: string; stop: boolean }> => {
@@ -50,13 +59,33 @@ export function createProxyStreamLifecycle<TEvent>(input: ProxyStreamLifecycleIn
       const decoder = new TextDecoder();
       let sseBuffer = '';
       let shouldStop = false;
+      const idleTimeoutMs = Math.max(0, Math.trunc(input.idleTimeoutMs ?? 0));
+      let idleTimer: ReturnType<typeof setTimeout> | null = null;
+      let idleTimedOut = false;
+
+      const resetIdleTimer = () => {
+        clearTimer(idleTimer);
+        if (idleTimeoutMs <= 0) return;
+        idleTimer = setTimeout(() => {
+          idleTimedOut = true;
+        }, idleTimeoutMs);
+      };
 
       try {
         while (true) {
+          resetIdleTimer();
           const { done, value } = await reader.read();
+          clearTimer(idleTimer);
+          if (idleTimedOut) {
+            shouldStop = !!await input.onIdleTimeout?.();
+            await input.onFinalize?.({ reason: 'idle_timeout' });
+            await reader.cancel(new Error('stream idle timeout')).catch(() => {});
+            break;
+          }
           if (done) break;
           if (!value) continue;
 
+          await input.onChunkActivity?.();
           sseBuffer += decoder.decode(value, { stream: true });
           const flushed = await flushBuffer(sseBuffer);
           sseBuffer = flushed.rest;
@@ -78,8 +107,12 @@ export function createProxyStreamLifecycle<TEvent>(input: ProxyStreamLifecycleIn
 
         if (!shouldStop) {
           await input.onEof?.();
+          await input.onFinalize?.({ reason: 'eof' });
+        } else {
+          await input.onFinalize?.({ reason: 'stopped' });
         }
       } finally {
+        clearTimer(idleTimer);
         reader.releaseLock();
         input.response.end();
       }

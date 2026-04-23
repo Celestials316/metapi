@@ -971,6 +971,45 @@ describe('selectSurfaceChannelForAttempt', () => {
     expect(recordFailureMock).toHaveBeenCalledWith(11, {
       errorText: 'stream exploded',
       modelName: 'upstream-model',
+      runtimeReason: undefined,
+    }, 33);
+  });
+
+  it('forwards runtime reason when recording stream failures', async () => {
+    composeProxyLogMessageMock.mockReturnValue('normalized error');
+    formatUtcSqlDateTimeMock.mockReturnValue('2026-03-21 22:00:00');
+    insertProxyLogMock.mockResolvedValue(undefined);
+
+    const { createSurfaceFailureToolkit } = await import('./sharedSurface.js');
+    const toolkit = createSurfaceFailureToolkit({
+      warningScope: 'responses',
+      downstreamPath: '/v1/responses',
+      maxRetries: 2,
+      clientContext: null,
+      downstreamApiKeyId: null,
+    });
+
+    await toolkit.recordStreamFailure({
+      selected: {
+        channel: { id: 11, routeId: 22 },
+        account: { id: 33, username: 'oauth-user' },
+        site: { name: 'Codex OAuth' },
+        actualModel: 'upstream-model',
+      },
+      requestedModel: 'gpt-5.2',
+      modelName: 'upstream-model',
+      errorMessage: 'stream idle timeout',
+      latencyMs: 450,
+      retryCount: 1,
+      runtimeFailureStatus: 502,
+      runtimeReason: 'stream_idle_timeout',
+    });
+
+    expect(recordFailureMock).toHaveBeenCalledWith(11, {
+      status: 502,
+      errorText: 'stream idle timeout',
+      modelName: 'upstream-model',
+      runtimeReason: 'stream_idle_timeout',
     }, 33);
   });
 

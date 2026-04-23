@@ -178,10 +178,6 @@ export function getCodexConversationId(headers?: Record<string, unknown>): strin
   return getHeaderValue(headers, 'conversation_id') || getHeaderValue(headers, 'conversation-id');
 }
 
-function getCodexContinuityId(headers?: Record<string, unknown>): string | null {
-  return getCodexSessionId(headers) || getCodexConversationId(headers);
-}
-
 export function isCodexRequest(input: DetectCliProfileInput): boolean {
   if (!isCodexPath(input.downstreamPath)) return false;
   const headers = input.headers;
@@ -194,7 +190,7 @@ export function isCodexRequest(input: DetectCliProfileInput): boolean {
   if (getHeaderValue(headers, 'x-codex-turn-state')) return true;
   const hasOpenAiBeta = !!getHeaderValue(headers, 'openai-beta');
   const hasTransportMarkers = hasOpenAiBeta || hasHeaderPrefix(headers, 'x-stainless-');
-  if (hasTransportMarkers && getCodexContinuityId(headers)) return true;
+  if (hasTransportMarkers && (getCodexSessionId(headers) || getCodexConversationId(headers))) return true;
   if (hasOpenAiBeta && !looksLikeGenericOpenAiSdk(headers)) return true;
   return false;
 }
@@ -211,11 +207,18 @@ export const codexCliProfile: CliProfileDefinition = {
   detect(input) {
     if (!isCodexRequest(input)) return null;
 
-    const continuityId = getCodexContinuityId(input.headers) || undefined;
+    const sessionId = getCodexSessionId(input.headers) || undefined;
+    const conversationHint = getCodexConversationId(input.headers) || undefined;
+    const traceHint = sessionId || conversationHint;
     const clientApp = detectCodexOfficialClientApp(input.headers);
     return {
       id: 'codex',
-      ...(continuityId ? { sessionId: continuityId, traceHint: continuityId } : {}),
+      ...(sessionId ? { sessionId } : {}),
+      ...(traceHint ? { traceHint } : {}),
+      ...(conversationHint ? { conversationHint } : {}),
+      ...((sessionId || conversationHint)
+        ? { continuityTrust: sessionId ? 'strong' as const : 'weak' as const }
+        : {}),
       ...(clientApp
         ? {
           clientAppId: clientApp.clientAppId,
