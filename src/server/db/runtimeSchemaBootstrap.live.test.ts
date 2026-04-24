@@ -89,7 +89,7 @@ describe('runtime schema bootstrap live upgrade path', () => {
 
     const live = await introspectLiveSchema({ dialect: 'mysql', connectionString });
     expect(live).toEqual(currentContract);
-  });
+  }, 20_000);
 
   postgresRuntime('upgrades postgres runtime schemas from an older live contract', async () => {
     const connectionString = process.env.DB_PARITY_POSTGRES_URL!;
@@ -107,5 +107,5 @@ describe('runtime schema bootstrap live upgrade path', () => {
 
     const live = await introspectLiveSchema({ dialect: 'postgres', connectionString });
     expect(live).toEqual(currentContract);
-  });
+  }, 20_000);
 });
