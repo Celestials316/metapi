@@ -212,7 +212,7 @@ describe('/v1/completions site api endpoint rotation', () => {
         allowedRouteIds: [],
         excludedSiteIds: [],
       }),
-      [11]
+      []
     );
   });
 

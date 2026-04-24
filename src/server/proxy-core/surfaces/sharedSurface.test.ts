@@ -116,7 +116,9 @@ describe('selectSurfaceChannelForAttempt', () => {
     consoleErrorMock.mockRestore();
   });
 
-  beforeEach(() => {
+  beforeEach(async () => {
+    const { resetClientSurfaceSuppressions } = await import('../../services/clientSurfaceSuppression.js');
+    resetClientSurfaceSuppressions();
     selectChannelMock.mockReset();
     selectNextChannelMock.mockReset();
     selectPreferredChannelMock.mockReset();
@@ -290,6 +292,60 @@ describe('selectSurfaceChannelForAttempt', () => {
       [],
     );
     expect(selectChannelMock).not.toHaveBeenCalled();
+  });
+
+  it('skips client-surface suppressed channels for generic responses without affecting codex', async () => {
+    const { suppressClientSurface, resetClientSurfaceSuppressions } = await import('../../services/clientSurfaceSuppression.js');
+    resetClientSurfaceSuppressions();
+    suppressClientSurface({
+      channelId: 2871,
+      endpoint: 'responses',
+      clientKind: 'generic',
+      model: 'gpt-5.4',
+      reason: 'upstream_blocked_generic_responses',
+      ttlMs: 30 * 60 * 1000,
+      nowMs: Date.now(),
+    });
+    const selected = { channel: { id: 2902 } };
+    selectNextChannelMock.mockResolvedValueOnce(selected);
+
+    const { selectSurfaceChannelForAttempt } = await import('./sharedSurface.js');
+    const result = await selectSurfaceChannelForAttempt({
+      requestedModel: 'gpt-5.4',
+      downstreamPolicy: EMPTY_DOWNSTREAM_ROUTING_POLICY,
+      excludeChannelIds: [],
+      retryCount: 0,
+      clientSurface: {
+        endpoint: 'responses',
+        clientKind: 'generic',
+      },
+    });
+
+    expect(result).toBe(selected);
+    expect(selectNextChannelMock).toHaveBeenCalledWith(
+      'gpt-5.4',
+      [2871],
+      EMPTY_DOWNSTREAM_ROUTING_POLICY,
+    );
+    expect(selectChannelMock).not.toHaveBeenCalled();
+
+    selectNextChannelMock.mockReset();
+    selectChannelMock.mockResolvedValueOnce(selected);
+    const codexResult = await selectSurfaceChannelForAttempt({
+      requestedModel: 'gpt-5.4',
+      downstreamPolicy: EMPTY_DOWNSTREAM_ROUTING_POLICY,
+      excludeChannelIds: [],
+      retryCount: 0,
+      clientSurface: {
+        endpoint: 'responses',
+        clientKind: 'codex',
+      },
+    });
+
+    expect(codexResult).toBe(selected);
+    expect(selectChannelMock).toHaveBeenCalledWith('gpt-5.4', EMPTY_DOWNSTREAM_ROUTING_POLICY);
+    expect(selectNextChannelMock).not.toHaveBeenCalled();
+    resetClientSurfaceSuppressions();
   });
 
   it('does not refresh or fall back when the forced tester channel is unavailable', async () => {

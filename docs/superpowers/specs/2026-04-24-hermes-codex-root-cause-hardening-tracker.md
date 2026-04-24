@@ -100,6 +100,27 @@
   - Active Runtime 的 stage / downstreamPath / acceptedAt / firstByte / lastActivity / finalizedAt
   - Websocket Runtime 的 sessionId / open socket / last terminal reason / last close reason / createdAt / lastActivity
 
+### 已完成：P3 — client surface 级 403 blocked suppression（Huainova / new-api generic responses）
+
+本轮针对 Hermes 走 `generic` `/responses` 命中 Huainova/new-api 站点返回 `403 Your request was blocked` 的问题，已做最小根因收口：
+
+- 新增 `src/server/services/clientSurfaceSuppression.ts`，把 `channel + endpoint + clientKind + model` 作为 suppression key。
+- 仅对 `endpoint=responses`、`clientKind=generic`、`sitePlatform=new-api`、`HTTP 403` 且错误文本包含 `Your request was blocked` 的失败学习临时 suppression。
+- suppression 默认 TTL 为 30 分钟，到期自动恢复候选资格。
+- `/responses` 选路已把 `clientSurface` 传入 `selectSurfaceChannelForAttempt(...)`，generic responses 会跳过被该 surface 临时屏蔽的 channel。
+- Codex/Hermes strict client surface 不受 generic suppression 影响：同一个 channel 若 Codex 可用，仍可继续供 Codex 请求选择。
+- sticky / affinity / 默认选择均使用合并后的 `effectiveExcludeChannelIds`，避免被屏蔽 channel 通过首跳 sticky 或 affinity 重新命中。
+
+本轮验证：
+
+```bash
+npm test -- --run src/server/services/clientSurfaceSuppression.test.ts src/server/proxy-core/surfaces/sharedSurface.test.ts
+npm test -- --run src/server/routes/proxy/responses.codex-oauth.test.ts src/server/routes/proxy/responses.websocket.test.ts src/server/routes/proxy/responses.compact-upstream.test.ts src/server/services/clientSurfaceSuppression.test.ts src/server/proxy-core/surfaces/sharedSurface.test.ts
+npm run typecheck
+```
+
+结果：定向与扩大 responses 回归通过，`npm run typecheck` 通过。
+
 ### 当前已落地 reason 词表
 
 当前不改 schema，直接复用既有字段承载细化原因：
@@ -119,6 +140,7 @@
 - `socket_closed`
 - `terminal_event`
 - `proxy-runtime-hygiene`
+- `upstream_blocked_generic_responses`
 
 ### 已完成回归
 
@@ -420,5 +442,6 @@
 - startup + runtime 双阶段 hygiene 清扫
 - HTTP/SSE + websocket runtime 的统一诊断视角
 - 前端可直接消费 runtime diagnostics，而不让观测反向污染热路径
+- Huainova/new-api 这类只拦截 generic `/responses`、但 Codex surface 可用的站点，已通过 client surface 级 suppression 避免错误泛化为整站/整 channel 故障
 
 后续实现应继续沿着**统一真值、只读诊断聚合、根因级 runtime hygiene**的方向推进，而不是为追求小改动重新引入旁路状态或热路径调试桥接。

@@ -479,6 +479,10 @@ export async function handleOpenAiResponsesSurfaceRequest(
         stickySessionKey,
         forcedChannelId,
         affinityPreferredChannelId,
+        clientSurface: {
+          endpoint: 'responses',
+          clientKind: clientContext.clientKind,
+        },
       });
 
       if (!selected) {

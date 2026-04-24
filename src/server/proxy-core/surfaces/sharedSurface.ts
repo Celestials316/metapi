@@ -10,6 +10,8 @@ import { shouldRetryProxyRequest } from '../../services/proxyRetryPolicy.js';
 import { composeProxyLogMessage } from '../../routes/proxy/logPathMeta.js';
 import { resolveProxyLogBilling } from '../../routes/proxy/proxyBilling.js';
 import type { DownstreamClientContext } from '../downstreamClientContext.js';
+import type { CliProfileId } from '../cliProfiles/types.js';
+import type { UpstreamEndpoint } from '../orchestration/upstreamRequest.js';
 import { insertProxyLog } from '../../services/proxyLogStore.js';
 import { dispatchRuntimeRequest } from '../../services/runtimeDispatch.js';
 import type { BuiltEndpointRequest } from '../orchestration/endpointFlow.js';
@@ -20,6 +22,7 @@ import { proxyChannelCoordinator } from '../../services/proxyChannelCoordinator.
 import { readRuntimeResponseText } from '../executors/types.js';
 import { selectProxyChannelForAttempt } from '../channelSelection.js';
 import { describeErrorWithCauses } from '../../services/errorMessageService.js';
+import { maybeSuppressClientSurfaceFromFailure } from '../../services/clientSurfaceSuppression.js';
 
 type SelectedChannel = Awaited<ReturnType<typeof tokenRouter.selectChannel>>;
 type SurfaceWarningScope = 'chat' | 'responses';
@@ -27,7 +30,7 @@ type SurfaceWarningScope = 'chat' | 'responses';
 type SurfaceSelectedChannel = {
   channel: { routeId: number | null; id: number };
   account: { id: number; username?: string | null };
-  site: { name?: string | null };
+  site: { name?: string | null; platform?: string | null };
   actualModel?: string | null;
 };
 
@@ -102,6 +105,14 @@ type SurfaceResolvedUsageSummary = {
   usageSource: 'upstream' | 'self-log' | 'unknown';
 };
 
+function inferSurfaceEndpointFromPath(path: string): UpstreamEndpoint | null {
+  const normalized = String(path || '').toLowerCase();
+  if (normalized.includes('/responses')) return 'responses';
+  if (normalized.includes('/chat/completions')) return 'chat';
+  if (normalized.includes('/messages')) return 'messages';
+  return null;
+}
+
 export async function selectSurfaceChannelForAttempt(input: {
   requestedModel: string;
   downstreamPolicy: DownstreamRoutingPolicy;
@@ -110,6 +121,10 @@ export async function selectSurfaceChannelForAttempt(input: {
   stickySessionKey?: string | null;
   forcedChannelId?: number | null;
   affinityPreferredChannelId?: number | null;
+  clientSurface?: {
+    endpoint: UpstreamEndpoint;
+    clientKind: CliProfileId;
+  } | null;
 }): Promise<SelectedChannel> {
   return await selectProxyChannelForAttempt(input);
 }
@@ -563,6 +578,34 @@ export function createSurfaceFailureToolkit(input: {
       });
   };
 
+  const maybeSuppressSelectedClientSurface = (args: {
+    selected: SurfaceSelectedChannel;
+    requestedModel: string;
+    status: number;
+    errorText: string | null;
+  }) => {
+    const endpoint = inferSurfaceEndpointFromPath(input.downstreamPath);
+    if (!endpoint) return;
+    const suppressed = maybeSuppressClientSurfaceFromFailure({
+      channelId: args.selected.channel.id,
+      endpoint,
+      clientKind: input.clientContext?.clientKind || 'generic',
+      model: args.requestedModel,
+      sitePlatform: args.selected.site.platform,
+      status: args.status,
+      errorText: args.errorText,
+    });
+    if (suppressed) {
+      console.warn('[proxy/surface] client surface suppressed', {
+        channelId: args.selected.channel.id,
+        endpoint,
+        clientKind: input.clientContext?.clientKind || 'generic',
+        model: args.requestedModel,
+        reason: 'upstream_blocked_generic_responses',
+      });
+    }
+  };
+
   return {
     log,
     async handleUpstreamFailure(args: {
@@ -578,6 +621,12 @@ export function createSurfaceFailureToolkit(input: {
       retryCount: number;
     }): Promise<SurfaceFailureOutcome> {
       const rawErrText = args.rawErrText || args.errText;
+      maybeSuppressSelectedClientSurface({
+        selected: args.selected,
+        requestedModel: args.requestedModel,
+        status: args.status,
+        errorText: rawErrText,
+      });
       await tokenRouter.recordFailure(args.selected.channel.id, {
         status: args.status,
         errorText: rawErrText,
@@ -645,6 +694,12 @@ export function createSurfaceFailureToolkit(input: {
       totalTokens?: number | null;
       upstreamPath?: string | null;
     }): Promise<SurfaceFailureOutcome> {
+      maybeSuppressSelectedClientSurface({
+        selected: args.selected,
+        requestedModel: args.requestedModel,
+        status: args.failure.status,
+        errorText: args.failure.reason,
+      });
       await tokenRouter.recordFailure(args.selected.channel.id, {
         status: args.failure.status,
         errorText: args.failure.reason,

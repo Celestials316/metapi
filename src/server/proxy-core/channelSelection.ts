@@ -6,6 +6,9 @@ import {
 import { canRetryProxyChannel } from '../services/proxyChannelRetry.js';
 import type { DownstreamRoutingPolicy } from '../services/downstreamPolicyTypes.js';
 import { tokenRouter } from '../services/tokenRouter.js';
+import { getSuppressedClientSurfaceChannelIds } from '../services/clientSurfaceSuppression.js';
+import type { CliProfileId } from './cliProfiles/types.js';
+import type { UpstreamEndpoint } from './orchestration/upstreamRequest.js';
 
 type SelectedChannel = Awaited<ReturnType<typeof tokenRouter.selectChannel>>;
 
@@ -97,8 +100,23 @@ export async function selectProxyChannelForAttempt(input: {
   stickySessionKey?: string | null;
   forcedChannelId?: number | null;
   affinityPreferredChannelId?: number | null;
+  clientSurface?: {
+    endpoint: UpstreamEndpoint;
+    clientKind: CliProfileId;
+  } | null;
 }): Promise<SelectedChannel> {
   await ensureProxyChannelCoordinatorStateLoaded();
+  const surfaceSuppressedChannelIds = input.clientSurface
+    ? getSuppressedClientSurfaceChannelIds({
+      endpoint: input.clientSurface.endpoint,
+      clientKind: input.clientSurface.clientKind,
+      model: input.requestedModel,
+    })
+    : [];
+  const effectiveExcludeChannelIds = Array.from(new Set([
+    ...input.excludeChannelIds,
+    ...surfaceSuppressedChannelIds,
+  ]));
   const normalizedForcedChannelId = normalizeForcedChannelId(input.forcedChannelId);
   if (normalizedForcedChannelId !== null) {
     if (input.retryCount > 0) return null;
@@ -106,7 +124,7 @@ export async function selectProxyChannelForAttempt(input: {
       input.requestedModel,
       normalizedForcedChannelId,
       input.downstreamPolicy,
-      input.excludeChannelIds,
+      effectiveExcludeChannelIds,
     );
   }
 
@@ -134,12 +152,12 @@ export async function selectProxyChannelForAttempt(input: {
       );
       if (hasManualDispatchPreference) {
         proxyChannelCoordinator.clearStickyChannel(input.stickySessionKey, preferredChannelId);
-      } else if (!input.excludeChannelIds.includes(preferredChannelId)) {
+      } else if (!effectiveExcludeChannelIds.includes(preferredChannelId)) {
         selected = await tokenRouter.selectPreferredChannel(
           input.requestedModel,
           preferredChannelId,
           input.downstreamPolicy,
-          input.excludeChannelIds,
+          effectiveExcludeChannelIds,
         );
         if (!selected) {
           const refreshSucceeded = await refreshRoutesForFirstAttempt();
@@ -147,7 +165,7 @@ export async function selectProxyChannelForAttempt(input: {
             input.requestedModel,
             preferredChannelId,
             input.downstreamPolicy,
-            input.excludeChannelIds,
+            effectiveExcludeChannelIds,
           );
           if (!selected && refreshSucceeded) {
             proxyChannelCoordinator.clearStickyChannel(input.stickySessionKey, preferredChannelId);
@@ -162,29 +180,35 @@ export async function selectProxyChannelForAttempt(input: {
     !selected
     && input.retryCount === 0
     && normalizedAffinityPreferredChannelId !== null
-    && !input.excludeChannelIds.includes(normalizedAffinityPreferredChannelId)
+    && !effectiveExcludeChannelIds.includes(normalizedAffinityPreferredChannelId)
   ) {
     selected = await tokenRouter.selectPreferredChannel(
       input.requestedModel,
       normalizedAffinityPreferredChannelId,
       input.downstreamPolicy,
-      input.excludeChannelIds,
+      effectiveExcludeChannelIds,
     );
   }
 
   if (!selected) {
-    selected = input.retryCount === 0
+    selected = input.retryCount === 0 && effectiveExcludeChannelIds.length === 0
       ? await tokenRouter.selectChannel(input.requestedModel, input.downstreamPolicy)
       : await tokenRouter.selectNextChannel(
         input.requestedModel,
-        input.excludeChannelIds,
+        effectiveExcludeChannelIds,
         input.downstreamPolicy,
       );
   }
 
   if (!selected && input.retryCount === 0 && !refreshedRoutes) {
     await refreshRoutesForFirstAttempt();
-    selected = await tokenRouter.selectChannel(input.requestedModel, input.downstreamPolicy);
+    selected = effectiveExcludeChannelIds.length === 0
+      ? await tokenRouter.selectChannel(input.requestedModel, input.downstreamPolicy)
+      : await tokenRouter.selectNextChannel(
+        input.requestedModel,
+        effectiveExcludeChannelIds,
+        input.downstreamPolicy,
+      );
   }
 
   return selected;
