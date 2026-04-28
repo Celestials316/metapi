@@ -1124,6 +1124,62 @@ describe('responses proxy codex oauth refresh', () => {
     expect(secondBody.input).toEqual(firstBody.input);
   });
 
+  it('drops HTTP-only previous_response_id and retries when upstream requires Responses WebSocket v2', async () => {
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        error: {
+          message: 'previous_response_id is only supported on Responses WebSocket v2',
+          type: 'invalid_request_error',
+        },
+      }), {
+        status: 400,
+        headers: { 'content-type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        id: 'resp_codex_ws_v2_recovered',
+        object: 'response',
+        model: 'gpt-5.2-codex',
+        status: 'completed',
+        output_text: 'recovered after dropping HTTP previous_response_id',
+        usage: { input_tokens: 5, output_tokens: 2, total_tokens: 7 },
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/responses',
+      headers: {
+        session_id: 'session-http-prev-ws-v2-only',
+      },
+      payload: {
+        model: 'gpt-5.2-codex',
+        previous_response_id: 'resp_http_unsupported',
+        input: [
+          {
+            id: 'tool_out_ws_v2_1',
+            type: 'function_call_output',
+            call_id: 'call_ws_v2_1',
+            output: '{"retry":true}',
+          },
+        ],
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    const [, firstOptions] = fetchMock.mock.calls[0] as [string, any];
+    const [, secondOptions] = fetchMock.mock.calls[1] as [string, any];
+    const firstBody = JSON.parse(firstOptions.body);
+    const secondBody = JSON.parse(secondOptions.body);
+
+    expect(firstBody.previous_response_id).toBe('resp_http_unsupported');
+    expect(secondBody.previous_response_id).toBeUndefined();
+    expect(secondBody.input).toEqual(firstBody.input);
+  });
+
   it('strips generic downstream headers before forwarding codex responses upstream', async () => {
     fetchMock.mockResolvedValue(new Response(JSON.stringify({
       id: 'resp_codex_header_filter',

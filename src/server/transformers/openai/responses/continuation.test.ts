@@ -137,6 +137,10 @@ describe('responses continuation helpers', () => {
     })).toBe(true);
 
     expect(isResponsesPreviousResponseNotFoundError({
+      rawErrText: 'previous_response_id is only supported on Responses WebSocket v2',
+    })).toBe(true);
+
+    expect(isResponsesPreviousResponseNotFoundError({
       rawErrText: JSON.stringify({
         error: {
           code: 'rate_limit_exceeded',

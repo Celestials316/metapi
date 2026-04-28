@@ -184,6 +184,7 @@ export function isResponsesPreviousResponseNotFoundError(input: {
   return (
     combined.includes('previous_response_not_found')
     || /previous[\s_-]*response(?:[\s_-]*(?:id|identifier))?[\s_-]*not[\s_-]*found/i.test(combined)
+    || /previous[\s_-]*response[\s_-]*id\s+is\s+only\s+supported\s+on\s+responses\s+websocket\s+v2/i.test(combined)
   );
 }
 
