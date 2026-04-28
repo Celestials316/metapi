@@ -140,6 +140,7 @@ export function shouldRetryResponsesCompatibility(input: {
   const message = parsedError.message.trim().toLowerCase();
   const compact = `${type} ${code} ${message}`.trim();
   const rawCompact = (input.rawErrText || '').toLowerCase();
+  const classificationText = `${compact} ${rawCompact.replace(/\\"/g, '"')}`.trim();
 
   if (
     compact.includes('invalid_api_key')
@@ -152,11 +153,15 @@ export function shouldRetryResponsesCompatibility(input: {
     return false;
   }
 
+  if (isUnrecoverableResponsesRequestShape(classificationText)) return false;
+
+  if (isTransientOpenAiResponses400(compact, classificationText)) return true;
+
   if (type === 'upstream_error' || code === 'upstream_error') return true;
   if (message === 'upstream_error' || message === 'upstream request failed') return true;
   if (rawCompact.includes('upstream_error')) return true;
 
-  return true;
+  return isLocallyCorrectableResponsesParameterError(classificationText);
 }
 
 export function shouldDowngradeResponsesChatToMessages(
@@ -171,6 +176,68 @@ export function shouldDowngradeResponsesChatToMessages(
 
 function toFiniteNumber(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+const LOCALLY_CORRECTABLE_RESPONSES_PARAMETER_NAMES = new Set([
+  'audio',
+  'background',
+  'include',
+  'max_output_tokens',
+  'max_tool_calls',
+  'max_tokens',
+  'metadata',
+  'modalities',
+  'parallel_tool_calls',
+  'prompt_cache_key',
+  'prompt_cache_retention',
+  'reasoning',
+  'safety_identifier',
+  'service_tier',
+  'stream_options',
+  'temperature',
+  'text',
+  'top_logprobs',
+  'top_p',
+  'truncation',
+  'user',
+]);
+
+function isTransientOpenAiResponses400(compact: string, rawCompact: string): boolean {
+  return compact.includes('transient')
+    || rawCompact.includes('an error occurred while processing your request')
+    || rawCompact.includes('you can retry your request')
+    || rawCompact.includes('please retry your request')
+    || rawCompact.includes('temporarily unavailable');
+}
+
+function isUnrecoverableResponsesRequestShape(rawCompact: string): boolean {
+  return rawCompact.includes('store must be set to false')
+    || rawCompact.includes('blocked_invalid_request')
+    || rawCompact.includes('request validation failed')
+    || /missing required parameter:\s*['"]?input\[[^\]]+\]\.(?:call_id|content)['"]?/i.test(rawCompact)
+    || /invalid\s+['"]?input\[[^\]]+\]\.(?:call_id|content)['"]?/i.test(rawCompact)
+    || rawCompact.includes('function_call_output requires call_id')
+    || rawCompact.includes('requires call_id or previous_response_id')
+    || rawCompact.includes('no tool call found for function call output');
+}
+
+function isLocallyCorrectableResponsesParameterError(rawCompact: string): boolean {
+  const parameterName = extractResponsesParameterErrorName(rawCompact);
+  return !!parameterName && LOCALLY_CORRECTABLE_RESPONSES_PARAMETER_NAMES.has(parameterName);
+}
+
+function extractResponsesParameterErrorName(rawCompact: string): string | null {
+  const match = rawCompact.match(/(?:unknown|unsupported|unrecognized)\s+parameter:?\s*(?:['"]([^'"]+)['"]|([a-z0-9_.[\]-]+))/i);
+  const rawName = (match?.[1] ?? match?.[2])?.trim().toLowerCase();
+  if (!rawName) return null;
+  const parameterName = rawName
+    .replace(/[.,;:)]+$/g, '')
+    .replace(/^body\./, '')
+    .replace(/^request\./, '')
+    .replace(/[.,;:)]+$/g, '');
+  if (!parameterName) return null;
+  if (/^input\[\d+\]\./.test(parameterName)) return null;
+  return parameterName;
 }
 
 function cloneJsonValue<T>(value: T): T {
@@ -198,7 +265,11 @@ function parseUpstreamErrorShape(rawText: string): {
     return {
       type: typeof error.type === 'string' ? error.type.trim().toLowerCase() : '',
       code: typeof error.code === 'string' ? error.code.trim().toLowerCase() : '',
-      message: typeof error.message === 'string' ? error.message.trim() : '',
+      message: typeof error.message === 'string'
+        ? error.message.trim()
+        : typeof error.detail === 'string'
+          ? error.detail.trim()
+          : '',
     };
   } catch {
     return { type: '', code: '', message: '' };

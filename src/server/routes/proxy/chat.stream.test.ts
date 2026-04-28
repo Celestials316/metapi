@@ -1967,11 +1967,11 @@ describe('chat proxy stream behavior', () => {
     });
   });
 
-  it('retries generic 400 /v1/responses with minimal headers for strict compatibility fallback', async () => {
+  it('retries locally correctable 400 /v1/responses with minimal headers for strict compatibility fallback', async () => {
     fetchMock
       .mockResolvedValueOnce(new Response(JSON.stringify({
         error: {
-          message: 'request validation failed',
+          message: "Unknown parameter: 'include'.",
           type: 'invalid_request_error',
         },
       }), {
@@ -1980,7 +1980,7 @@ describe('chat proxy stream behavior', () => {
       }))
       .mockResolvedValueOnce(new Response(JSON.stringify({
         error: {
-          message: 'request validation failed',
+          message: "Unknown parameter: 'include'.",
           type: 'invalid_request_error',
         },
       }), {
@@ -1989,7 +1989,7 @@ describe('chat proxy stream behavior', () => {
       }))
       .mockResolvedValueOnce(new Response(JSON.stringify({
         error: {
-          message: 'request validation failed',
+          message: "Unknown parameter: 'include'.",
           type: 'invalid_request_error',
         },
       }), {

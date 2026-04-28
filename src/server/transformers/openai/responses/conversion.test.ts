@@ -11,6 +11,7 @@ import {
   normalizeResponsesInputForCompatibility as normalizeResponsesInputForCompatibilityViaCompatibility,
   normalizeResponsesMessageContent as normalizeResponsesMessageContentViaCompatibility,
   sanitizeResponsesBodyForProxy as sanitizeResponsesBodyForProxyViaCompatibility,
+  shouldRetryResponsesCompatibility,
 } from './compatibility.js';
 import {
   normalizeResponsesInputForCompatibility,
@@ -1593,6 +1594,100 @@ describe('convertResponsesBodyToOpenAiBody', () => {
         ],
       },
     ]);
+  });
+
+  it('does not retry unrecoverable Codex request-shape 400 responses', () => {
+    expect(shouldRetryResponsesCompatibility({
+      endpoint: 'responses',
+      status: 400,
+      rawErrText: '{"detail":"Store must be set to false"}',
+    })).toBe(false);
+
+    expect(shouldRetryResponsesCompatibility({
+      endpoint: 'responses',
+      status: 400,
+      rawErrText: '{"error":{"type":"upstream_error","message":"Store must be set to false"}}',
+    })).toBe(false);
+
+    expect(shouldRetryResponsesCompatibility({
+      endpoint: 'responses',
+      status: 400,
+      rawErrText: '{"error":{"type":"upstream_error","message":"blocked_invalid_request: request body matches a previously blocked invalid request"}}',
+    })).toBe(false);
+
+    expect(shouldRetryResponsesCompatibility({
+      endpoint: 'responses',
+      status: 400,
+      rawErrText: '{"error":{"type":"upstream_error","message":"Missing required parameter: \\"input[2].call_id\\"."}}',
+    })).toBe(false);
+
+    expect(shouldRetryResponsesCompatibility({
+      endpoint: 'responses',
+      status: 400,
+      rawErrText: "Missing required parameter: 'input[2].call_id'.",
+    })).toBe(false);
+
+    expect(shouldRetryResponsesCompatibility({
+      endpoint: 'responses',
+      status: 400,
+      rawErrText: '{"error":{"type":"upstream_error","message":"request validation failed"}}',
+    })).toBe(false);
+
+    expect(shouldRetryResponsesCompatibility({
+      endpoint: 'responses',
+      status: 400,
+      rawErrText: '{"error":{"type":"invalid_request_error","message":"request validation failed"}}',
+    })).toBe(false);
+  });
+
+  it('still retries transient or locally correctable responses compatibility failures', () => {
+    expect(shouldRetryResponsesCompatibility({
+      endpoint: 'responses',
+      status: 400,
+      rawErrText: '{"error":{"type":"transient_error","message":"temporary upstream issue"}}',
+    })).toBe(true);
+
+    expect(shouldRetryResponsesCompatibility({
+      endpoint: 'responses',
+      status: 400,
+      rawErrText: "Unknown parameter: 'metadata'.",
+    })).toBe(true);
+
+    expect(shouldRetryResponsesCompatibility({
+      endpoint: 'responses',
+      status: 400,
+      rawErrText: 'Unknown parameter: include',
+    })).toBe(true);
+
+    expect(shouldRetryResponsesCompatibility({
+      endpoint: 'responses',
+      status: 400,
+      rawErrText: 'Unknown parameter: include.',
+    })).toBe(true);
+
+    expect(shouldRetryResponsesCompatibility({
+      endpoint: 'responses',
+      status: 400,
+      rawErrText: 'Unknown parameter: body.include.',
+    })).toBe(true);
+
+    expect(shouldRetryResponsesCompatibility({
+      endpoint: 'responses',
+      status: 400,
+      rawErrText: '{"error":{"type":"invalid_request_error","message":"Unknown parameter: \\"include\\"."}}',
+    })).toBe(true);
+
+    expect(shouldRetryResponsesCompatibility({
+      endpoint: 'responses',
+      status: 400,
+      rawErrText: 'Unsupported parameter: prompt_cache_retention',
+    })).toBe(true);
+
+    expect(shouldRetryResponsesCompatibility({
+      endpoint: 'responses',
+      status: 400,
+      rawErrText: 'Unsupported parameter: prompt_cache_retention.',
+    })).toBe(true);
   });
 
   it('keeps richer field parity on compatibility retry bodies when metadata is absent', () => {
